@@ -19,6 +19,14 @@ A standalone Rust program on the host reads the sensors straight from the OS (no
 
 End users only need the desktop app installer, from the [latest release](https://github.com/EttoreCaputo/esp32s3-dualeye-pcmonitor/releases/latest) (Windows, macOS, Linux; the firmware is inside); everything below the app section is for working on the source (see [Building from source](#building-from-source)).
 
+<p align="center">
+  <img src="assets/image-1.png" alt="DualEye desktop app: live mirror of both round screens with CPU/GPU history" width="720">
+</p>
+
+<p align="center">
+  <img src="assets/image-2.png" alt="Display settings: pick a watch face and rotation per screen" width="720">
+</p>
+
 **Stack:** ESP-IDF ≥ 5.4 · [lvgl/lvgl](https://components.espressif.com/components/lvgl/lvgl) `9.3.0` · [espressif/esp_lcd_gc9a01](https://components.espressif.com/components/espressif/esp_lcd_gc9a01) `^2.0.4` · Rust (sysinfo, nvml-wrapper, serialport)
 
 ## Host bridge
