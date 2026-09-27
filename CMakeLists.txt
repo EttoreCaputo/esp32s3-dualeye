@@ -3,4 +3,5 @@
 cmake_minimum_required(VERSION 3.22)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Copyright (c) 2026 Ettore Caputo — MIT License (see LICENSE)
 project(esp32s3-dualeye-pcmonitor)

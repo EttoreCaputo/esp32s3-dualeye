@@ -3,6 +3,9 @@ name = "dualeye-cli"
 version = "0.1.0"
 edition = "2024"
 description = "Stream PC sensors to the ESP32-S3 DualEye board over USB"
+authors = ["Ettore Caputo <ettore.caputo27@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/EttoreCaputo/esp32s3-dualeye"
 
 [[bin]]
 name = "dualeye"

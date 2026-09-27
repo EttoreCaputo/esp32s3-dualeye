@@ -5,6 +5,7 @@
 ![LVGL](https://img.shields.io/badge/LVGL-9.3.0-orange)
 ![LCD](https://img.shields.io/badge/LCD-GC9A01%20×2-lightgrey)
 ![Host](https://img.shields.io/badge/host-Rust-purple)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 PC monitoring on **ESP32-S3 DualEye** (two 240×240 round displays): CPU/GPU temperatures, load, fans, RAM and VRAM, plus Claude Code usage with its mascot, on Apple Watch–style faces you pick per screen.
 
@@ -274,3 +275,7 @@ Parsed by `main/metrics_parser.c`; lines without any temperature are ignored, an
 ```
 
 `tok` and `today` are tokens in the 5-hour window and since local midnight, `left_min` the minutes until the window resets, `s_pct` / `w_pct` the 5-hour and weekly limits used (only with the status line connected), `state` one of `work`, `idle`, `sleep`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

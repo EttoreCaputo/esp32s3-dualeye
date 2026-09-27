@@ -3,6 +3,9 @@ name = "dualeye-core"
 version = "0.1.0"
 edition = "2024"
 description = "Reads CPU/GPU/fan sensors and streams them to the ESP32-S3 DualEye board"
+authors = ["Ettore Caputo <ettore.caputo27@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/EttoreCaputo/esp32s3-dualeye"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

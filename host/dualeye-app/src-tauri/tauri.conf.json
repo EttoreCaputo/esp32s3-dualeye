@@ -31,6 +31,11 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
+    "publisher": "Ettore Caputo",
+    "copyright": "Copyright (c) 2026 Ettore Caputo",
+    "license": "MIT",
+    "licenseFile": "../../../LICENSE",
+    "homepage": "https://github.com/EttoreCaputo/esp32s3-dualeye",
     "shortDescription": "Mirror and feed the ESP32-S3 DualEye PC monitor",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
   }

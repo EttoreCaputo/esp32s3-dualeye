@@ -1,6 +1,13 @@
 {
   "name": "dualeye-app",
   "version": "0.1.0",
+  "description": "Desktop app for the ESP32-S3 DualEye",
+  "author": "Ettore Caputo <ettore.caputo27@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EttoreCaputo/esp32s3-dualeye.git"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -3,6 +3,9 @@ name = "dualeye-app"
 version = "0.1.0"
 edition = "2024"
 description = "Desktop app for the ESP32-S3 DualEye PC monitor"
+authors = ["Ettore Caputo <ettore.caputo27@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/EttoreCaputo/esp32s3-dualeye"
 
 [lib]
 name = "dualeye_app_lib"
