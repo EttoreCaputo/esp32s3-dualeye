@@ -23,6 +23,9 @@
   // The face the board is on: from the last line it got, classic until the first one.
   const screen = (id: DeviceId) =>
     screenFor(id, shown?.face?.[id] ?? "classic", shown?.[id], board === "stale", board === "waiting", fanRpm(shown, id), shown?.claude);
+  // A line without `rot` turns both screens upright. Before the first line the
+  // board keeps its last rotation, which normally is the one picked here.
+  const rotation = $derived(shown ? { cpu: shown.rot?.cpu ?? 0, gpu: shown.rot?.gpu ?? 0 } : monitor.rotation);
   const glow = (id: DeviceId) => {
     const m = shown?.[id];
     const active = (board === "live" || board === "stale") && m?.temp_c !== undefined;
@@ -59,7 +62,7 @@
 
   <section class="hero" bind:clientWidth={heroW}>
     <div class="board" class:off={board === "off"}>
-      <Board cpu={screen("cpu")} gpu={screen("gpu")} {board} {size} cpuGlow={glow("cpu")} gpuGlow={glow("gpu")} {pixels} />
+      <Board cpu={screen("cpu")} gpu={screen("gpu")} {board} {size} cpuGlow={glow("cpu")} gpuGlow={glow("gpu")} {pixels} {rotation} />
     </div>
 
     <div class="caption">

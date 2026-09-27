@@ -31,6 +31,7 @@ cargo run --release              # auto-detects the board (USB 303a:xxxx) and st
 cargo run --release -- --once    # print one snapshot, no serial
 cargo run --release -- --sensors # every raw sensor the backends can see
 cargo run --release -- --cpu-face rings --gpu-face plus
+cargo run --release -- --cpu-rotation 180 --gpu-rotation 180   # board upside down
 cargo run --release -- --help
 ```
 
@@ -78,6 +79,10 @@ Each screen shows one of six faces, chosen independently (left = CPU, right = GP
 | `clawd` | Claude Code's mascot, large and animated: walks while Claude works, blinks when idle, sleeps after 30 min; model name, state and tokens in the window |
 
 Pick them in the app (Settings → **Display**, saved across restarts) or with `--cpu-face` / `--gpu-face` on the CLI. The host sends the choice in every line, so the board switches on the next snapshot and needs no storage of its own; a line without `face` shows `classic`.
+
+### Rotation
+
+If the board sits another way round (upside down, on its side), turn each screen by 0°, 90°, 180° or 270° clockwise: in the app under Settings → **Display** (the mirror stays upright and marks a turned screen with a badge), or with `--cpu-rotation` / `--gpu-rotation` on the CLI. The panel itself is turned (GC9A01 MADCTL), so it costs no frame time. The board keeps the last rotation it got in NVS, so it boots the right way round before the host connects; a line without `rot` turns it upright.
 
 ### Claude Code faces
 
@@ -195,6 +200,10 @@ Each screen shows one of six faces, chosen independently (left = CPU, right = GP
 
 Pick them in the app (Settings → **Display**, saved across restarts) or with `--cpu-face` / `--gpu-face` on the CLI. The host sends the choice in every line, so the board switches on the next snapshot and needs no storage of its own; a line without `face` shows `classic`.
 
+### Rotation
+
+If the board sits another way round (upside down, on its side), turn each screen by 0°, 90°, 180° or 270° clockwise: in the app under Settings → **Display** (the mirror stays upright and marks a turned screen with a badge), or with `--cpu-rotation` / `--gpu-rotation` on the CLI. The panel itself is turned (GC9A01 MADCTL), so it costs no frame time. The board keeps the last rotation it got in NVS, so it boots the right way round before the host connects; a line without `rot` turns it upright.
+
 ## Desktop app
 
 ```bash
@@ -250,7 +259,7 @@ cd host/dualeye-app && npm run check
 {"v":1,"ts":1790419114,"cpu":{"temp_c":40.2,"load_pct":2.8,"clock_mhz":1210,"power_w":14.6,"mem":{"used_mb":12568,"total_mb":62277}},"gpu":{"temp_c":35.0,"load_pct":0.0,"clock_mhz":210,"power_w":22.1,"mem":{"used_mb":14,"total_mb":24576}},"fans":[{"id":"cpu","rpm":3824},{"id":"gpu","rpm":0}],"face":{"cpu":"rings","gpu":"plus"}}
 ```
 
-Parsed by `main/metrics_parser.c`; lines without any temperature are ignored, and the UI goes stale after 3 s without data. `mem` is in MiB: system RAM under `cpu`, VRAM under `gpu`. `face` is added by the bridge, not the sensor collector; unknown face names fall back to `classic`. So is `claude`, when Claude Code has run on this machine:
+Parsed by `main/metrics_parser.c`; lines without any temperature are ignored, and the UI goes stale after 3 s without data. `mem` is in MiB: system RAM under `cpu`, VRAM under `gpu`. `face` is added by the bridge, not the sensor collector; unknown face names fall back to `classic`. The bridge also adds `"rot":{"cpu":180,"gpu":0}` when a screen is turned (degrees clockwise; anything else reads as 0). So is `claude`, when Claude Code has run on this machine:
 
 ```json
 "claude":{"tok":1234567,"today":4500000,"left_min":133,"s_pct":42.0,"w_pct":18.0,"state":"work","model":"OPUS 5.5"}

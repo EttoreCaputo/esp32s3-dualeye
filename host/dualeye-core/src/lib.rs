@@ -22,4 +22,4 @@ pub use firmware::{BoardFirmware, ImageInfo};
 pub use flasher::{ChipInfo, Esptool, FlashEvent};
 pub use sensors::{Collector, Reading};
 pub use serial::PortInfo;
-pub use snapshot::{DeviceMetrics, Face, Faces, Fan, Memory, Snapshot};
+pub use snapshot::{DeviceMetrics, Face, Faces, Fan, Memory, Rotation, Rotations, Snapshot};

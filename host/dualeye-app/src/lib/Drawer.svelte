@@ -2,7 +2,7 @@
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import Eye from "./Eye.svelte";
-  import { DEVICES, FACES, formatTokens, isClaudeFace, screenFor, type DeviceId, type Face } from "./firmware";
+  import { DEVICES, FACES, ROTATIONS, formatTokens, isClaudeFace, screenFor, type DeviceId, type Face, type Rotation } from "./firmware";
   import { fanRpm, monitor, type ClaudeLink, type FirmwareInfo, type PortInfo, type Reading } from "./monitor.svelte";
 
   type Tab = "connection" | "display" | "device" | "sensors" | "console";
@@ -139,6 +139,7 @@
   // Thumbnails use the host's latest sample, so they have data even with no board attached.
   const preview = (id: DeviceId, face: Face) => screenFor(id, face, monitor.last?.[id], false, false, fanRpm(monitor.last, id), monitor.last?.claude);
   const pick = (id: DeviceId, face: Face) => monitor.setFaces({ ...monitor.faces, [id]: face });
+  const turn = (id: DeviceId, rotation: Rotation) => monitor.setRotation({ ...monitor.rotation, [id]: rotation });
 
   const hex = (n: number) => n.toString(16).padStart(4, "0");
   const kb = (n: number) => `${Math.round(n / 1024)} KB`;
@@ -203,7 +204,10 @@
           </dl>
         </section>
       {:else if tab === "display"}
-        <p class="hint">Pick a watch face for each screen. The board switches with the next frame it gets, and the choice is kept.</p>
+        <p class="hint">
+          Pick a watch face for each screen, and turn it if the board sits another way round. The board switches with the next
+          frame it gets, and the choice is kept.
+        </p>
         {#each SCREENS as [id, side] (id)}
           {@const current = monitor.faces[id]}
           <section style:--accent={DEVICES[id].accent}>
@@ -224,6 +228,27 @@
               {/each}
             </div>
             <p class="fblurb">{FACES.find((f) => f.id === current)?.blurb}</p>
+            <div class="rotation">
+              <span class="rlabel">Rotation</span>
+              <div class="rots" role="radiogroup" aria-label="{side} rotation">
+                {#each ROTATIONS as deg (deg)}
+                  <button
+                    class="rot"
+                    class:checked={monitor.rotation[id] === deg}
+                    role="radio"
+                    aria-checked={monitor.rotation[id] === deg}
+                    title={deg === 0 ? "Upright" : `Turned ${deg}° clockwise`}
+                    onclick={() => turn(id, deg)}
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true" style:rotate="{deg}deg">
+                      <circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.3" opacity="0.45" />
+                      <path d="M8 3.2 L10.4 6.6 H5.6 Z" fill="currentColor" />
+                    </svg>
+                    {deg}°
+                  </button>
+                {/each}
+              </div>
+            </div>
           </section>
         {/each}
 
@@ -614,6 +639,56 @@
     margin: 10px 0 0;
     font: 400 12px/1.4 var(--sans);
     color: var(--faint);
+  }
+
+  .rotation {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+  }
+  .rlabel {
+    font: 550 12px/1 var(--sans);
+    color: var(--dim);
+  }
+  .rots {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 3px;
+    padding: 3px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .rot {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 9px;
+    border: 0;
+    border-radius: 7px;
+    background: none;
+    color: var(--faint);
+    font: 550 11px/1 var(--mono);
+    cursor: pointer;
+    transition:
+      background 200ms,
+      color 200ms;
+  }
+  .rot svg {
+    width: 12px;
+    height: 12px;
+  }
+  .rot:hover {
+    color: var(--dim);
+  }
+  .rot.checked {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--text);
+  }
+  .rot:focus-visible {
+    outline: 1.5px solid var(--accent);
   }
 
   .claude.dimmed {

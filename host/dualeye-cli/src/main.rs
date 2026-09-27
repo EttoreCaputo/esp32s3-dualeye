@@ -6,6 +6,7 @@
 //!   dualeye --once          # print one snapshot, no serial
 //!   dualeye --sensors       # list every raw sensor the backends see
 //!   dualeye --cpu-face rings --gpu-face claude
+//!   dualeye --cpu-rotation 180    # a board mounted upside down
 //!   dualeye --claude-statusline   # Claude Code status line helper (reads stdin)
 
 use std::process::ExitCode;
@@ -17,7 +18,7 @@ use std::time::Duration;
 use clap::Parser;
 use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
 use dualeye_core::claude::statusline;
-use dualeye_core::{BoardFirmware, ClaudeUsage, Collector, Face, Faces, Memory, Snapshot, serial};
+use dualeye_core::{BoardFirmware, ClaudeUsage, Collector, Face, Faces, Memory, Rotation, Rotations, Snapshot, serial};
 
 #[derive(Parser)]
 #[command(name = "dualeye", version, about = "Stream PC sensors to the ESP32-S3 DualEye board")]
@@ -37,6 +38,12 @@ struct Args {
     /// Watch face on the right (GPU) screen: classic, rings, plus, bar, claude or clawd
     #[arg(long, default_value = "classic")]
     gpu_face: Face,
+    /// Turn the left (CPU) screen clockwise: 0, 90, 180 or 270 degrees
+    #[arg(long, default_value = "0")]
+    cpu_rotation: Rotation,
+    /// Turn the right (GPU) screen clockwise: 0, 90, 180 or 270 degrees
+    #[arg(long, default_value = "0")]
+    gpu_rotation: Rotation,
     /// Print one snapshot as JSON and exit, without opening the port
     #[arg(long, conflicts_with_all = ["sensors", "list_ports"])]
     once: bool,
@@ -92,6 +99,7 @@ fn main() -> ExitCode {
         interval: Duration::from_millis(args.interval_ms),
         boot_wait: Duration::from_secs_f64(args.boot_wait.max(0.0)),
         faces: Arc::new(Mutex::new(Faces { cpu: args.cpu_face, gpu: args.gpu_face })),
+        rotation: Arc::new(Mutex::new(Rotations { cpu: args.cpu_rotation, gpu: args.gpu_rotation })),
     };
     let stop = Arc::new(AtomicBool::new(false));
     let fatal = Arc::new(AtomicBool::new(false));

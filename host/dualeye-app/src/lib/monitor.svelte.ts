@@ -6,7 +6,7 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DEFAULT_FACES, type Faces } from "./firmware";
+import { DEFAULT_FACES, DEFAULT_ROTATIONS, type Faces, type Rotations } from "./firmware";
 import { updateFor, type Update } from "./updates";
 import bundledVersion from "../../../../version.txt?raw";
 
@@ -26,7 +26,7 @@ export type ClaudeMetrics = {
   model?: string;
 };
 export type ClaudeLink = { connected: boolean; chained: string | null; last_update_s: number | null; settings_path: string | null };
-export type Snapshot = { v: number; ts: number; cpu?: Metrics; gpu?: Metrics; fans?: Fan[]; face?: Faces; claude?: ClaudeMetrics };
+export type Snapshot = { v: number; ts: number; cpu?: Metrics; gpu?: Metrics; fans?: Fan[]; face?: Faces; rot?: Rotations; claude?: ClaudeMetrics };
 export type PortInfo = { name: string; vid: number; pid: number; product: string | null; is_board: boolean };
 export type Reading = { source: string; label: string; value: number; unit: string };
 export type Esptool = { python: string; version: string };
@@ -71,6 +71,7 @@ type Status = {
   logs: string[];
   port_setting: string | null;
   faces: Faces;
+  rotation: Rotations;
 };
 
 export type Link = "searching" | "connected" | "offline";
@@ -104,6 +105,8 @@ class Monitor {
   logs = $state<string[]>([]);
   /** Faces picked in the app; the board switches with the next line it gets. */
   faces = $state<Faces>({ ...DEFAULT_FACES });
+  /** How each screen is turned; also applies from the next line. */
+  rotation = $state<Rotations>({ ...DEFAULT_ROTATIONS });
 
   job = $state<DeviceJob>("idle");
   /** Output of the last esptool run. */
@@ -134,7 +137,7 @@ class Monitor {
     if (this.#started) return;
     this.#started = true;
     setInterval(() => (this.now = Date.now()), 250);
-    if (this.preview) startPreviewFeed((e) => this.#apply(e), () => this.faces);
+    if (this.preview) startPreviewFeed((e) => this.#apply(e), () => this.faces, () => this.rotation);
     else void this.#connect();
     void this.firmwareInfo();
   }
@@ -148,6 +151,7 @@ class Monitor {
     this.port = s.port;
     this.portSetting = s.port_setting;
     this.faces = s.faces;
+    this.rotation = s.rotation;
     this.message = s.message ?? "";
     this.last = s.last;
     this.shown = s.sent;
@@ -271,6 +275,11 @@ class Monitor {
     if (!this.preview) await invoke("set_faces", { faces });
   }
 
+  async setRotation(rotation: Rotations) {
+    this.rotation = rotation;
+    if (!this.preview) await invoke("set_rotation", { rotation });
+  }
+
   async claudeLink(): Promise<ClaudeLink> {
     if (this.preview) return previewClaudeLink;
     return invoke<ClaudeLink>("claude_link");
@@ -300,7 +309,7 @@ export function fanRpm(s: Snapshot | null, id: string): number | undefined {
 
 let previewClaudeLink: ClaudeLink = { connected: false, chained: null, last_update_s: null, settings_path: "~/.claude/settings.json" };
 
-function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces) {
+function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, rotation: () => Rotations) {
   const boot = [
     "ESP-ROM:esp32s3-20210327",
     "I (24) boot: ESP-IDF v6.1 2nd stage bootloader",
@@ -345,6 +354,8 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces) {
           { id: "gpu", rpm: gpuLoad > 25 ? Math.round(900 + gpuLoad * 14) : 0 },
         ],
         face: { ...faces() },
+        // Like the bridge: left out when both screens are upright.
+        ...(rotation().cpu || rotation().gpu ? { rot: { ...rotation() } } : {}),
         // Claude works in bursts and naps between them.
         claude: {
           tok: Math.round(820_000 + t * 2400),

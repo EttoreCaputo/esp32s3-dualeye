@@ -50,6 +50,11 @@ export const FACES: { id: Face; name: string; blurb: string }[] = [
   { id: "claude", name: "Claude", blurb: "Claude Code's 5-hour and weekly limits, with Clawd" },
   { id: "clawd", name: "Clawd", blurb: "Clawd shows whether Claude Code is working" },
 ];
+/** Extra clockwise turn of a screen, in degrees; `rot` on the wire. */
+export type Rotation = 0 | 90 | 180 | 270;
+export type Rotations = Record<DeviceId, Rotation>;
+export const DEFAULT_ROTATIONS: Rotations = { cpu: 0, gpu: 0 };
+export const ROTATIONS: Rotation[] = [0, 90, 180, 270];
 export const isClaudeFace = (face: Face): face is "claude" | "clawd" => face === "claude" || face === "clawd";
 
 /** `ui_classic_layout_t` for the classic-based faces; no bar when `barW` is 0. */

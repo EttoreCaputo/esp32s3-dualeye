@@ -105,6 +105,75 @@ fn face_or_classic<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Face, D::Er
     Ok(String::deserialize(d)?.parse().unwrap_or_default())
 }
 
+/// Extra clockwise turn of one screen on top of the DualEye mounting, for a
+/// board that sits another way round. On the wire, in degrees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(into = "u16")]
+pub enum Rotation {
+    #[default]
+    R0,
+    R90,
+    R180,
+    R270,
+}
+
+impl Rotation {
+    pub const ALL: [Rotation; 4] = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
+
+    pub fn degrees(self) -> u16 {
+        match self {
+            Rotation::R0 => 0,
+            Rotation::R90 => 90,
+            Rotation::R180 => 180,
+            Rotation::R270 => 270,
+        }
+    }
+
+    pub fn from_degrees(degrees: u16) -> Option<Self> {
+        Rotation::ALL.into_iter().find(|r| r.degrees() == degrees)
+    }
+}
+
+impl From<Rotation> for u16 {
+    fn from(r: Rotation) -> u16 {
+        r.degrees()
+    }
+}
+
+/// Anything but a quarter turn reads as upright, like the firmware does.
+impl<'de> Deserialize<'de> for Rotation {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(u16::deserialize(d).ok().and_then(Rotation::from_degrees).unwrap_or_default())
+    }
+}
+
+impl std::str::FromStr for Rotation {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.trim_end_matches('°')
+            .parse()
+            .ok()
+            .and_then(Rotation::from_degrees)
+            .ok_or_else(|| format!("unknown rotation `{s}`, expected one of: 0, 90, 180, 270"))
+    }
+}
+
+/// How each screen is turned: left (`cpu`) and right (`gpu`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rotations {
+    #[serde(default)]
+    pub cpu: Rotation,
+    #[serde(default)]
+    pub gpu: Rotation,
+}
+
+impl Rotations {
+    pub fn is_upright(&self) -> bool {
+        *self == Rotations::default()
+    }
+}
+
 /// `id` is what the UI keys on: `"cpu"` (case/radiator fans) or `"gpu"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fan {
@@ -126,6 +195,11 @@ pub struct Snapshot {
     /// `classic` on both screens when it is missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face: Option<Faces>,
+    /// Also set by the bridge, and left out when both screens are upright,
+    /// which is how the firmware reads a line without it. The board keeps
+    /// the last rotation it got across reboots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rot: Option<Rotations>,
     /// Claude Code usage, also set by the bridge; absent where Claude Code
     /// hasn't run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,6 +250,7 @@ mod tests {
             },
             fans: vec![Fan { id: "cpu".into(), rpm: 3770 }],
             face: Some(Faces { cpu: Face::Rings, gpu: Face::Plus }),
+            rot: None,
             claude: None,
         };
         assert_eq!(
@@ -195,6 +270,7 @@ mod tests {
             gpu: DeviceMetrics::default(),
             fans: vec![],
             face: None,
+            rot: None,
             claude: None,
         };
         assert_eq!(snap.to_line(), "{\"v\":1,\"ts\":0}\n");
@@ -210,6 +286,7 @@ mod tests {
             gpu: DeviceMetrics::default(),
             fans: vec![],
             face: Some(Faces { cpu: Face::Claude, gpu: Face::Clawd }),
+            rot: None,
             claude: Some(ClaudeMetrics {
                 tok: 1_234_567,
                 today: 4_500_000,
@@ -236,5 +313,26 @@ mod tests {
         assert_eq!(faces, Faces { cpu: Face::Classic, gpu: Face::Rings });
         let old: Faces = serde_json::from_str("{\"cpu\":\"gauge\",\"gpu\":\"memory\"}").unwrap();
         assert_eq!(old, Faces::default());
+    }
+
+    #[test]
+    fn rotation_on_the_wire() {
+        let snap = Snapshot {
+            v: 1,
+            ts: 0,
+            cpu: DeviceMetrics { temp_c: Some(40.0), ..Default::default() },
+            gpu: DeviceMetrics::default(),
+            fans: vec![],
+            face: None,
+            rot: Some(Rotations { cpu: Rotation::R180, gpu: Rotation::R0 }),
+            claude: None,
+        };
+        assert_eq!(snap.to_line(), "{\"v\":1,\"ts\":0,\"cpu\":{\"temp_c\":40.0},\"rot\":{\"cpu\":180,\"gpu\":0}}\n");
+        assert_eq!("90".parse::<Rotation>(), Ok(Rotation::R90));
+        assert_eq!("270°".parse::<Rotation>(), Ok(Rotation::R270));
+        assert!("45".parse::<Rotation>().is_err());
+        let odd: Rotations = serde_json::from_str("{\"cpu\":45,\"gpu\":90}").unwrap();
+        assert_eq!(odd, Rotations { cpu: Rotation::R0, gpu: Rotation::R90 });
+        assert!(Rotations::default().is_upright());
     }
 }

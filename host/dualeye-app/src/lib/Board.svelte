@@ -4,12 +4,14 @@
 -->
 <script lang="ts">
   import Eye from "./Eye.svelte";
-  import type { Screen } from "./firmware";
+  import type { Rotations, Screen } from "./firmware";
   import type { BoardState } from "./monitor.svelte";
 
-  let { cpu, gpu, board, size, cpuGlow, gpuGlow, pixels = false }: {
+  let { cpu, gpu, board, size, cpuGlow, gpuGlow, pixels = false, rotation = { cpu: 0, gpu: 0 } }: {
     cpu: Screen;
     gpu: Screen;
+    /** How the board has turned each screen: shown as a badge, the mirror stays upright to stay readable. */
+    rotation?: Rotations;
     board: BoardState;
     size: number;
     cpuGlow: { color: string; level: number };
@@ -49,6 +51,18 @@
   const lit = $derived(board !== "off");
 </script>
 
+{#snippet turned(deg: number)}
+  {#if deg}
+    <span class="turned" title="The board draws this screen turned {deg}° clockwise">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M13 8a5 5 0 1 1-1.6-3.7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+        <path d="M13.6 2.2v3.6H10z" fill="currentColor" />
+      </svg>
+      {deg}°
+    </span>
+  {/if}
+{/snippet}
+
 <div
   class="stage"
   class:tracking
@@ -77,6 +91,7 @@
           {/if}
         </div>
       </div>
+      {@render turned(rotation.cpu)}
       <div class="fpc inner-right"></div>
     </div>
 
@@ -135,6 +150,7 @@
           {/if}
         </div>
       </div>
+      {@render turned(rotation.gpu)}
       <div class="fpc inner-left"></div>
     </div>
   </div>
@@ -170,6 +186,35 @@
     width: var(--d);
     height: var(--d);
     z-index: 2;
+  }
+
+  /* Above the module, clear of the reflection below the board. */
+  .turned {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + var(--d) * 0.035);
+    translate: -50% 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 7px 3px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--dim);
+    font: 550 10px/1 var(--mono);
+    white-space: nowrap;
+    animation: turned-in 300ms ease both;
+  }
+  .turned svg {
+    width: 10px;
+    height: 10px;
+  }
+  @keyframes turned-in {
+    from {
+      opacity: 0;
+      translate: -50% 4px;
+    }
   }
 
   /* Glossy black bezel with the thin bright rim visible in product shots. */

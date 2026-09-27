@@ -19,7 +19,7 @@ use crate::claude::ClaudeUsage;
 use crate::firmware::{self, BoardFirmware};
 use crate::sensors::Collector;
 use crate::serial;
-use crate::snapshot::{Faces, Snapshot};
+use crate::snapshot::{Faces, Rotations, Snapshot};
 
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -33,6 +33,8 @@ pub struct BridgeConfig {
     /// frontend can change it while the bridge runs; it applies from the next
     /// snapshot.
     pub faces: Arc<Mutex<Faces>>,
+    /// How each screen is turned, shared the same way as `faces`.
+    pub rotation: Arc<Mutex<Rotations>>,
 }
 
 impl Default for BridgeConfig {
@@ -42,6 +44,7 @@ impl Default for BridgeConfig {
             interval: Duration::from_secs(1),
             boot_wait: Duration::from_secs(2),
             faces: Arc::default(),
+            rotation: Arc::default(),
         }
     }
 }
@@ -172,6 +175,8 @@ fn session(
             }
             let mut snapshot = collector.sample();
             snapshot.face = Some(*config.faces.lock().unwrap());
+            // A line without `rot` turns the board upright again.
+            snapshot.rot = Some(*config.rotation.lock().unwrap()).filter(|r| !r.is_upright());
             snapshot.claude = claude.sample();
             let sent = snapshot.is_sendable();
             if sent {

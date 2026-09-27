@@ -19,6 +19,12 @@
 
 static const char *TAG = "board_display";
 
+// DualEye mounting: left eye 90° CCW, right eye 90° CW.
+static const board_lcd_rotation_t s_mounting[BOARD_LCD_COUNT] = {
+    [UI_SCREEN_CPU] = BOARD_LCD_ROT_90_CCW,
+    [UI_SCREEN_GPU] = BOARD_LCD_ROT_90_CW,
+};
+
 static esp_err_t init_one(int cs_gpio, int rst_gpio, board_lcd_t *lcd)
 {
     const esp_lcd_panel_io_spi_config_t io_config = {
@@ -75,6 +81,14 @@ esp_err_t board_display_set_rotation(esp_lcd_panel_handle_t panel, board_lcd_rot
     return ESP_OK;
 }
 
+esp_err_t board_display_rotate(esp_lcd_panel_handle_t panel, int screen, board_lcd_rotation_t extra)
+{
+    if (screen < 0 || screen >= BOARD_LCD_COUNT || extra % 90 != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return board_display_set_rotation(panel, (board_lcd_rotation_t) ((s_mounting[screen] + extra) % 360));
+}
+
 void board_display_set_backlight(bool on)
 {
     gpio_config_t backlight_config = {
@@ -110,12 +124,11 @@ esp_err_t board_display_init(board_lcd_t out_lcds[BOARD_LCD_COUNT])
     ESP_RETURN_ON_ERROR(init_one(LCD2_CS_GPIO, LCD2_RST_GPIO, &out_lcds[UI_SCREEN_GPU]),
                         TAG, "LCD2 failed");
 
-    // DualEye mounting: left eye 90° CCW, right eye 90° CW.
-    ESP_RETURN_ON_ERROR(board_display_set_rotation(out_lcds[UI_SCREEN_CPU].panel,
-                                                   BOARD_LCD_ROT_90_CCW),
+    ESP_RETURN_ON_ERROR(board_display_rotate(out_lcds[UI_SCREEN_CPU].panel, UI_SCREEN_CPU,
+                                             BOARD_LCD_ROT_0),
                         TAG, "LCD1 rotation failed");
-    ESP_RETURN_ON_ERROR(board_display_set_rotation(out_lcds[UI_SCREEN_GPU].panel,
-                                                   BOARD_LCD_ROT_90_CW),
+    ESP_RETURN_ON_ERROR(board_display_rotate(out_lcds[UI_SCREEN_GPU].panel, UI_SCREEN_GPU,
+                                             BOARD_LCD_ROT_0),
                         TAG, "LCD2 rotation failed");
 
     ESP_LOGI(TAG, "Dual GC9A01 ready (L:+90 CCW, R:+90 CW)");

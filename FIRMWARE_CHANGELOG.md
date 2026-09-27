@@ -7,6 +7,10 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 0.3.0
+
+- Each screen can be turned by 90°, 180° or 270°, for a board that sits another way round. The board remembers it and boots turned.
+
 ## 0.2.0
 
 - Tells the app which firmware it runs, so the app can offer updates like this one.

@@ -35,6 +35,9 @@ typedef struct {
 
 esp_err_t board_display_init(board_lcd_t out_lcds[BOARD_LCD_COUNT]);
 esp_err_t board_display_set_rotation(esp_lcd_panel_handle_t panel, board_lcd_rotation_t rot);
+/** Turn screen `screen` (UI_SCREEN_*) by `extra` more degrees clockwise than
+ * its DualEye mounting. Takes effect on the next frame drawn. */
+esp_err_t board_display_rotate(esp_lcd_panel_handle_t panel, int screen, board_lcd_rotation_t extra);
 void board_display_set_backlight(bool on);
 
 #ifdef __cplusplus

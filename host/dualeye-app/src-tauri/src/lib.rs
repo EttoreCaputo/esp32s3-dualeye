@@ -25,7 +25,7 @@ use std::time::Instant;
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
 use dualeye_core::{
-    BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, ImageInfo, PortInfo, Reading, Snapshot, firmware, serial,
+    BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware, serial,
 };
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -43,6 +43,8 @@ struct Settings {
     port: Option<String>,
     #[serde(default)]
     faces: Faces,
+    #[serde(default)]
+    rotation: Rotations,
 }
 
 #[derive(Default)]
@@ -103,6 +105,8 @@ struct AppState {
     settings_path: Option<PathBuf>,
     /// Handed to every bridge, so a face change reaches the running one.
     faces: Arc<Mutex<Faces>>,
+    /// Likewise for the rotation of each screen.
+    rotation: Arc<Mutex<Rotations>>,
     /// Separate from the bridge's own collector, for the sensor list.
     collector: Mutex<Option<Collector>>,
     /// esptool holds the port (identify or flash in progress).
@@ -137,6 +141,7 @@ struct Status {
     logs: Vec<String>,
     port_setting: Option<String>,
     faces: Faces,
+    rotation: Rotations,
 }
 
 #[tauri::command]
@@ -155,6 +160,7 @@ fn status(state: State<AppState>) -> Status {
         logs: link.logs.iter().cloned().collect(),
         port_setting: state.settings.lock().unwrap().port.clone(),
         faces: *state.faces.lock().unwrap(),
+        rotation: *state.rotation.lock().unwrap(),
     }
 }
 
@@ -188,6 +194,13 @@ async fn set_port(app: AppHandle, port: Option<String>) -> Result<(), String> {
 fn set_faces(state: State<AppState>, faces: Faces) {
     *state.faces.lock().unwrap() = faces;
     state.settings.lock().unwrap().faces = faces;
+    state.save_settings();
+}
+
+#[tauri::command]
+fn set_rotation(state: State<AppState>, rotation: Rotations) {
+    *state.rotation.lock().unwrap() = rotation;
+    state.settings.lock().unwrap().rotation = rotation;
     state.save_settings();
 }
 
@@ -298,8 +311,9 @@ async fn with_device<T: Send + 'static>(
 
 fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
     let handle = app.clone();
-    let faces = app.state::<AppState>().faces.clone();
-    Bridge::spawn(BridgeConfig { port, faces, ..Default::default() }, move |event| {
+    let state = app.state::<AppState>();
+    let (faces, rotation) = (state.faces.clone(), state.rotation.clone());
+    Bridge::spawn(BridgeConfig { port, faces, rotation, ..Default::default() }, move |event| {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
         }
@@ -382,12 +396,14 @@ pub fn run() {
                 .unwrap_or_default();
             let port = settings.port.clone();
             let faces = Arc::new(Mutex::new(settings.faces));
+            let rotation = Arc::new(Mutex::new(settings.rotation));
             app.manage(AppState {
                 link: Mutex::new(Link { kind: "searching", ..Default::default() }),
                 bridge: Mutex::new(None),
                 settings: Mutex::new(settings),
                 settings_path,
                 faces,
+                rotation,
                 collector: Mutex::new(None),
                 device_busy: AtomicBool::new(false),
                 esptool_dir,
@@ -407,7 +423,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {
