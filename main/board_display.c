@@ -1,6 +1,7 @@
 #include "board_display.h"
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "esp_check.h"
 #include "esp_lcd_gc9a01.h"
 #include "esp_log.h"
@@ -89,23 +90,59 @@ esp_err_t board_display_rotate(esp_lcd_panel_handle_t panel, int screen, board_l
     return board_display_set_rotation(panel, (board_lcd_rotation_t) ((s_mounting[screen] + extra) % 360));
 }
 
-void board_display_set_backlight(bool on)
+/* Backlight PWM, one channel per screen. 20 kHz stays above hearing, which
+ * matters with a microphone on the board. */
+#define BL_LEDC_TIMER LEDC_TIMER_0
+#define BL_LEDC_FREQ_HZ 20000
+#define BL_LEDC_RES LEDC_TIMER_10_BIT
+#define BL_LEDC_MAX ((1 << 10) - 1)
+
+static const int s_bl_gpio[BOARD_LCD_COUNT] = {
+    [UI_SCREEN_CPU] = LCD1_BL_GPIO,
+    [UI_SCREEN_GPU] = LCD2_BL_GPIO,
+};
+
+static esp_err_t backlight_init(void)
 {
-    gpio_config_t backlight_config = {
-        .pin_bit_mask = (1ULL << LCD1_BL_GPIO) | (1ULL << LCD2_BL_GPIO),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+    const ledc_timer_config_t timer = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = BL_LEDC_RES,
+        .timer_num = BL_LEDC_TIMER,
+        .freq_hz = BL_LEDC_FREQ_HZ,
+        .clk_cfg = LEDC_AUTO_CLK,
     };
-    ESP_ERROR_CHECK(gpio_config(&backlight_config));
-    ESP_ERROR_CHECK(gpio_set_level(LCD1_BL_GPIO, on ? 1 : 0));
-    ESP_ERROR_CHECK(gpio_set_level(LCD2_BL_GPIO, on ? 1 : 0));
+    ESP_RETURN_ON_ERROR(ledc_timer_config(&timer), TAG, "backlight timer");
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        const ledc_channel_config_t ch = {
+            .gpio_num = s_bl_gpio[i],
+            .speed_mode = LEDC_LOW_SPEED_MODE,
+            .channel = (ledc_channel_t) i,
+            .timer_sel = BL_LEDC_TIMER,
+            .duty = 0,
+        };
+        ESP_RETURN_ON_ERROR(ledc_channel_config(&ch), TAG, "backlight channel");
+    }
+    return ESP_OK;
+}
+
+esp_err_t board_display_set_brightness(int screen, int percent)
+{
+    if (screen < 0 || screen >= BOARD_LCD_COUNT || percent < 0 || percent > 100) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    // Perceived brightness is roughly quadratic in duty.
+    uint32_t duty = (uint32_t) (BL_LEDC_MAX * percent * percent / 10000);
+    if (percent > 0 && duty == 0) {
+        duty = 1;
+    }
+    ESP_RETURN_ON_ERROR(ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t) screen, duty), TAG, "duty");
+    return ledc_update_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t) screen);
 }
 
 esp_err_t board_display_init(board_lcd_t out_lcds[BOARD_LCD_COUNT])
 {
-    board_display_set_backlight(false);
+    // Dark until the first frame is drawn.
+    ESP_RETURN_ON_ERROR(backlight_init(), TAG, "backlight failed");
 
     // Partial LVGL buffers are ~60 lines; keep headroom for DMA transfers.
     const spi_bus_config_t bus_config = {

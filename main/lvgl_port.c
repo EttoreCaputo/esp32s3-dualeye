@@ -10,7 +10,8 @@
 
 #define LVGL_DRAW_BUF_LINES 40
 #define LVGL_TICK_PERIOD_MS 2
-#define LVGL_TASK_STACK_SIZE (6 * 1024)
+/* 6 KB left about 1 KB free (M0); the toast and later overlays need more. */
+#define LVGL_TASK_STACK_SIZE (8 * 1024)
 #define LVGL_TASK_PRIORITY 5
 
 static const char *TAG = "lvgl_port";

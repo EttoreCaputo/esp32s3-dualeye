@@ -9,6 +9,31 @@
 static SemaphoreHandle_t s_lock;
 static metrics_snapshot_t s_snapshot;
 
+static const char *const FACE_NAMES[METRICS_FACE_COUNT] = {
+    [METRICS_FACE_CLASSIC] = "classic",
+    [METRICS_FACE_RINGS] = "rings",
+    [METRICS_FACE_PLUS] = "plus",
+    [METRICS_FACE_BAR] = "bar",
+    [METRICS_FACE_CLAUDE] = "claude",
+    [METRICS_FACE_CLAWD] = "clawd",
+};
+
+const char *metrics_face_name(metrics_face_t face)
+{
+    return face < METRICS_FACE_COUNT ? FACE_NAMES[face] : NULL;
+}
+
+bool metrics_face_from_name(const char *name, metrics_face_t *out)
+{
+    for (int i = 0; i < METRICS_FACE_COUNT; i++) {
+        if (strcmp(name, FACE_NAMES[i]) == 0) {
+            *out = (metrics_face_t) i;
+            return true;
+        }
+    }
+    return false;
+}
+
 void metrics_model_init(void)
 {
     s_lock = xSemaphoreCreateMutex();

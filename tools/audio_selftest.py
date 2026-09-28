@@ -2,7 +2,9 @@
 """Host side of the M0 audio self-test (firmware: main/audio_selftest.c).
 
 Close the DualEye app / `dualeye` bridge first: they hold the same port.
-Needs pyserial (the ESP-IDF Python env has it).
+Needs pyserial (the ESP-IDF Python env has it). Talks protocol v2 through
+dualeye_link.py: commands go as the `debug/audio` method, output comes back
+as log lines.
 
   audio_selftest.py tone                 chime on the speaker
   audio_selftest.py tone 440 1000        440 Hz for 1 s
@@ -23,72 +25,34 @@ import time
 import wave
 import zlib
 
-try:
-    import serial
-    from serial.tools import list_ports
-except ImportError:
-    sys.exit("pyserial missing: pip install pyserial (or run from the ESP-IDF Python env)")
+from dualeye_link import LOG, Link
 
-ESPRESSIF_VID = 0x303A
 TEST_TONE_HZ = 1000
 
 
-def find_port():
-    ports = [p.device for p in list_ports.comports()
-             if p.vid == ESPRESSIF_VID and not p.device.startswith("/dev/tty.")]
-    if len(ports) != 1:
-        sys.exit(f"expected one DualEye board, found {ports or 'none'}; pass --port")
-    return ports[0]
-
-
-def open_port(name):
-    # Don't toggle DTR/RTS: on the S3's USB Serial/JTAG that resets the chip.
-    s = serial.Serial()
-    s.port = name
-    s.baudrate = 115200
-    s.timeout = 0.5
-    s.dtr = False
-    s.rts = False
-    s.open()
-    settle(s)
-    return s
-
-
-def settle(port):
-    """macOS raises DTR/RTS on open anyway, which resets the board: wait out the boot
-    (until the log goes quiet) so the first command isn't lost."""
-    deadline = time.monotonic() + 5
-    quiet_since = time.monotonic()
-    while time.monotonic() < deadline:
-        if port.readline():
-            quiet_since = time.monotonic()
-        elif time.monotonic() - quiet_since > 0.6:
-            return
-
-
-def run(port, cmd, timeout):
+def run(link, cmd, timeout):
     """Send one command, echo board output, return (ok, collected AUD lines)."""
-    port.write(f"!audio {cmd}\n".encode())
+    link.call("debug/audio", {"cmd": cmd})
     lines = []
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        raw = port.readline()
-        if not raw:
-            continue
-        line = raw.decode(errors="replace").rstrip("\r\n")
-        if line.startswith("AUD:D "):
-            lines.append(line)
-            continue
-        if line.startswith("AUD:"):
-            lines.append(line)
-            if line.startswith("AUD:OK") or line.startswith("AUD:ERR"):
-                print(line)
-                return line.startswith("AUD:OK"), lines
-            if not line.startswith(("AUD:BEGIN", "AUD:END")):
-                print(line[4:])
-        else:
-            print(f"  board: {line}")
-        deadline = max(deadline, time.monotonic() + 2)
+        for chan, payload in link.frames(0.5):
+            if chan not in (LOG, None):
+                continue
+            line = payload.decode(errors="replace")
+            if line.startswith("AUD:D "):
+                lines.append(line)
+                continue
+            if line.startswith("AUD:"):
+                lines.append(line)
+                if line.startswith("AUD:OK") or line.startswith("AUD:ERR"):
+                    print(line)
+                    return line.startswith("AUD:OK"), lines
+                if not line.startswith(("AUD:BEGIN", "AUD:END")):
+                    print(line[4:])
+            else:
+                print(f"  board: {line}")
+            deadline = max(deadline, time.monotonic() + 2)
     sys.exit(f"timed out waiting for the board on '{cmd}'")
 
 
@@ -179,7 +143,8 @@ def main():
     sub.add_parser("stats")
     args = ap.parse_args()
 
-    port = open_port(args.port or find_port())
+    port = Link(args.port)
+    port.hello()
     if args.cmd == "tone":
         cmd = f"tone {args.hz} {args.ms}" if args.hz and args.ms else "tone"
         run(port, cmd, 10)

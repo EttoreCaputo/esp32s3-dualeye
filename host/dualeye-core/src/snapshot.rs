@@ -1,10 +1,12 @@
-//! Wire format shared with `main/metrics_parser.c`: one compact JSON object per line.
+//! Sensor snapshot, the payload of a protocol v2 `metrics` frame, parsed by
+//! `main/metrics_parser.c`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::claude::ClaudeMetrics;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+/// The snapshot format's version, the `v` field.
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeviceMetrics {
@@ -191,13 +193,12 @@ pub struct Snapshot {
     pub gpu: DeviceMetrics,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fans: Vec<Fan>,
-    /// Set by the bridge, not the collector. The firmware falls back to
-    /// `classic` on both screens when it is missing.
+    /// What the bridge has set the board's faces to, for frontends that
+    /// mirror the screens. Not part of the payload: faces are board state
+    /// since protocol v2, set with the `set_face` tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face: Option<Faces>,
-    /// Also set by the bridge, and left out when both screens are upright,
-    /// which is how the firmware reads a line without it. The board keeps
-    /// the last rotation it got across reboots.
+    /// Likewise for the rotation (`set_rotation`); left out when both screens are upright.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rot: Option<Rotations>,
     /// Claude Code usage, also set by the bridge; absent where Claude Code
@@ -216,10 +217,10 @@ impl Snapshot {
         self.fans.iter().find(|f| f.id == id).map(|f| f.rpm)
     }
 
-    pub fn to_line(&self) -> String {
-        let mut line = serde_json::to_string(self).expect("snapshot is always serializable");
-        line.push('\n');
-        line
+    /// The `metrics` frame payload: this snapshot without `face` and `rot`.
+    pub fn to_payload(&self) -> Vec<u8> {
+        let wire = Snapshot { face: None, rot: None, ..self.clone() };
+        serde_json::to_vec(&wire).expect("snapshot is always serializable")
     }
 }
 
@@ -231,10 +232,14 @@ pub(crate) fn round1(value: f64) -> f32 {
 mod tests {
     use super::*;
 
+    fn payload(snap: &Snapshot) -> String {
+        String::from_utf8(snap.to_payload()).unwrap()
+    }
+
     #[test]
     fn line_matches_firmware_format() {
         let snap = Snapshot {
-            v: PROTOCOL_VERSION,
+            v: SNAPSHOT_VERSION,
             ts: 1_700_000_000,
             cpu: DeviceMetrics {
                 temp_c: Some(round1(36.33)),
@@ -254,10 +259,10 @@ mod tests {
             claude: None,
         };
         assert_eq!(
-            snap.to_line(),
-            "{\"v\":1,\"ts\":1700000000,\"cpu\":{\"temp_c\":36.3,\"load_pct\":1.8,\"clock_mhz\":1572,\"power_w\":14.6,\
+            payload(&snap),
+            "{\"v\":2,\"ts\":1700000000,\"cpu\":{\"temp_c\":36.3,\"load_pct\":1.8,\"clock_mhz\":1572,\"power_w\":14.6,\
              \"mem\":{\"used_mb\":12288,\"total_mb\":31744}},\"gpu\":{\"temp_c\":31.0,\"mem\":{\"used_mb\":1024,\"total_mb\":24576}},\
-             \"fans\":[{\"id\":\"cpu\",\"rpm\":3770}],\"face\":{\"cpu\":\"rings\",\"gpu\":\"plus\"}}\n"
+             \"fans\":[{\"id\":\"cpu\",\"rpm\":3770}]}"
         );
     }
 
@@ -273,7 +278,7 @@ mod tests {
             rot: None,
             claude: None,
         };
-        assert_eq!(snap.to_line(), "{\"v\":1,\"ts\":0}\n");
+        assert_eq!(payload(&snap), "{\"v\":1,\"ts\":0}");
         assert!(!snap.is_sendable());
     }
 
@@ -298,9 +303,9 @@ mod tests {
             }),
         };
         assert_eq!(
-            snap.to_line(),
-            "{\"v\":1,\"ts\":0,\"cpu\":{\"temp_c\":40.0},\"face\":{\"cpu\":\"claude\",\"gpu\":\"clawd\"},\
-             \"claude\":{\"tok\":1234567,\"today\":4500000,\"left_min\":133,\"s_pct\":42.0,\"state\":\"work\",\"model\":\"OPUS 5.5\"}}\n"
+            payload(&snap),
+            "{\"v\":1,\"ts\":0,\"cpu\":{\"temp_c\":40.0},\
+             \"claude\":{\"tok\":1234567,\"today\":4500000,\"left_min\":133,\"s_pct\":42.0,\"state\":\"work\",\"model\":\"OPUS 5.5\"}}"
         );
     }
 
@@ -316,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn rotation_on_the_wire() {
+    fn rotation_is_not_in_the_payload() {
         let snap = Snapshot {
             v: 1,
             ts: 0,
@@ -327,7 +332,9 @@ mod tests {
             rot: Some(Rotations { cpu: Rotation::R180, gpu: Rotation::R0 }),
             claude: None,
         };
-        assert_eq!(snap.to_line(), "{\"v\":1,\"ts\":0,\"cpu\":{\"temp_c\":40.0},\"rot\":{\"cpu\":180,\"gpu\":0}}\n");
+        assert_eq!(payload(&snap), "{\"v\":1,\"ts\":0,\"cpu\":{\"temp_c\":40.0}}");
+        // Frontends still see it on the snapshot.
+        assert!(serde_json::to_string(&snap).unwrap().contains("\"rot\":{\"cpu\":180,\"gpu\":0}"));
         assert_eq!("90".parse::<Rotation>(), Ok(Rotation::R90));
         assert_eq!("270°".parse::<Rotation>(), Ok(Rotation::R270));
         assert!("45".parse::<Rotation>().is_err());

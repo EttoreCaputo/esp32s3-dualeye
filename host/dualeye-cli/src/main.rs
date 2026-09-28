@@ -8,6 +8,9 @@
 //!   dualeye --cpu-face rings --gpu-face claude
 //!   dualeye --cpu-rotation 180    # a board mounted upside down
 //!   dualeye --claude-statusline   # Claude Code status line helper (reads stdin)
+//!   dualeye tools                 # list the board's tools
+//!   dualeye call set_face --screen left --face rings
+//!   dualeye call show_text '{"text":"Ciao"}'
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -15,23 +18,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
 use dualeye_core::claude::statusline;
-use dualeye_core::{BoardFirmware, ClaudeUsage, Collector, Face, Faces, Memory, Rotation, Rotations, Snapshot, serial};
+use dualeye_core::{BoardFirmware, ClaudeUsage, Collector, Face, Faces, Link, LinkEvent, Memory, Rotation, Rotations, Snapshot, serial};
+use serde_json::{Map, Value};
 
 #[derive(Parser)]
-#[command(name = "dualeye", version, about = "Stream PC sensors to the ESP32-S3 DualEye board")]
+#[command(name = "dualeye", version, about = "Stream PC sensors to the ESP32-S3 DualEye board", args_conflicts_with_subcommands = true)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Serial port (default: the only attached Espressif USB device)
     #[arg(long, env = "DUALEYE_PORT")]
     port: Option<String>,
     /// Milliseconds between snapshots
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(200..))]
     interval_ms: u64,
-    /// Seconds to wait after opening the port before the first write
-    #[arg(long, default_value_t = 2.0)]
-    boot_wait: f64,
     /// Watch face on the left (CPU) screen: classic, rings, plus, bar, claude or clawd
     #[arg(long, default_value = "classic")]
     cpu_face: Face,
@@ -62,8 +65,41 @@ struct Args {
     quiet: bool,
 }
 
+/// Talk to the board's tools directly. These open the port themselves, so
+/// quit the app (or a running `dualeye`) first.
+#[derive(Subcommand)]
+enum Command {
+    /// List the tools the board offers
+    Tools {
+        #[arg(long, env = "DUALEYE_PORT")]
+        port: Option<String>,
+        /// Print the full `tools/list` result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Call a board tool: `call set_face --screen left --face rings`, or
+    /// `call set_face '{"screen":"left","face":"rings"}'`
+    Call {
+        #[arg(long, env = "DUALEYE_PORT")]
+        port: Option<String>,
+        /// Print the full result as JSON
+        #[arg(long)]
+        json: bool,
+        tool: String,
+        /// Arguments: one JSON object, or `--name value` pairs (values that
+        /// parse as JSON, like numbers, are sent as such)
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
+    match args.command {
+        Some(Command::Tools { port, json }) => return tools(port, json),
+        Some(Command::Call { port, json, tool, args }) => return call(port, json, &tool, &args),
+        None => {}
+    }
     if args.claude_statusline {
         statusline::run(std::io::stdin().lock(), std::io::stdout().lock());
         return ExitCode::SUCCESS;
@@ -97,7 +133,6 @@ fn main() -> ExitCode {
     let config = BridgeConfig {
         port: args.port,
         interval: Duration::from_millis(args.interval_ms),
-        boot_wait: Duration::from_secs_f64(args.boot_wait.max(0.0)),
         faces: Arc::new(Mutex::new(Faces { cpu: args.cpu_face, gpu: args.gpu_face })),
         rotation: Arc::new(Mutex::new(Rotations { cpu: args.cpu_rotation, gpu: args.gpu_rotation })),
     };
@@ -116,6 +151,9 @@ fn main() -> ExitCode {
             BridgeEvent::Snapshot { .. } => {}
             BridgeEvent::BoardLog { line } => eprintln!("board: {line}"),
             BridgeEvent::Firmware { firmware } => match firmware {
+                BoardFirmware::Version { version, protocol: 1, .. } => {
+                    println!("board runs DualEye firmware {version}, which this version can't drive: reflash it from the app")
+                }
                 BoardFirmware::Version { version, .. } => println!("board runs DualEye firmware {version}"),
                 BoardFirmware::Legacy => println!("board runs DualEye firmware from before 0.2.0: reflash it from the app"),
                 BoardFirmware::Missing => eprintln!("board has no firmware: flash it from the app"),
@@ -132,6 +170,100 @@ fn main() -> ExitCode {
     };
     bridge::run(&config, &stop, sink);
     if fatal.load(Ordering::Relaxed) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+const TOOL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Open the board and do the handshake; board log lines go to stderr.
+fn connect(port: Option<String>) -> Result<Link, String> {
+    let port = port.or_else(serial::detect_board).ok_or("board not found on USB (pass --port)")?;
+    let link = Link::open(&port, |event| {
+        if let LinkEvent::Log(line) | LinkEvent::Text(line) = event {
+            eprintln!("board: {line}");
+        }
+    })
+    .map_err(|e| format!("{port}: {e}"))?;
+    link.handshake(Duration::from_secs(5)).map_err(|e| format!("{port}: handshake failed: {e} (firmware 0.4 or later needed)"))?;
+    Ok(link)
+}
+
+fn tools(port: Option<String>, json: bool) -> ExitCode {
+    let result = connect(port).and_then(|link| link.list_tools(TOOL_TIMEOUT).map_err(|e| e.to_string()));
+    match result {
+        Ok(tools) if json => println!("{}", serde_json::to_string_pretty(&serde_json::json!({"tools": tools})).unwrap()),
+        Ok(tools) => {
+            for tool in tools {
+                println!("{}  {}", tool.name, tool.description);
+                let props = tool.input_schema.get("properties").and_then(Value::as_object);
+                let required: Vec<&str> = tool.input_schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+                for (name, schema) in props.into_iter().flatten() {
+                    println!("    --{name} {}{}", arg_hint(schema), if required.contains(&name.as_str()) { "  (required)" } else { "" });
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// `<classic|rings|…>` or `<integer>` from a property's JSON schema.
+fn arg_hint(schema: &Value) -> String {
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        let names: Vec<String> = values.iter().map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string)).collect();
+        return format!("<{}>", names.join("|"));
+    }
+    format!("<{}>", schema.get("type").and_then(Value::as_str).unwrap_or("value"))
+}
+
+fn call(port: Option<String>, json: bool, tool: &str, raw: &[String]) -> ExitCode {
+    let arguments = match parse_tool_args(raw) {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = connect(port).and_then(|link| link.call_tool(tool, arguments, TOOL_TIMEOUT).map_err(|e| e.to_string()));
+    match result {
+        Ok(result) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            } else if let Some(structured) = &result.structured_content {
+                println!("{}", serde_json::to_string_pretty(structured).unwrap());
+            } else {
+                println!("{}", result.text());
+            }
+            if result.is_error { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// One JSON object, or `--name value` pairs.
+fn parse_tool_args(raw: &[String]) -> Result<Value, String> {
+    if let [only] = raw
+        && only.trim_start().starts_with('{')
+    {
+        return serde_json::from_str(only).map_err(|e| format!("arguments are not valid JSON: {e}"));
+    }
+    let mut args = Map::new();
+    let mut it = raw.iter();
+    while let Some(key) = it.next() {
+        let name = key.strip_prefix("--").ok_or_else(|| format!("expected --name before `{key}`"))?;
+        let (name, value) = match name.split_once('=') {
+            Some((n, v)) => (n, v.to_string()),
+            None => (name, it.next().ok_or_else(|| format!("--{name} needs a value"))?.clone()),
+        };
+        let value = serde_json::from_str(&value).unwrap_or(Value::String(value));
+        args.insert(name.replace('-', "_"), value);
+    }
+    Ok(Value::Object(args))
 }
 
 fn summary(s: &Snapshot) -> String {
@@ -169,5 +301,26 @@ fn permission_hint(port: &str) -> String {
         )
     } else {
         "The serial port is busy or not accessible; close idf.py monitor or other serial tools.".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn args(list: &[&str]) -> Result<Value, String> {
+        parse_tool_args(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn tool_args_from_flags_or_json() {
+        assert_eq!(args(&["--screen", "left", "--face", "rings"]), Ok(json!({"screen": "left", "face": "rings"})));
+        assert_eq!(args(&["--percent=40"]), Ok(json!({"percent": 40})));
+        assert_eq!(args(&["--text", "Ciao Duo"]), Ok(json!({"text": "Ciao Duo"})));
+        assert_eq!(args(&[r#"{"degrees":180}"#]), Ok(json!({"degrees": 180})));
+        assert_eq!(args(&[]), Ok(json!({})));
+        assert!(args(&["--face"]).is_err());
+        assert!(args(&["rings"]).is_err());
     }
 }

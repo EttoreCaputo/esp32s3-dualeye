@@ -2,14 +2,14 @@
 //! running on the board.
 //!
 //! ESP-IDF stamps `version.txt` into the app descriptor (`esp_app_desc_t`) of
-//! every image, and the firmware prints it as `{"dualeye":"0.2.0","idf":"v6.1"}`
-//! when it boots and whenever it reads [`VERSION_QUERY`]. Firmware from before
-//! 0.2.0 ignores the query but still logs every snapshot it gets, which is how
-//! the bridge tells it apart from a board running something else.
+//! every image. Firmware 0.4 and later reports it in the protocol v2 `hello`
+//! handshake (see [`crate::link`]). Firmware 0.2 and 0.3 print it as
+//! `{"dualeye":"0.3.0","idf":"v6.1"}` when they boot and whenever they read
+//! [`VERSION_QUERY`], which is enough to tell the app it needs an update.
 
 use serde::{Deserialize, Serialize};
 
-/// Sent to the board, which answers with its version line.
+/// Sent to a protocol 1 board, which answers with its version line.
 pub const VERSION_QUERY: &str = "?version\n";
 
 const PARTITION_TABLE: usize = 0x8000;
@@ -32,8 +32,9 @@ pub struct ImageInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum BoardFirmware {
-    /// DualEye firmware that reported its version.
-    Version { version: String, idf: Option<String> },
+    /// DualEye firmware that reported its version. `protocol` is 2 from
+    /// firmware 0.4.0; a board on 1 needs a firmware update to work with this host.
+    Version { version: String, idf: Option<String>, protocol: u32 },
     /// DualEye firmware from before versioning: it shows snapshots but can't say which it is.
     Legacy,
     /// The ROM finds no bootable app in flash.
@@ -66,7 +67,7 @@ pub fn image_info(image: &[u8]) -> Option<ImageInfo> {
     })
 }
 
-/// The firmware's answer to [`VERSION_QUERY`], wherever it sits in a console line.
+/// A protocol 1 firmware's answer to [`VERSION_QUERY`], wherever it sits in a console line.
 pub fn parse_version_line(line: &str) -> Option<BoardFirmware> {
     #[derive(Deserialize)]
     struct Reply {
@@ -76,12 +77,7 @@ pub fn parse_version_line(line: &str) -> Option<BoardFirmware> {
     let start = line.find(r#"{"dualeye":"#)?;
     let end = start + line[start..].find('}')? + 1;
     let reply: Reply = serde_json::from_str(&line[start..end]).ok()?;
-    Some(BoardFirmware::Version { version: reply.dualeye, idf: reply.idf })
-}
-
-/// `I (5120) metrics_io: cpu 45C gpu 50C`: logged by every firmware for each snapshot it takes.
-pub(crate) fn is_snapshot_log(line: &str) -> bool {
-    line.contains("metrics_io: cpu ")
+    Some(BoardFirmware::Version { version: reply.dualeye, idf: reply.idf, protocol: 1 })
 }
 
 /// `invalid header: 0xffffffff`: the ROM, looping over an erased flash.
@@ -126,10 +122,9 @@ mod tests {
 
     #[test]
     fn finds_the_version_reply_in_a_console_line() {
-        let want = BoardFirmware::Version { version: "0.2.0".into(), idf: Some("v6.1".into()) };
+        let want = BoardFirmware::Version { version: "0.2.0".into(), idf: Some("v6.1".into()), protocol: 1 };
         assert_eq!(parse_version_line(r#"{"dualeye":"0.2.0","idf":"v6.1"}"#), Some(want.clone()));
         assert_eq!(parse_version_line(r#"I (9) x: {"dualeye":"0.2.0","idf":"v6.1"}"#), Some(want));
         assert_eq!(parse_version_line(r#"{"v":1,"cpu":{}}"#), None);
-        assert!(is_snapshot_log("\x1b[0;32mI (5120) metrics_io: cpu 45C gpu 50C\x1b[0m"));
     }
 }

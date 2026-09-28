@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
-use crate::snapshot::{DeviceMetrics, Fan, Memory, PROTOCOL_VERSION, Snapshot, round1};
+use crate::snapshot::{DeviceMetrics, Fan, Memory, SNAPSHOT_VERSION, Snapshot, round1};
 
 /// One raw sensor value, for diagnostics (`dualeye --sensors`, an app's sensor page).
 #[derive(Debug, Clone, Serialize)]
@@ -115,7 +115,7 @@ impl Collector {
         }
 
         Snapshot {
-            v: PROTOCOL_VERSION,
+            v: SNAPSHOT_VERSION,
             ts: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
             cpu,
             gpu: platform.gpu,

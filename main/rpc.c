@@ -1,0 +1,159 @@
+#include "rpc.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "audio_selftest.h"
+#include "board_tools.h"
+#include "cJSON.h"
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "link.h"
+
+#define RPC_PROTOCOL 2
+
+#define RPC_PARSE_ERROR -32700
+#define RPC_INVALID_REQUEST -32600
+#define RPC_METHOD_NOT_FOUND -32601
+#define RPC_INVALID_PARAMS -32602
+
+static const char *TAG = "rpc";
+
+static void *psram_malloc(size_t size)
+{
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static void send_message(cJSON *msg)
+{
+    char *text = cJSON_PrintUnformatted(msg);
+    cJSON_Delete(msg);
+    if (text == NULL) {
+        ESP_LOGE(TAG, "out of memory for a reply");
+        return;
+    }
+    size_t len = strlen(text);
+    esp_err_t err = len <= LINK_MAX_PAYLOAD ? link_send(LINK_CHAN_CTRL, text, len) : ESP_ERR_INVALID_SIZE;
+    cJSON_free(text);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "reply not sent (%u bytes): %s", (unsigned) len, esp_err_to_name(err));
+    }
+}
+
+static cJSON *envelope(const cJSON *id)
+{
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(msg, "jsonrpc", "2.0");
+    cJSON_AddItemToObject(msg, "id", id != NULL ? cJSON_Duplicate(id, true) : cJSON_CreateNull());
+    return msg;
+}
+
+static void reply_result(const cJSON *id, cJSON *result)
+{
+    cJSON *msg = envelope(id);
+    cJSON_AddItemToObject(msg, "result", result);
+    send_message(msg);
+}
+
+static void reply_error(const cJSON *id, int code, const char *message)
+{
+    cJSON *msg = envelope(id);
+    cJSON *err = cJSON_AddObjectToObject(msg, "error");
+    cJSON_AddNumberToObject(err, "code", code);
+    cJSON_AddStringToObject(err, "message", message);
+    send_message(msg);
+}
+
+/** The `hello` result, also the params of `ready`. */
+static cJSON *identity(void)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    cJSON *id = cJSON_CreateObject();
+    cJSON_AddNumberToObject(id, "protocol", RPC_PROTOCOL);
+    cJSON_AddStringToObject(id, "firmware", app->version);
+    cJSON_AddStringToObject(id, "idf", app->idf_ver);
+    cJSON_AddStringToObject(id, "board", "dualeye");
+    cJSON_AddNumberToObject(id, "max_payload", LINK_MAX_PAYLOAD);
+    const char *channels[] = {"ctrl", "metrics", "log"};
+    cJSON_AddItemToObject(id, "channels", cJSON_CreateStringArray(channels, 3));
+    const char *caps[] = {"tools"};
+    cJSON_AddItemToObject(id, "capabilities", cJSON_CreateStringArray(caps, 1));
+    return id;
+}
+
+void rpc_init(void)
+{
+    // Requests and replies are short-lived; keep them out of internal RAM.
+    cJSON_Hooks hooks = {.malloc_fn = psram_malloc, .free_fn = free};
+    cJSON_InitHooks(&hooks);
+}
+
+void rpc_announce(void)
+{
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(msg, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(msg, "method", "ready");
+    cJSON_AddItemToObject(msg, "params", identity());
+    send_message(msg);
+}
+
+void rpc_handle(uint8_t *payload, size_t len)
+{
+    cJSON *req = cJSON_ParseWithLength((const char *) payload, len);
+    if (req == NULL) {
+        reply_error(NULL, RPC_PARSE_ERROR, "parse error");
+        return;
+    }
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(req, "id");
+    const cJSON *method = cJSON_GetObjectItemCaseSensitive(req, "method");
+    const cJSON *params = cJSON_GetObjectItemCaseSensitive(req, "params");
+    if (!cJSON_IsObject(req) || !cJSON_IsString(method)) {
+        reply_error(id, RPC_INVALID_REQUEST, "invalid request");
+        cJSON_Delete(req);
+        return;
+    }
+    // Requests without an id are notifications: run, don't answer.
+    const bool answer = id != NULL;
+    const char *name = method->valuestring;
+    cJSON *result = NULL;
+    int code = 0;
+    const char *message = NULL;
+
+    if (strcmp(name, "hello") == 0) {
+        result = identity();
+    } else if (strcmp(name, "tools/list") == 0) {
+        result = board_tools_list();
+    } else if (strcmp(name, "tools/call") == 0) {
+        const cJSON *tool = cJSON_GetObjectItemCaseSensitive(params, "name");
+        const cJSON *args = cJSON_GetObjectItemCaseSensitive(params, "arguments");
+        if (!cJSON_IsString(tool) || (args != NULL && !cJSON_IsObject(args))) {
+            code = RPC_INVALID_PARAMS;
+            message = "expected {\"name\": string, \"arguments\": object}";
+        } else if ((result = board_tools_call(tool->valuestring, args)) == NULL) {
+            code = RPC_INVALID_PARAMS;
+            message = "unknown tool";
+        }
+    } else if (strcmp(name, "debug/audio") == 0) {
+        const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(params, "cmd");
+        if (!cJSON_IsString(cmd)) {
+            code = RPC_INVALID_PARAMS;
+            message = "expected {\"cmd\": string}";
+        } else {
+            audio_selftest_command(cmd->valuestring);
+            result = cJSON_CreateObject();
+        }
+    } else {
+        code = RPC_METHOD_NOT_FOUND;
+        message = "method not found";
+    }
+
+    if (!answer) {
+        cJSON_Delete(result);
+    } else if (result != NULL) {
+        reply_result(id, result);
+    } else {
+        reply_error(id, code, message);
+    }
+    cJSON_Delete(req);
+}

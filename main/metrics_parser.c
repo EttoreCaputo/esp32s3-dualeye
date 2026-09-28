@@ -343,92 +343,6 @@ static bool parse_fans(js_t *j, metrics_snapshot_t *snap)
     }
 }
 
-static metrics_face_t face_from_name(const char *name)
-{
-    static const char *const names[METRICS_FACE_COUNT] = {
-        [METRICS_FACE_CLASSIC] = "classic",
-        [METRICS_FACE_RINGS] = "rings",
-        [METRICS_FACE_PLUS] = "plus",
-        [METRICS_FACE_BAR] = "bar",
-        [METRICS_FACE_CLAUDE] = "claude",
-        [METRICS_FACE_CLAWD] = "clawd",
-    };
-    for (int i = 0; i < METRICS_FACE_COUNT; i++) {
-        if (strcmp(name, names[i]) == 0) {
-            return (metrics_face_t) i;
-        }
-    }
-    return METRICS_FACE_CLASSIC;
-}
-
-static bool parse_face_object(js_t *j, metrics_snapshot_t *snap)
-{
-    if (!consume(j, '{')) {
-        return false;
-    }
-    for (;;) {
-        char key[32];
-        bool done = false;
-        if (!object_key(j, key, sizeof(key), &done)) {
-            return false;
-        }
-        if (done) {
-            return true;
-        }
-        metrics_face_t *face = NULL;
-        if (strcmp(key, "cpu") == 0) {
-            face = &snap->cpu_face;
-        } else if (strcmp(key, "gpu") == 0) {
-            face = &snap->gpu_face;
-        }
-        if (face != NULL) {
-            char name[16];
-            if (!parse_string(j, name, sizeof(name))) {
-                return false;
-            }
-            *face = face_from_name(name);
-        } else if (!skip_value(j, 1)) {
-            return false;
-        }
-        object_sep(j);
-    }
-}
-
-static bool parse_rot_object(js_t *j, metrics_snapshot_t *snap)
-{
-    if (!consume(j, '{')) {
-        return false;
-    }
-    for (;;) {
-        char key[32];
-        bool done = false;
-        if (!object_key(j, key, sizeof(key), &done)) {
-            return false;
-        }
-        if (done) {
-            return true;
-        }
-        uint16_t *rot = NULL;
-        if (strcmp(key, "cpu") == 0) {
-            rot = &snap->cpu_rot;
-        } else if (strcmp(key, "gpu") == 0) {
-            rot = &snap->gpu_rot;
-        }
-        if (rot != NULL) {
-            double deg = 0.0;
-            if (!parse_number(j, &deg)) {
-                return false;
-            }
-            // Anything but a quarter turn reads as upright.
-            int d = (int) deg;
-            *rot = (d == 90 || d == 180 || d == 270) ? (uint16_t) d : 0;
-        } else if (!skip_value(j, 1)) {
-            return false;
-        }
-        object_sep(j);
-    }
-}
-
 static metrics_claude_state_t claude_state_from_name(const char *name)
 {
     if (strcmp(name, "work") == 0) {
@@ -513,10 +427,6 @@ esp_err_t metrics_parse_line(const char *line, metrics_snapshot_t *out)
             ok = parse_temp_object(&j, &out->gpu);
         } else if (strcmp(key, "fans") == 0) {
             ok = parse_fans(&j, out);
-        } else if (strcmp(key, "face") == 0) {
-            ok = parse_face_object(&j, out);
-        } else if (strcmp(key, "rot") == 0) {
-            ok = parse_rot_object(&j, out);
         } else if (strcmp(key, "claude") == 0) {
             ok = parse_claude_object(&j, &out->claude);
         } else if (strcmp(key, "ts") == 0) {

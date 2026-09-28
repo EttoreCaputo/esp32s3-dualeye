@@ -41,8 +41,13 @@ cargo run --release -- --once    # print one snapshot, no serial
 cargo run --release -- --sensors # every raw sensor the backends can see
 cargo run --release -- --cpu-face rings --gpu-face plus
 cargo run --release -- --cpu-rotation 180 --gpu-rotation 180   # board upside down
+cargo run --release -- tools                                      # the board's tools
+cargo run --release -- call set_face --screen left --face rings
+cargo run --release -- call show_text --text "Ciao!" --seconds 5
 cargo run --release -- --help
 ```
+
+`tools` and `call` talk to the board's tools directly (firmware 0.4 or later, see [docs/protocol.md](docs/protocol.md)). They open the port themselves, so quit the app or a running `dualeye` first.
 
 The binary ends up in `host/target/release/dualeye` (`dualeye.exe` on Windows) and has no runtime dependencies.
 
@@ -87,11 +92,11 @@ Each screen shows one of six faces, chosen independently (left = CPU, right = GP
 | `claude` | Claude Code: 5-hour limit used on the outer ring and in the middle, weekly limit on the inner ring (orange from 80 %, red from 95 %), time to the 5-hour reset, and a small Clawd. Without the status line: tokens in the 5-hour window, the window's progress on the ring, and today's tokens |
 | `clawd` | Claude Code's mascot, large and animated: walks while Claude works, blinks when idle, sleeps after 30 min; model name, state and tokens in the window |
 
-Pick them in the app (Settings → **Display**, saved across restarts) or with `--cpu-face` / `--gpu-face` on the CLI. The host sends the choice in every line, so the board switches on the next snapshot and needs no storage of its own; a line without `face` shows `classic`.
+Pick them in the app (Settings → **Display**, saved across restarts), with `--cpu-face` / `--gpu-face` on the CLI, or with the `set_face` tool (`dualeye call set_face --screen left --face rings`). The bridge sets them on the board when it connects and whenever they change; the board keeps them in NVS and boots showing them.
 
 ### Rotation
 
-If the board sits another way round (upside down, on its side), turn each screen by 0°, 90°, 180° or 270° clockwise: in the app under Settings → **Display** (the mirror stays upright and marks a turned screen with a badge), or with `--cpu-rotation` / `--gpu-rotation` on the CLI. The panel itself is turned (GC9A01 MADCTL), so it costs no frame time. The board keeps the last rotation it got in NVS, so it boots the right way round before the host connects; a line without `rot` turns it upright.
+If the board sits another way round (upside down, on its side), turn each screen by 0°, 90°, 180° or 270° clockwise: in the app under Settings → **Display** (the mirror stays upright and marks a turned screen with a badge), or with `--cpu-rotation` / `--gpu-rotation` on the CLI. The panel itself is turned (GC9A01 MADCTL), so it costs no frame time. The board keeps the last rotation it got in NVS, so it boots the right way round before the host connects. The bridge sets it with the `set_rotation` tool.
 
 ### Claude Code faces
 
@@ -207,11 +212,11 @@ Each screen shows one of six faces, chosen independently (left = CPU, right = GP
 | `claude` | Claude Code: 5-hour limit used on the outer ring and in the middle, weekly limit on the inner ring (orange from 80 %, red from 95 %), time to the 5-hour reset, and a small Clawd. Without the status line: tokens in the 5-hour window, the window's progress on the ring, and today's tokens |
 | `clawd` | Claude Code's mascot, large and animated: walks while Claude works, blinks when idle, sleeps after 30 min; model name, state and tokens in the window |
 
-Pick them in the app (Settings → **Display**, saved across restarts) or with `--cpu-face` / `--gpu-face` on the CLI. The host sends the choice in every line, so the board switches on the next snapshot and needs no storage of its own; a line without `face` shows `classic`.
+Pick them in the app (Settings → **Display**, saved across restarts), with `--cpu-face` / `--gpu-face` on the CLI, or with the `set_face` tool (`dualeye call set_face --screen left --face rings`). The bridge sets them on the board when it connects and whenever they change; the board keeps them in NVS and boots showing them.
 
 ### Rotation
 
-If the board sits another way round (upside down, on its side), turn each screen by 0°, 90°, 180° or 270° clockwise: in the app under Settings → **Display** (the mirror stays upright and marks a turned screen with a badge), or with `--cpu-rotation` / `--gpu-rotation` on the CLI. The panel itself is turned (GC9A01 MADCTL), so it costs no frame time. The board keeps the last rotation it got in NVS, so it boots the right way round before the host connects; a line without `rot` turns it upright.
+If the board sits another way round (upside down, on its side), turn each screen by 0°, 90°, 180° or 270° clockwise: in the app under Settings → **Display** (the mirror stays upright and marks a turned screen with a badge), or with `--cpu-rotation` / `--gpu-rotation` on the CLI. The panel itself is turned (GC9A01 MADCTL), so it costs no frame time. The board keeps the last rotation it got in NVS, so it boots the right way round before the host connects. The bridge sets it with the `set_rotation` tool.
 
 ## Desktop app
 
@@ -264,11 +269,15 @@ cd host/dualeye-app && npm run check
 
 ## Wire format
 
+Since firmware 0.4.0 the board and the host speak **protocol v2**: COBS frames with a channel byte and a CRC, carrying JSON-RPC (`hello`, `tools/list`, `tools/call`), sensor snapshots and the board's log on one USB link. The full spec, with the board tools, is in [docs/protocol.md](docs/protocol.md). Firmware 0.3 and older spoke newline JSON and must be updated (the app offers it).
+
+A `metrics` frame carries one snapshot:
+
 ```json
-{"v":1,"ts":1790419114,"cpu":{"temp_c":40.2,"load_pct":2.8,"clock_mhz":1210,"power_w":14.6,"mem":{"used_mb":12568,"total_mb":62277}},"gpu":{"temp_c":35.0,"load_pct":0.0,"clock_mhz":210,"power_w":22.1,"mem":{"used_mb":14,"total_mb":24576}},"fans":[{"id":"cpu","rpm":3824},{"id":"gpu","rpm":0}],"face":{"cpu":"rings","gpu":"plus"}}
+{"v":2,"ts":1790419114,"cpu":{"temp_c":40.2,"load_pct":2.8,"clock_mhz":1210,"power_w":14.6,"mem":{"used_mb":12568,"total_mb":62277}},"gpu":{"temp_c":35.0,"load_pct":0.0,"clock_mhz":210,"power_w":22.1,"mem":{"used_mb":14,"total_mb":24576}},"fans":[{"id":"cpu","rpm":3824},{"id":"gpu","rpm":0}]}
 ```
 
-Parsed by `main/metrics_parser.c`; lines without any temperature are ignored, and the UI goes stale after 3 s without data. `mem` is in MiB: system RAM under `cpu`, VRAM under `gpu`. `face` is added by the bridge, not the sensor collector; unknown face names fall back to `classic`. The bridge also adds `"rot":{"cpu":180,"gpu":0}` when a screen is turned (degrees clockwise; anything else reads as 0). So is `claude`, when Claude Code has run on this machine:
+Parsed by `main/metrics_parser.c`; snapshots without any temperature are ignored, and the UI goes stale after 3 s without data. `mem` is in MiB: system RAM under `cpu`, VRAM under `gpu`. Faces and rotation are no longer in the snapshot: they are board state, set with tools. The bridge adds `claude` when Claude Code has run on this machine:
 
 ```json
 "claude":{"tok":1234567,"today":4500000,"left_min":133,"s_pct":42.0,"w_pct":18.0,"state":"work","model":"OPUS 5.5"}

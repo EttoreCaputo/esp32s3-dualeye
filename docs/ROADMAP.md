@@ -6,7 +6,7 @@ Principles:
 - **Small sprints.** Each milestone is 1–3 sprints of about one week. Each sprint ends with something you can run and see.
 - **Every milestone is shippable.** Nothing half-done lands in a release; voice stays behind an opt-in toggle until M7.
 - **De-risk first.** Hardware and transport come before AI.
-- **Backward compatible.** The app keeps working with firmware 0.3 boards (legacy mode).
+- **Backward compatible.** ~~The app keeps working with firmware 0.3 boards (legacy mode).~~ Dropped for M1: the app recognises a 0.3 board and offers the update instead.
 
 ## Overview
 
@@ -42,19 +42,21 @@ Goal: prove the audio hardware works and pin down its limits.
 
 Done when: audible tone, intelligible recording, no UI regressions, and the AEC decision recorded. Results are in [voice-feasibility.md](voice-feasibility.md#m0-results).
 
-## M1 — Protocol v2
+## M1 — Protocol v2 ✅
 
 Goal: a robust, bidirectional, binary-safe link that everything else builds on.
 
-- [ ] Spec `docs/protocol.md`: frame format (COBS, channel, length, CRC16), channels (`ctrl`, `metrics`, `log`, `audio_up`, `audio_down`), handshake with version and capabilities
-- [ ] Firmware: `usb_serial_jtag` driver in binary mode; `link` task with a mux/demux; `ESP_LOG` → `log` frames
-- [ ] Firmware: JSON-RPC dispatcher with `hello`, `tools/list`, `tools/call`
-- [ ] First tools: `set_face`, `set_rotation`, `set_brightness`, `show_text` (toast on one or both screens), `get_state`
-- [ ] Host (`dualeye-core`): framing codec, handshake, legacy fallback for firmware ≤ 0.3; metrics move to the `metrics` channel
-- [ ] CLI: `dualeye tools` and `dualeye call <tool> [json-args]`
-- [ ] Tests: codec unit tests (host); unplug and replug, host-restart and flood tests
+- [x] Spec [`docs/protocol.md`](protocol.md): frame format (COBS, channel, length, CRC16), channels (`ctrl`, `metrics`, `log`, `audio_up`, `audio_down`), handshake with version and capabilities
+- [x] Firmware: `usb_serial_jtag` driver in binary mode; `link` task with a mux/demux; `ESP_LOG` → `log` frames (`main/link.c`, `main/link_frame.c`)
+- [x] Firmware: JSON-RPC dispatcher with `hello`, `tools/list`, `tools/call` (`main/rpc.c`, cJSON); `ready` notification at boot
+- [x] First tools: `set_face`, `set_rotation`, `set_brightness` (LEDC PWM), `show_text` (toast on one or both screens), `get_state` (`main/board_tools.c`); faces, rotation and brightness are board state in NVS
+- [x] Host (`dualeye-core`): framing codec (`protocol.rs`), `Link` with handshake and JSON-RPC (`link.rs`); metrics move to the `metrics` channel; a 0.3 board is recognised and offered the update. ~~Legacy fallback for firmware ≤ 0.3~~: dropped
+- [x] CLI: `dualeye tools` and `dualeye call <tool> [json-args | --name value …]`
+- [x] Tests: codec unit tests (Rust, and the C codec round-tripped on the host); flood, garbage, host stall, host restart and board reboot on hardware. Unplug and replug: to do by hand
+- [x] Found on the way: opening the port reset the board (DTR lowered before RTS); fixed in the Rust host and `tools/dualeye_link.py`
+- [x] `tools/audio_selftest.py` moved to protocol v2 (`debug/audio` method)
 
-Done when: the app, the CLI and board-console logs work on 0.4 firmware, and a 0.3 board still works with the new app.
+Done when: the app, the CLI and board-console logs work on 0.4 firmware. ~~A 0.3 board still works with the new app~~ (dropped).
 
 ## M2 — MCP server
 

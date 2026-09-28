@@ -1,5 +1,6 @@
 dependencies:
   idf: ">=5.4"
+  espressif/cjson: "^1.7.19"
   espressif/esp_codec_dev: "^1.5"
   espressif/esp_lcd_gc9a01: "^2.0.4"
   lvgl/lvgl: "9.3.0"

@@ -51,7 +51,7 @@ Measured on the board with `tools/audio_selftest.py` (firmware at 160 MHz, UI ru
 Follow-ups for M3:
 - The CPU runs at 160 MHz; move to 240 MHz before adding the AFE and wake word.
 - The LVGL task has about 1 KB of stack headroom; grow it before adding the listening overlay.
-- On macOS, opening the port from Python resets the board (DTR/RTS are raised on open); the self-test script waits for the boot to finish. The Rust host is unaffected.
+- ~~On macOS, opening the port resets the board.~~ Fixed in M1: the OS raises DTR and RTS on open, and lowering DTR before RTS passed through the reset state (RTS high, DTR low). Both hosts now lower RTS first.
 
 ## Current firmware and host, and what has to change
 

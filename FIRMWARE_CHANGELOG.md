@@ -7,6 +7,12 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 0.4.0
+
+- New connection to the app (protocol v2): it needs the app version that comes with this firmware. Boot messages and crash reports still show in the app's board console.
+- The board remembers each screen's face and brightness as well as its rotation, and boots showing them.
+- The `dualeye` CLI can control the board directly: change a face, turn a screen, set the brightness, or show a short message on the screens.
+
 ## 0.3.0
 
 - Each screen can be turned by 90°, 180° or 270°, for a board that sits another way round. The board remembers it and boots turned.

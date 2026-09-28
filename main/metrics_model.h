@@ -81,15 +81,17 @@ typedef struct {
     metrics_temp_t gpu;
     metrics_fan_t fans[METRICS_FAN_MAX];
     size_t fan_count;
+    /* Board settings, not from the host's snapshot: filled in before drawing. */
     metrics_face_t cpu_face;
     metrics_face_t gpu_face;
-    /* Extra clockwise turn of each screen on top of the DualEye mounting:
-     * 0, 90, 180 or 270 degrees. */
-    uint16_t cpu_rot;
-    uint16_t gpu_rot;
     metrics_claude_t claude;
     metrics_ui_state_t state;
 } metrics_snapshot_t;
+
+/** Wire name of a face, or NULL. */
+const char *metrics_face_name(metrics_face_t face);
+/** Face by wire name; false if there's none. */
+bool metrics_face_from_name(const char *name, metrics_face_t *out);
 
 void metrics_model_init(void);
 void metrics_model_get(metrics_snapshot_t *out);

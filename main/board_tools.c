@@ -1,0 +1,301 @@
+#include "board_tools.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "board_settings.h"
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
+#include "link.h"
+#include "lvgl_port.h"
+#include "metrics_model.h"
+#include "ui_toast.h"
+
+#define TEXT_MAX 160
+
+#define SCREEN_PROP \
+    "\"screen\":{\"type\":\"string\",\"enum\":[\"left\",\"right\",\"both\"],\"default\":\"both\"," \
+    "\"description\":\"left is the CPU screen, right the GPU screen\"}"
+
+/** A tool fills `text` with what it did, or why it refused (returning false). */
+typedef bool (*tool_fn_t)(const cJSON *args, char *text, cJSON **structured);
+
+typedef struct {
+    const char *name;
+    const char *description;
+    const char *schema;
+    tool_fn_t fn;
+} tool_t;
+
+static const char *const SCREEN_NAMES[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "left", [UI_SCREEN_GPU] = "right"};
+
+/** Which screens `screen` names; both when it's missing. */
+static bool get_screens(const cJSON *args, bool on[BOARD_LCD_COUNT], const char **label, char *text)
+{
+    const cJSON *screen = cJSON_GetObjectItemCaseSensitive(args, "screen");
+    const char *name = cJSON_IsString(screen) ? screen->valuestring : "both";
+    if (screen != NULL && !cJSON_IsString(screen)) {
+        name = "";
+    }
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        on[i] = strcmp(name, "both") == 0 || strcmp(name, SCREEN_NAMES[i]) == 0;
+    }
+    if (!on[0] && !on[1]) {
+        snprintf(text, TEXT_MAX, "screen must be left, right or both");
+        return false;
+    }
+    *label = strcmp(name, "both") == 0 ? "both screens" : name;
+    return true;
+}
+
+static bool get_int(const cJSON *args, const char *key, int *out, char *text)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(args, key);
+    if (!cJSON_IsNumber(v) || v->valuedouble != (double) (int) v->valuedouble) {
+        snprintf(text, TEXT_MAX, "%s must be an integer", key);
+        return false;
+    }
+    *out = (int) v->valuedouble;
+    return true;
+}
+
+static bool tool_set_face(const cJSON *args, char *text, cJSON **structured)
+{
+    bool on[BOARD_LCD_COUNT];
+    const char *label = NULL;
+    if (!get_screens(args, on, &label, text)) {
+        return false;
+    }
+    const cJSON *face = cJSON_GetObjectItemCaseSensitive(args, "face");
+    metrics_face_t f;
+    if (!cJSON_IsString(face) || !metrics_face_from_name(face->valuestring, &f)) {
+        snprintf(text, TEXT_MAX, "face must be one of classic, rings, plus, bar, claude, clawd");
+        return false;
+    }
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        if (on[i]) {
+            board_settings_set_face(i, f);
+        }
+    }
+    snprintf(text, TEXT_MAX, "%s: %s", label, metrics_face_name(f));
+    return true;
+}
+
+static bool tool_set_rotation(const cJSON *args, char *text, cJSON **structured)
+{
+    bool on[BOARD_LCD_COUNT];
+    const char *label = NULL;
+    int deg = 0;
+    if (!get_screens(args, on, &label, text) || !get_int(args, "degrees", &deg, text)) {
+        return false;
+    }
+    if (deg != 0 && deg != 90 && deg != 180 && deg != 270) {
+        snprintf(text, TEXT_MAX, "degrees must be 0, 90, 180 or 270");
+        return false;
+    }
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        if (on[i]) {
+            board_settings_set_rotation(i, (uint16_t) deg);
+        }
+    }
+    snprintf(text, TEXT_MAX, "%s: turned %d degrees", label, deg);
+    return true;
+}
+
+static bool tool_set_brightness(const cJSON *args, char *text, cJSON **structured)
+{
+    bool on[BOARD_LCD_COUNT];
+    const char *label = NULL;
+    int pct = 0;
+    if (!get_screens(args, on, &label, text) || !get_int(args, "percent", &pct, text)) {
+        return false;
+    }
+    if (pct < 0 || pct > 100) {
+        snprintf(text, TEXT_MAX, "percent must be 0 to 100");
+        return false;
+    }
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        if (on[i] && board_settings_set_brightness(i, (uint8_t) pct) != ESP_OK) {
+            snprintf(text, TEXT_MAX, "backlight of the %s screen failed", SCREEN_NAMES[i]);
+            return false;
+        }
+    }
+    snprintf(text, TEXT_MAX, "%s: brightness %d%%", label, pct);
+    return true;
+}
+
+static bool tool_show_text(const cJSON *args, char *text, cJSON **structured)
+{
+    bool on[BOARD_LCD_COUNT];
+    const char *label = NULL;
+    if (!get_screens(args, on, &label, text)) {
+        return false;
+    }
+    const cJSON *msg = cJSON_GetObjectItemCaseSensitive(args, "text");
+    if (!cJSON_IsString(msg) || msg->valuestring[0] == '\0') {
+        snprintf(text, TEXT_MAX, "text must be a non-empty string");
+        return false;
+    }
+    int seconds = 4;
+    if (cJSON_GetObjectItemCaseSensitive(args, "seconds") != NULL
+        && (!get_int(args, "seconds", &seconds, text) || seconds < 1 || seconds > 30)) {
+        snprintf(text, TEXT_MAX, "seconds must be 1 to 30");
+        return false;
+    }
+    lvgl_port_lock();
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        if (on[i]) {
+            ui_toast_show(i, msg->valuestring, (uint32_t) seconds * 1000);
+        }
+    }
+    lvgl_port_unlock();
+    snprintf(text, TEXT_MAX, "%s: showing it for %d s", label, seconds);
+    return true;
+}
+
+static const char *metrics_state_name(metrics_ui_state_t state)
+{
+    switch (state) {
+    case METRICS_UI_LIVE:
+        return "live";
+    case METRICS_UI_STALE:
+        return "stale";
+    case METRICS_UI_ERROR:
+        return "error";
+    default:
+        return "waiting";
+    }
+}
+
+static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
+{
+    board_settings_t settings;
+    board_settings_get(&settings);
+    metrics_snapshot_t snap;
+    metrics_model_get(&snap);
+    link_stats_t link;
+    link_get_stats(&link);
+
+    cJSON *st = cJSON_CreateObject();
+    cJSON_AddStringToObject(st, "firmware", esp_app_get_description()->version);
+    cJSON_AddNumberToObject(st, "uptime_s", (double) (esp_timer_get_time() / 1000000));
+    cJSON_AddStringToObject(st, "metrics", metrics_state_name(snap.state));
+    cJSON *screens = cJSON_AddObjectToObject(st, "screens");
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        cJSON *s = cJSON_AddObjectToObject(screens, SCREEN_NAMES[i]);
+        cJSON_AddStringToObject(s, "face", metrics_face_name(settings.face[i]));
+        cJSON_AddNumberToObject(s, "rotation", settings.rot[i]);
+        cJSON_AddNumberToObject(s, "brightness", settings.brightness[i]);
+    }
+    cJSON *mem = cJSON_AddObjectToObject(st, "memory");
+    cJSON_AddNumberToObject(mem, "internal_free", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(mem, "internal_min", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(mem, "psram_free", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    cJSON *l = cJSON_AddObjectToObject(st, "link");
+    cJSON_AddNumberToObject(l, "rx_frames", link.rx_frames);
+    cJSON_AddNumberToObject(l, "rx_bad", link.rx_bad);
+    cJSON_AddNumberToObject(l, "tx_frames", link.tx_frames);
+    cJSON_AddNumberToObject(l, "tx_dropped", link.tx_dropped);
+    *structured = st;
+    // The text is filled in by the caller from `structured`.
+    text[0] = '\0';
+    return true;
+}
+
+static const tool_t TOOLS[] = {
+    {
+        .name = "set_face",
+        .description = "Switch the watch face of one or both round screens.",
+        .schema = "{\"type\":\"object\",\"properties\":{"
+                  "\"face\":{\"type\":\"string\",\"enum\":[\"classic\",\"rings\",\"plus\",\"bar\",\"claude\",\"clawd\"],"
+                  "\"description\":\"classic: temperature, clock, power, load ring and fan; rings: load, temperature "
+                  "and memory rings; plus: classic with a memory bar and numbers; bar: classic with a small memory "
+                  "bar; claude: Claude Code usage limits and tokens; clawd: animated Claude Code mascot\"},"
+                  SCREEN_PROP "},\"required\":[\"face\"]}",
+        .fn = tool_set_face,
+    },
+    {
+        .name = "set_rotation",
+        .description = "Turn one or both screens clockwise, for a board that sits another way round.",
+        .schema = "{\"type\":\"object\",\"properties\":{"
+                  "\"degrees\":{\"type\":\"integer\",\"enum\":[0,90,180,270]}," SCREEN_PROP
+                  "},\"required\":[\"degrees\"]}",
+        .fn = tool_set_rotation,
+    },
+    {
+        .name = "set_brightness",
+        .description = "Set the backlight of one or both screens; 0 turns it off.",
+        .schema = "{\"type\":\"object\",\"properties\":{"
+                  "\"percent\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}," SCREEN_PROP
+                  "},\"required\":[\"percent\"]}",
+        .fn = tool_set_brightness,
+    },
+    {
+        .name = "show_text",
+        .description = "Show a short message over the watch face for a few seconds.",
+        .schema = "{\"type\":\"object\",\"properties\":{"
+                  "\"text\":{\"type\":\"string\",\"maxLength\":120,\"description\":\"Letters without accents show "
+                  "best; accented ones lose the accent\"},"
+                  "\"seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":30,\"default\":4}," SCREEN_PROP
+                  "},\"required\":[\"text\"]}",
+        .fn = tool_show_text,
+    },
+    {
+        .name = "get_state",
+        .description = "Read the board's state: firmware, uptime, whether metrics are live, and each screen's face, "
+                       "rotation and brightness.",
+        .schema = "{\"type\":\"object\",\"properties\":{}}",
+        .fn = tool_get_state,
+    },
+};
+
+#define TOOL_COUNT (sizeof(TOOLS) / sizeof(TOOLS[0]))
+
+cJSON *board_tools_list(void)
+{
+    cJSON *result = cJSON_CreateObject();
+    cJSON *list = cJSON_AddArrayToObject(result, "tools");
+    for (size_t i = 0; i < TOOL_COUNT; i++) {
+        cJSON *t = cJSON_CreateObject();
+        cJSON_AddStringToObject(t, "name", TOOLS[i].name);
+        cJSON_AddStringToObject(t, "description", TOOLS[i].description);
+        cJSON_AddItemToObject(t, "inputSchema", cJSON_Parse(TOOLS[i].schema));
+        cJSON_AddItemToArray(list, t);
+    }
+    return result;
+}
+
+cJSON *board_tools_call(const char *name, const cJSON *args)
+{
+    const tool_t *tool = NULL;
+    for (size_t i = 0; i < TOOL_COUNT && tool == NULL; i++) {
+        if (strcmp(TOOLS[i].name, name) == 0) {
+            tool = &TOOLS[i];
+        }
+    }
+    if (tool == NULL) {
+        return NULL;
+    }
+    char text[TEXT_MAX];
+    cJSON *structured = NULL;
+    bool ok = tool->fn(args, text, &structured);
+
+    cJSON *result = cJSON_CreateObject();
+    cJSON *content = cJSON_AddArrayToObject(result, "content");
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddStringToObject(item, "type", "text");
+    if (structured != NULL && text[0] == '\0') {
+        char *json = cJSON_PrintUnformatted(structured);
+        cJSON_AddStringToObject(item, "text", json != NULL ? json : "");
+        cJSON_free(json);
+    } else {
+        cJSON_AddStringToObject(item, "text", text);
+    }
+    cJSON_AddItemToArray(content, item);
+    if (structured != NULL) {
+        cJSON_AddItemToObject(result, "structuredContent", structured);
+    }
+    cJSON_AddBoolToObject(result, "isError", !ok);
+    return result;
+}

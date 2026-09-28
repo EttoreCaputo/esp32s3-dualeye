@@ -34,7 +34,8 @@ export type Esptool = { python: string; version: string };
 export type ImageInfo = { version: string; project: string; idf: string; built: string };
 export type FirmwareInfo = { size: number; bundled: ImageInfo | null; esptool: Esptool | null };
 /** `BoardFirmware` in dualeye-core: what the board said it runs. */
-export type BoardFirmware = { state: "version"; version: string; idf: string | null } | { state: "legacy" } | { state: "missing" };
+/** `protocol` 1 is firmware before 0.4.0, which this app can only offer to update. */
+export type BoardFirmware = { state: "version"; version: string; idf: string | null; protocol: number } | { state: "legacy" } | { state: "missing" };
 export type ChipInfo = {
   port: string;
   chip: string | null;
@@ -315,8 +316,8 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
     "I (24) boot: ESP-IDF v6.1 2nd stage bootloader",
     "I (810) board_display: Dual GC9A01 ready (L:+90 CCW, R:+90 CW)",
     "I (890) ui_watch: Watch UI created",
-    "I (900) metrics_io: Reading snapshot JSON from USB serial",
-    "I (900) dualeye: Watch UI ready, waiting for USB metrics",
+    "I (900) link: protocol v2 up",
+    "I (900) dualeye: Watch UI ready, waiting for the host",
   ];
   setTimeout(() => emit({ kind: "connected", port: "/dev/ttyACM0" }), 600);
   boot.forEach((line, i) => setTimeout(() => emit({ kind: "board_log", line }), 900 + i * 90));
@@ -422,7 +423,7 @@ async function previewFlash(emit: (e: FlashEvent) => void, bridge: (e: BridgeEve
     await sleep(200);
   }
   bridge({ kind: "connected", port: "/dev/ttyACM0" });
-  setTimeout(() => bridge({ kind: "firmware", firmware: { state: "version", version: bundledVersion.trim(), idf: "v6.1" } }), 1200);
+  setTimeout(() => bridge({ kind: "firmware", firmware: { state: "version", version: bundledVersion.trim(), idf: "v6.1", protocol: 2 } }), 1200);
 }
 
 function previewReadings(s: Snapshot | null): Reading[] {

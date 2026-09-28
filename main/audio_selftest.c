@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "link.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "audio_selftest";
@@ -31,14 +32,12 @@ static size_t s_rec_frames;
 
 static void reply_ok(const char *cmd)
 {
-    printf("AUD:OK %s\n", cmd);
-    fflush(stdout);
+    link_log_printf("AUD:OK %s", cmd);
 }
 
 static void reply_err(const char *why)
 {
-    printf("AUD:ERR %s\n", why);
-    fflush(stdout);
+    link_log_printf("AUD:ERR %s", why);
 }
 
 /** Next chunk of a sine at hz with a 5 ms fade in/out, so notes don't click. */
@@ -140,10 +139,10 @@ static void dump_recording(void)
 {
     const uint8_t *bytes = (const uint8_t *) s_rec;
     size_t len = s_rec_frames * BOARD_AUDIO_IN_CHANNELS * sizeof(int16_t);
-    printf("AUD:BEGIN rate=%d channels=%d frames=%u bytes=%u\n", BOARD_AUDIO_SAMPLE_RATE,
-           BOARD_AUDIO_IN_CHANNELS, (unsigned) s_rec_frames, (unsigned) len);
+    link_log_printf("AUD:BEGIN rate=%d channels=%d frames=%u bytes=%u", BOARD_AUDIO_SAMPLE_RATE,
+                    BOARD_AUDIO_IN_CHANNELS, (unsigned) s_rec_frames, (unsigned) len);
 
-    // One fwrite per line, so a log line from another task can't split it.
+    // One log frame per line.
     static char line[8 + DUMP_BYTES_PER_LINE / 3 * 4 + 2];
     uint32_t crc = 0;
     for (size_t off = 0; off < len; off += DUMP_BYTES_PER_LINE) {
@@ -151,11 +150,10 @@ static void dump_recording(void)
         crc = crc32_update(crc, bytes + off, n);
         memcpy(line, "AUD:D ", 6);
         size_t o = 6 + base64_encode(bytes + off, n, line + 6);
-        line[o++] = '\n';
-        fwrite(line, 1, o, stdout);
+        // Wait for the host rather than drop a line of the recording.
+        link_send_timeout(LINK_CHAN_LOG, line, o, 1000);
     }
-    printf("AUD:END crc32=%08lx\n", (unsigned long) crc);
-    fflush(stdout);
+    link_log_printf("AUD:END crc32=%08lx", (unsigned long) crc);
 }
 
 static void cmd_rec(const char *args)
@@ -249,12 +247,12 @@ static void cmd_play(const char *args)
 
 static void cmd_stats(void)
 {
-    printf("AUD:STAT heap internal free=%u min=%u largest=%u\n",
-           (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-           (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-           (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    printf("AUD:STAT heap psram free=%u min=%u\n", (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-           (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
+    link_log_printf("AUD:STAT heap internal free=%u min=%u largest=%u",
+                    (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    link_log_printf("AUD:STAT heap psram free=%u min=%u", (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                    (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
 #if CONFIG_FREERTOS_USE_TRACE_FACILITY && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
     // Two snapshots one second apart: CPU share per task over that second.
     UBaseType_t cap = uxTaskGetNumberOfTasks() + 4;
@@ -275,8 +273,8 @@ static void cmd_stats(void)
         for (UBaseType_t j = 0; j < na; j++) {
             if (a[j].xHandle == b[i].xHandle) {
                 configRUN_TIME_COUNTER_TYPE d = b[i].ulRunTimeCounter - a[j].ulRunTimeCounter;
-                printf("AUD:STAT task %-16s cpu=%5.1f%% stack_free=%u\n", b[i].pcTaskName,
-                       100.0 * (double) d / (double) span, (unsigned) b[i].usStackHighWaterMark);
+                link_log_printf("AUD:STAT task %-16s cpu=%5.1f%% stack_free=%u", b[i].pcTaskName,
+                                100.0 * (double) d / (double) span, (unsigned) b[i].usStackHighWaterMark);
                 break;
             }
         }
@@ -284,7 +282,7 @@ static void cmd_stats(void)
     free(a);
     free(b);
 #else
-    printf("AUD:STAT task stats disabled (CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS)\n");
+    link_log_printf("AUD:STAT task stats disabled (CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS)");
 #endif
     reply_ok("stats");
 }
@@ -328,13 +326,8 @@ static void selftest_task(void *arg)
     }
 }
 
-bool audio_selftest_command(const char *line)
+bool audio_selftest_command(const char *cmd)
 {
-    size_t plen = sizeof(AUDIO_SELFTEST_PREFIX) - 1;
-    if (strncmp(line, AUDIO_SELFTEST_PREFIX, plen) != 0) {
-        return false;
-    }
-    const char *cmd = line + plen;
     while (*cmd == ' ') {
         cmd++;
     }

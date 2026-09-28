@@ -1,22 +1,26 @@
-//! Sample sensors at a fixed rate and write each snapshot to the board,
+//! Sample sensors at a fixed rate and send each snapshot to the board,
 //! reconnecting when the USB cable or the board goes away.
 //!
 //! Frontends observe the loop through [`BridgeEvent`]s: the CLI prints them,
 //! a Tauri app can forward them to the webview with `app.emit(..)`.
 //!
-//! Until the board says which firmware it runs, every few seconds the bridge
-//! also asks it (see [`crate::firmware`]).
+//! Each connection starts with the protocol v2 handshake (see [`crate::link`]).
+//! The faces and rotation the frontend picked are pushed with board tools
+//! then, whenever they change, and again after the board reboots.
 
-use std::io::{self, Read, Write};
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use serde_json::json;
 
 use crate::claude::ClaudeUsage;
 use crate::firmware::{self, BoardFirmware};
+use crate::link::{CallError, Link, LinkEvent};
+use crate::protocol::Channel;
 use crate::sensors::Collector;
 use crate::serial;
 use crate::snapshot::{Faces, Rotations, Snapshot};
@@ -27,11 +31,8 @@ pub struct BridgeConfig {
     pub port: Option<String>,
     /// Time between snapshots. The firmware marks data stale after 3 s.
     pub interval: Duration,
-    /// Pause after opening the port, in case opening it rebooted the board.
-    pub boot_wait: Duration,
-    /// Watch face of each screen, stamped on every snapshot. Shared, so a
-    /// frontend can change it while the bridge runs; it applies from the next
-    /// snapshot.
+    /// Watch face of each screen. Shared, so a frontend can change it while
+    /// the bridge runs; the board gets it by the next snapshot.
     pub faces: Arc<Mutex<Faces>>,
     /// How each screen is turned, shared the same way as `faces`.
     pub rotation: Arc<Mutex<Rotations>>,
@@ -42,7 +43,6 @@ impl Default for BridgeConfig {
         Self {
             port: None,
             interval: Duration::from_secs(1),
-            boot_wait: Duration::from_secs(2),
             faces: Arc::default(),
             rotation: Arc::default(),
         }
@@ -55,9 +55,11 @@ pub enum BridgeEvent {
     /// No board to talk to yet; the bridge keeps retrying.
     Waiting { reason: String },
     Connected { port: String },
-    /// A snapshot was taken; `sent` is false when it had no temperature to show.
+    /// A snapshot was taken; `sent` is false when it had no temperature to
+    /// show or the board isn't ready for it.
     Snapshot { snapshot: Snapshot, sent: bool },
-    /// A line the firmware logged on the same USB port.
+    /// A line from the board's log, or console text from outside the
+    /// protocol (boot messages, a crash).
     BoardLog { line: String },
     /// What the board runs; raised once per connection, and again if it reboots into another version.
     Firmware { firmware: BoardFirmware },
@@ -102,17 +104,13 @@ impl Drop for Bridge {
     }
 }
 
-/// Ask the firmware for its version this often until it has answered.
-const VERSION_QUERY_EVERY: Duration = Duration::from_secs(5);
-/// Queries a board may leave unanswered while showing snapshots before it counts as legacy firmware.
-const LEGACY_AFTER_QUERIES: u32 = 2;
-
-/// Shared by a session's writer, which asks, and its reader, which hears the answer.
-#[derive(Default)]
-struct FirmwareProbe {
-    known: AtomicBool,
-    queries: AtomicU32,
-}
+/// How long each `hello` of the handshake waits; the handshake repeats it every tick.
+const HELLO_TIMEOUT: Duration = Duration::from_millis(500);
+/// Unanswered `hello`s before also asking the protocol 1 way.
+const LEGACY_QUERY_AFTER: u32 = 3;
+/// Once a board has gone that long without answering, ask only this often.
+const HELLO_BACKOFF: Duration = Duration::from_secs(5);
+const TOOL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Run the bridge on the current thread until `stop` is set.
 pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
@@ -142,6 +140,15 @@ pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
     }
 }
 
+/// What the reader thread learns for the session loop.
+#[derive(Default)]
+struct Heard {
+    /// The board announced a reboot: handshake and push settings again.
+    rebooted: AtomicBool,
+    /// What a board that doesn't speak protocol v2 printed about itself.
+    old_firmware: Mutex<Option<BoardFirmware>>,
+}
+
 fn session(
     port: &str,
     config: &BridgeConfig,
@@ -150,100 +157,119 @@ fn session(
     claude: &mut ClaudeUsage,
     on_event: &EventSink,
 ) -> io::Result<()> {
-    let mut ser = serial::open(port)?;
+    let heard = Arc::new(Heard::default());
+    let link = {
+        let heard = heard.clone();
+        let sink = on_event.clone();
+        Link::open(port, move |event| match event {
+            LinkEvent::Log(line) => sink(BridgeEvent::BoardLog { line }),
+            LinkEvent::Text(line) => {
+                let old = firmware::parse_version_line(&line)
+                    .or_else(|| firmware::is_missing_app_log(&line).then_some(BoardFirmware::Missing));
+                if old.is_some() {
+                    *heard.old_firmware.lock().unwrap() = old;
+                }
+                sink(BridgeEvent::BoardLog { line });
+            }
+            LinkEvent::Notification { method, .. } if method == "ready" => heard.rebooted.store(true, Ordering::Relaxed),
+            LinkEvent::Notification { .. } | LinkEvent::Closed(_) => {}
+        })?
+    };
     on_event(BridgeEvent::Connected { port: port.to_string() });
 
-    let reader_stop = Arc::new(AtomicBool::new(false));
-    let probe = Arc::new(FirmwareProbe::default());
-    let reader = {
-        let rx = ser.try_clone()?;
-        let flag = reader_stop.clone();
-        let sink = on_event.clone();
-        let probe = probe.clone();
-        thread::spawn(move || forward_board_log(rx, &flag, &sink, &probe))
-    };
-
-    let result = (|| {
-        sleep_unless_stopped(config.boot_wait, stop);
-        let mut next = Instant::now();
-        let mut asked: Option<Instant> = None;
-        while !stop.load(Ordering::Relaxed) {
-            if !probe.known.load(Ordering::Relaxed) && asked.is_none_or(|t| t.elapsed() >= VERSION_QUERY_EVERY) {
-                ser.write_all(firmware::VERSION_QUERY.as_bytes())?;
-                probe.queries.fetch_add(1, Ordering::Relaxed);
-                asked = Some(Instant::now());
-            }
-            let mut snapshot = collector.sample();
-            snapshot.face = Some(*config.faces.lock().unwrap());
-            // A line without `rot` turns the board upright again.
-            snapshot.rot = Some(*config.rotation.lock().unwrap()).filter(|r| !r.is_upright());
-            snapshot.claude = claude.sample();
-            let sent = snapshot.is_sendable();
-            if sent {
-                ser.write_all(snapshot.to_line().as_bytes())?;
-                ser.flush()?;
-            }
-            on_event(BridgeEvent::Snapshot { snapshot, sent });
-            next += config.interval;
-            let now = Instant::now();
-            if next < now {
-                next = now;
-            }
-            sleep_unless_stopped(next - now, stop);
-        }
-        Ok(())
-    })();
-
-    reader_stop.store(true, Ordering::Relaxed);
-    let _ = reader.join();
-    result
-}
-
-fn forward_board_log(mut rx: Box<dyn serialport::SerialPort>, stop: &AtomicBool, sink: &EventSink, probe: &FirmwareProbe) {
-    let mut buf = [0u8; 256];
-    let mut line = Vec::new();
     let mut reported: Option<BoardFirmware> = None;
     let mut report = |firmware: BoardFirmware| {
-        probe.known.store(true, Ordering::Relaxed);
         if reported.as_ref() != Some(&firmware) {
             reported = Some(firmware.clone());
-            sink(BridgeEvent::Firmware { firmware });
+            on_event(BridgeEvent::Firmware { firmware });
         }
     };
+    let closed = |link: &Link| io::Error::new(io::ErrorKind::BrokenPipe, link.closed_reason().unwrap_or_else(|| "port closed".into()));
+
+    let mut ready = false;
+    let mut unanswered = 0u32;
+    let mut next_hello = Instant::now();
+    let mut pushed: Option<(Faces, Rotations)> = None;
+    let mut next = Instant::now();
     while !stop.load(Ordering::Relaxed) {
-        match rx.read(&mut buf) {
-            Ok(0) => {}
-            Ok(n) => {
-                for &b in &buf[..n] {
-                    match b {
-                        b'\n' => {
-                            let text = String::from_utf8_lossy(&line).trim_end_matches('\r').to_string();
-                            line.clear();
-                            if text.is_empty() {
-                                continue;
-                            }
-                            if let Some(version) = firmware::parse_version_line(&text) {
-                                report(version);
-                            } else if !probe.known.load(Ordering::Relaxed) {
-                                if firmware::is_missing_app_log(&text) {
-                                    report(BoardFirmware::Missing);
-                                } else if firmware::is_snapshot_log(&text)
-                                    && probe.queries.load(Ordering::Relaxed) >= LEGACY_AFTER_QUERIES
-                                {
-                                    report(BoardFirmware::Legacy);
-                                }
-                            }
-                            sink(BridgeEvent::BoardLog { line: text });
-                        }
-                        _ if line.len() < 1024 => line.push(b),
-                        _ => {}
+        if !link.is_alive() {
+            return Err(closed(&link));
+        }
+        if heard.rebooted.swap(false, Ordering::Relaxed) {
+            ready = false;
+            pushed = None;
+            next_hello = Instant::now();
+        }
+        if !ready && Instant::now() >= next_hello {
+            match link.hello(HELLO_TIMEOUT) {
+                Ok(hello) => {
+                    ready = true;
+                    unanswered = 0;
+                    report(BoardFirmware::Version { version: hello.firmware, idf: hello.idf, protocol: hello.protocol });
+                }
+                Err(CallError::Io(e)) => return Err(e),
+                Err(CallError::Closed) => return Err(closed(&link)),
+                Err(_) => {
+                    unanswered += 1;
+                    if unanswered == LEGACY_QUERY_AFTER {
+                        link.send_raw(firmware::VERSION_QUERY.as_bytes())?;
+                    }
+                    if unanswered > 2 * LEGACY_QUERY_AFTER {
+                        next_hello = Instant::now() + HELLO_BACKOFF;
                     }
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
-            Err(_) => return,
+            if let Some(old) = heard.old_firmware.lock().unwrap().take().filter(|_| !ready) {
+                report(old);
+            }
+        }
+
+        if ready {
+            let want = (*config.faces.lock().unwrap(), *config.rotation.lock().unwrap());
+            if pushed != Some(want) {
+                match push_settings(&link, want.0, want.1) {
+                    Ok(()) => pushed = Some(want),
+                    Err(CallError::Io(e)) => return Err(e),
+                    // Retried on the next tick.
+                    Err(e) => on_event(BridgeEvent::BoardLog { line: format!("host: settings not applied: {e}") }),
+                }
+            }
+        }
+
+        let mut snapshot = collector.sample();
+        snapshot.face = Some(*config.faces.lock().unwrap());
+        snapshot.rot = Some(*config.rotation.lock().unwrap()).filter(|r| !r.is_upright());
+        snapshot.claude = claude.sample();
+        let sent = ready && snapshot.is_sendable();
+        if sent {
+            link.send(Channel::Metrics, &snapshot.to_payload())?;
+        }
+        on_event(BridgeEvent::Snapshot { snapshot, sent });
+
+        next += config.interval;
+        let now = Instant::now();
+        if next < now {
+            next = now;
+        }
+        sleep_unless_stopped(next - now, stop);
+    }
+    Ok(())
+}
+
+fn push_settings(link: &Link, faces: Faces, rotation: Rotations) -> Result<(), CallError> {
+    for (screen, face, rot) in [("left", faces.cpu, rotation.cpu), ("right", faces.gpu, rotation.gpu)] {
+        let calls = [
+            ("set_face", json!({"screen": screen, "face": face.name()})),
+            ("set_rotation", json!({"screen": screen, "degrees": rot.degrees()})),
+        ];
+        for (tool, args) in calls {
+            let result = link.call_tool(tool, args, TOOL_TIMEOUT)?;
+            if result.is_error {
+                return Err(CallError::Invalid(format!("{tool}: {}", result.text())));
+            }
         }
     }
+    Ok(())
 }
 
 fn sleep_unless_stopped(duration: Duration, stop: &AtomicBool) {

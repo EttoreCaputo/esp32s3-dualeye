@@ -51,14 +51,12 @@ pub fn detect_board() -> Option<String> {
     }
 }
 
-/// Open without toggling DTR/RTS: on the S3's USB Serial/JTAG that sequence
-/// resets the chip (or drops it into the ROM bootloader).
+/// Open without resetting the board. The OS raises DTR and RTS on open; the
+/// S3's USB Serial/JTAG resets the chip whenever RTS is high while DTR is low,
+/// so RTS has to come down first.
 pub fn open(name: &str) -> io::Result<Box<dyn SerialPort>> {
-    let mut port = serialport::new(name, BAUD_RATE)
-        .timeout(Duration::from_millis(200))
-        .dtr_on_open(false)
-        .open()?;
-    port.write_data_terminal_ready(false)?;
+    let mut port = serialport::new(name, BAUD_RATE).timeout(Duration::from_millis(200)).open()?;
     port.write_request_to_send(false)?;
+    port.write_data_terminal_ready(false)?;
     Ok(port)
 }
