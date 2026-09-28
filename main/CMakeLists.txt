@@ -5,8 +5,10 @@ idf_component_register(SRCS "main.c"
                             "metrics_parser.c"
                             "metrics_io.c"
                             "ui_watch.c"
+                            "board_audio.c"
+                            "audio_selftest.c"
                             "fonts/lv_font_montserrat_bold_12.c"
                             "fonts/lv_font_montserrat_bold_48.c"
                             "fonts/lv_font_fan_16.c"
                        INCLUDE_DIRS "."
-                       REQUIRES esp_app_format esp_driver_gpio esp_driver_spi esp_lcd esp_lcd_gc9a01 esp_timer lvgl nvs_flash)
+                       REQUIRES esp_app_format esp_codec_dev esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_spi esp_lcd esp_lcd_gc9a01 esp_timer lvgl nvs_flash)

@@ -92,3 +92,6 @@ Desktop.ini
 
 # Rust host tools (Cargo.lock is committed)
 host/target/
+
+# Audio self-test captures (tools/audio_selftest.py)
+audio_capture/

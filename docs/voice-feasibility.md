@@ -33,10 +33,25 @@ From the Waveshare page and the current `sdkconfig`:
 
 ES8311 + ES7210 is the same pairing as Espressif's reference voice boards (and [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32)), so `esp_codec_dev` and ESP-SR are known to work with it.
 
-**To verify from the schematic in M0:**
-- I2S and I2C pins, and the amplifier-enable GPIO.
-- How many mics are populated, and whether the speaker output is looped back into an ES7210 channel. That loopback is the reference signal acoustic echo cancellation (AEC) needs. Without it, the board can't hear the user while it is talking (no barge-in), and we fall back to half-duplex.
-- Whether audio pins clash with LCD/SPI or the GPIO1 battery sense.
+### M0 results
+
+Measured on the board with `tools/audio_selftest.py` (firmware at 160 MHz, UI running):
+
+| Item | Result |
+|------|--------|
+| Pins | I2C SCL 10 / SDA 11; I2S MCLK 12, BCLK 13, WS 14, DIN 15 (ES7210), DOUT 16 (ES8311); PA enable 9. No clash with the LCDs |
+| Input channels | ES7210 TDM slot **0 = microphone**, slot **1 = speaker loopback (AEC reference)**, slots 2–3 unconnected |
+| AEC reference | Clean: −91 dBFS when silent, the 1 kHz test tone at −27 dBFS while playing. **Full duplex with AEC and barge-in is possible** |
+| Mic, 30 dB analog gain | Room noise −74 dBFS RMS; speech at 30–50 cm −50…−55 dBFS RMS, peaks −35…−40 dBFS. About 20 dB SNR but **~25 dB quieter than ideal** → raise the analog gain (max 37.5 dB) and rely on the AFE's AGC in M3 |
+| Speaker | Chime and tones clearly audible at volume 60/100 |
+| Internal heap | 112 KB free, 79 KB minimum since boot, **largest block 36 KB**. Tight for the ESP-SR AFE: keep its buffers in PSRAM and measure first thing in M3 |
+| PSRAM | 8 MB, all free |
+| CPU | Core 0: LVGL busy mainly during full redraws; core 1 about 99 % idle. The self-test's sine generator takes about 32 % of core 1 (software `sinf` plus the codec's mono → 32-bit slot expansion); real playback in M5 streams PCM instead |
+
+Follow-ups for M3:
+- The CPU runs at 160 MHz; move to 240 MHz before adding the AFE and wake word.
+- The LVGL task has about 1 KB of stack headroom; grow it before adding the listening overlay.
+- On macOS, opening the port from Python resets the board (DTR/RTS are raised on open); the self-test script waits for the boot to finish. The Rust host is unaffected.
 
 ## Current firmware and host, and what has to change
 
@@ -115,7 +130,8 @@ Screen-only commands ("switch to rings") can skip TTS and just animate, which fe
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | CPU/RAM contention between LVGL (2 displays) and the AFE + WakeNet | UI stutter, missed wake words | Pin audio to core 1 and LVGL to core 0; PSRAM for AFE buffers; measure in M3; lower the UI refresh rate while listening |
-| No AEC reference on this board | No barge-in; board may hear itself | Half-duplex: mute the mic while speaking; decide in M0 from the schematic |
+| ~~No AEC reference on this board~~ | — | Resolved in M0: the ES7210 channel 1 is a clean loopback |
+| Low mic level at 30 dB gain | Weak wake-word and STT input | Max analog gain plus the AFE's AGC; re-measure in M3 |
 | USB link reliability (host not reading, drops, reconnects) | Audio glitches, stuck states | Framing + CRC + resync; bounded ring buffers; reconnect tests in M1 |
 | Small-model tool-calling accuracy | Wrong or no action | Few, well-described tools; constrained grammar or JSON schema in `llama-server`; eval set of IT/EN commands in M6 |
 | Weak host (no GPU) | Slow replies | Smaller models (Whisper base, Qwen3 1.7B); capability check in the app |
@@ -135,5 +151,4 @@ Wi-Fi or standalone mode, on-board LLM, cloud STT/LLM/TTS, multiple boards on on
 
 ## Open questions
 
-1. Schematic check: mic count, AEC loopback, amplifier-enable pin (M0).
-2. Is microWakeWord accuracy on "Hey Duo" good enough with the board's mic and AFE? (M3 spike)
+1. Is microWakeWord accuracy on "Hey Duo" good enough with the board's mic and AFE? (M3 spike)

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "audio_selftest.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -41,11 +42,13 @@ static void metrics_io_task(void *arg)
             continue;
         }
         if (c == '\n') {
+            line[len] = '\0';
             if (!overflow && len == sizeof(METRICS_IO_VERSION_QUERY) - 1
                 && memcmp(line, METRICS_IO_VERSION_QUERY, len) == 0) {
                 metrics_io_report_version();
+            } else if (!overflow && audio_selftest_command(line)) {
+                // handled
             } else if (!overflow && len > 0 && line[0] == '{') {
-                line[len] = '\0';
                 metrics_snapshot_t snap;
                 esp_err_t err = metrics_parse_line(line, &snap);
                 if (err == ESP_OK) {

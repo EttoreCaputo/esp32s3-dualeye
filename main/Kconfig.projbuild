@@ -1,0 +1,9 @@
+menu "DualEye"
+
+    config DUALEYE_AUDIO_BOOT_CHIME
+        bool "Play a chime on boot"
+        default n
+        help
+            Audio bring-up aid: play a short two-note chime once the codecs are up.
+
+endmenu

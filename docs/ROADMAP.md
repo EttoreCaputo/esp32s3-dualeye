@@ -29,18 +29,18 @@ M0 Audio bring-up ─► M1 Protocol v2 ─► M2 MCP server ──────�
 
 ---
 
-## M0 — Audio bring-up
+## M0 — Audio bring-up ✅
 
 Goal: prove the audio hardware works and pin down its limits.
 
-- [ ] Extract I2S/I2C pins, amplifier-enable pin, mic count and AEC loopback from the schematic; record them in `board_audio.h`
-- [ ] Add `espressif/esp_codec_dev`; initialise ES8311 (out) and ES7210 (in) at 16 kHz / 16-bit
-- [ ] Play a sine or chime from flash on boot, behind a debug flag
-- [ ] Record 5 s and dump it to the host (temporary base64-over-log is acceptable), then play the WAV back
-- [ ] Measure CPU and heap with LVGL running plus audio idle
-- [ ] Decide: full duplex with AEC, or half duplex (document it in the feasibility study)
+- [x] I2S/I2C pins, amplifier-enable pin, mic count and AEC loopback, recorded in `main/board_audio.h`
+- [x] Add `espressif/esp_codec_dev`; initialise ES8311 (out) and ES7210 (in) at 16 kHz / 16-bit
+- [x] Chime and sine on the speaker (`!audio tone`), optional boot chime (`CONFIG_DUALEYE_AUDIO_BOOT_CHIME`)
+- [x] Record up to 8 s of all four ES7210 channels and dump them to the host (base64 over the log, CRC-checked), then play back (`tools/audio_selftest.py`)
+- [x] Measure CPU and heap with LVGL running, idle and while playing
+- [x] Decide: **full duplex with AEC** (channel 1 is a clean speaker loopback)
 
-Done when: audible tone, intelligible recording, no UI regressions, and the AEC decision recorded.
+Done when: audible tone, intelligible recording, no UI regressions, and the AEC decision recorded. Results are in [voice-feasibility.md](voice-feasibility.md#m0-results).
 
 ## M1 — Protocol v2
 
@@ -124,15 +124,3 @@ Done when: at least 90 % of the eval set is correct with the default model, with
 - [ ] Packaging of the sidecar binaries per OS in the Tauri bundle; license table
 - [ ] Docs: README voice section, troubleshooting, privacy note (everything stays local)
 - [ ] Release 1.0.0 and firmware changelog
-
----
-
-## GitHub setup
-
-- **Milestones**: `M0 Audio bring-up` … `M7 Polish & release`, one per section above.
-- **Issues**: one per checklist item (larger items split), each with acceptance criteria.
-- **Labels**: `area:firmware`, `area:host`, `area:app`, `area:docs`, `type:feature`, `type:spike`, `type:bug`.
-- **Project (v2)** "DualEye Voice", linked to the repo:
-  - fields: Status (Backlog / Sprint / In progress / Review / Done), Milestone, Area, Sprint (iteration, 1 week), Estimate;
-  - views: Board by Status (current sprint), Table by Milestone, Roadmap by Sprint.
-- This file stays the source of truth for scope; the Project tracks execution.

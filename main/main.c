@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "audio_selftest.h"
 #include "board_display.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -139,6 +140,7 @@ void app_main(void)
 
     BaseType_t ui_ok = xTaskCreate(ui_refresh_task, "ui_refresh", 4096, NULL, 4, NULL);
     ESP_ERROR_CHECK(ui_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    audio_selftest_start();
     metrics_io_start();
     // A host already listening (e.g. right after flashing) learns the version without asking.
     metrics_io_report_version();
