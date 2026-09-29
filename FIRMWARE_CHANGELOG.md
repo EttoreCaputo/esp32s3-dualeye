@@ -7,6 +7,13 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 0.6.0
+
+- Voice: say "Alexa" (or "Hi ESP", with the `set_wake_word` tool) and a ring lights round the screens. With voice on in the app, the board then sends what you say to your computer, which carries out simple commands and answers out loud through the board's speaker. Everything stays on your computer.
+- The speaker's volume can be set from the app, and the board remembers it.
+- The microphone can be muted (`set_mic`); the board remembers that too.
+- A new flash layout makes room for the wake-word models: the app flashes the whole image, so update from the app.
+
 ## 0.4.0
 
 - New connection to the app (protocol v2): it needs the app version that comes with this firmware. Boot messages and crash reports still show in the app's board console.

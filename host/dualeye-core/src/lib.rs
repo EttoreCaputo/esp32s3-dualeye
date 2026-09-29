@@ -17,6 +17,7 @@ pub mod download;
 pub mod firmware;
 pub mod flasher;
 pub mod hub;
+pub mod intents;
 pub mod link;
 pub mod models;
 #[cfg(feature = "mcp")]
@@ -24,8 +25,10 @@ pub mod mcp;
 pub mod protocol;
 pub mod sensors;
 pub mod serial;
+pub(crate) mod sidecar;
 pub mod snapshot;
 pub mod stt;
+pub mod tts;
 pub mod voice;
 
 pub use bridge::{Bridge, BridgeConfig, BridgeEvent};
@@ -37,5 +40,6 @@ pub use link::{CallError, Hello, Link, LinkEvent, Tool, ToolResult};
 pub use sensors::{Collector, Reading};
 pub use serial::PortInfo;
 pub use stt::{Stt, SttConfig, SttLanguage, Transcript};
-pub use voice::{Utterance, VoiceConfig};
+pub use tts::{Tts, TtsConfig};
+pub use voice::{Speaker, Spoken, Utterance, VoiceConfig};
 pub use snapshot::{DeviceMetrics, Face, Faces, Fan, Memory, Rotation, Rotations, Snapshot};

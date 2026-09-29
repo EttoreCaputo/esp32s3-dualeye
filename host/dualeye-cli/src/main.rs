@@ -14,6 +14,10 @@
 //!   dualeye call show_text '{"text":"Ciao"}'
 //!   dualeye mcp                   # MCP server on stdio, for Claude Code / Claude Desktop
 //!   dualeye models download small # a Whisper model, for `dualeye --stt`
+//!   dualeye piper install         # Piper, for `dualeye --tts` (needs Python 3)
+//!   dualeye models download it_IT-paola-medium   # a voice for it
+//!   dualeye --stt --tts           # voice commands with spoken replies
+//!   dualeye say "Ciao!"           # speak through a running bridge's speaker
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -24,7 +28,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
 use dualeye_core::claude::statusline;
-use dualeye_core::models::{self, Model};
+use dualeye_core::models::{self, Kind, Model};
+use dualeye_core::tts::{self, Tts, TtsConfig};
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage};
 use dualeye_core::voice::{self, VoiceConfig};
 use dualeye_core::{Board, BoardFirmware, ClaudeUsage, Collector, Face, Faces, Hub, Memory, Rotation, Rotations, Snapshot, mcp, serial};
@@ -83,6 +88,14 @@ struct Args {
     /// Language to transcribe in: auto (Italian or English), it or en
     #[arg(long, default_value = "auto")]
     stt_language: SttLanguage,
+    /// Answer voice commands out loud through the board's speaker, with
+    /// Piper (`dualeye piper install`) and the downloaded voices
+    #[arg(long)]
+    tts: bool,
+    /// A voice from `dualeye models` for its language, instead of the
+    /// default one (repeat for Italian and English)
+    #[arg(long, value_name = "VOICE", requires = "tts")]
+    tts_voice: Vec<String>,
 }
 
 /// Talk to the board's tools. While the app or a streaming `dualeye` runs,
@@ -119,10 +132,34 @@ enum Command {
         #[arg(long, env = "DUALEYE_PORT")]
         port: Option<String>,
     },
-    /// List the Whisper models for `--stt`, or download or remove one
+    /// List the Whisper models for `--stt` and the voices for `--tts`, or
+    /// download or remove one
     Models {
         #[command(subcommand)]
         action: Option<ModelsAction>,
+    },
+    /// Show whether Piper (text-to-speech, for `--tts`) is installed, or install it
+    Piper {
+        #[command(subcommand)]
+        action: Option<PiperAction>,
+    },
+    /// Speak through the board's speaker. Needs the app with spoken replies
+    /// on, or `dualeye --tts`, running
+    Say {
+        text: String,
+        /// it or en (default: what the text looks like)
+        #[arg(long)]
+        language: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PiperAction {
+    /// Create a virtualenv in DualEye's data folder and pip install Piper into it
+    Install {
+        /// The Python 3 to create it with (default: python3 on the PATH)
+        #[arg(long)]
+        python: Option<std::path::PathBuf>,
     },
 }
 
@@ -140,6 +177,19 @@ fn main() -> ExitCode {
         Some(Command::Tools { port, json }) => return tools(port, json),
         Some(Command::Call { port, json, tool, args }) => return call(port, json, &tool, &args),
         Some(Command::Models { action }) => return models_command(action),
+        Some(Command::Piper { action }) => return piper_command(action),
+        Some(Command::Say { text, language }) => {
+            return match board(None).say(&text, language.as_deref()) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string(&r).unwrap_or_default());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Some(Command::Mcp { port }) => {
             return match mcp::serve_stdio(port) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -189,6 +239,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let tts = match args.tts.then(|| tts_config(&args.tts_voice)) {
+        None => None,
+        Some(Ok(config)) => Some(Arc::new(Tts::new(config))),
+        Some(Err(why)) => {
+            eprintln!("{why}");
+            return ExitCode::FAILURE;
+        }
+    };
     // Lets `dualeye mcp` and `dualeye call` use the board while this streams.
     let hub = Hub::start().inspect_err(|e| eprintln!("not sharing the board with other processes: {e}")).ok();
     let config = BridgeConfig {
@@ -204,6 +262,7 @@ fn main() -> ExitCode {
         voice: Arc::new(Mutex::new(VoiceConfig {
             dump_dir: args.voice_dump.map(|d| if d.as_os_str().is_empty() { voice::default_dump_dir().unwrap_or(d) } else { d }),
             stt,
+            tts,
         })),
     };
     let stop = Arc::new(AtomicBool::new(false));
@@ -236,6 +295,19 @@ fn main() -> ExitCode {
             }
             BridgeEvent::Transcript { id, transcript: None } => println!("utterance {id}: no words"),
             BridgeEvent::VoiceError { message } => eprintln!("{message}"),
+            BridgeEvent::Reply { id, text, actions, elapsed_ms, .. } => {
+                for a in actions {
+                    println!("utterance {id}: {a}");
+                }
+                println!("utterance {id}: reply ({elapsed_ms} ms): {text}")
+            }
+            BridgeEvent::Spoken { id, spoken } => println!(
+                "utterance {id}: spoken, first audio after {} ms, {:.1} s played ({}{})",
+                spoken.first_audio_ms,
+                spoken.played_ms as f64 / 1000.0,
+                spoken.reason,
+                if spoken.underruns + spoken.lost > 0 { format!(", {} underruns, {} frames lost", spoken.underruns, spoken.lost) } else { String::new() }
+            ),
             BridgeEvent::Listening { id, trigger } => println!("utterance {id}: listening ({trigger})"),
             BridgeEvent::Utterance { utterance: u, duration_ms, peak_db, wav } => println!(
                 "utterance {}: {:.1} s, {}{}{}{}",
@@ -277,6 +349,10 @@ fn main() -> ExitCode {
         })
     };
     bridge::run(&config, &stop, sink);
+    // A reply still being spoken holds the sidecars too: stop them anyway.
+    let voice = config.voice.lock().unwrap();
+    voice.stt.iter().for_each(|s| s.shutdown());
+    voice.tts.iter().for_each(|t| t.shutdown());
     if fatal.load(Ordering::Relaxed) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
@@ -296,6 +372,51 @@ fn stt_config(model: &str, language: SttLanguage) -> Result<SttConfig, String> {
     Ok(SttConfig { server, model, language })
 }
 
+/// `--tts`: the default voices, or those `--tts-voice` names.
+fn tts_config(voices: &[String]) -> Result<TtsConfig, String> {
+    let python = tts::find_python().ok_or("Piper isn't installed: dualeye piper install")?;
+    let mut config = TtsConfig::with_default_voices(python);
+    for id in voices {
+        let m = Model::by_id(id).filter(|m| m.kind == Kind::Voice).ok_or_else(|| format!("{id}: not a voice; see dualeye models"))?;
+        if !m.is_installed() {
+            return Err(format!("the {id} voice isn't downloaded: dualeye models download {id}"));
+        }
+        config.voices.insert(m.language.unwrap_or("en").to_string(), id.clone());
+    }
+    if config.voices.is_empty() {
+        let defaults: Vec<&str> = ["it", "en"].into_iter().filter_map(models::default_voice).collect();
+        return Err(format!("no voice downloaded: dualeye models download {}", defaults.join(" (and) ")));
+    }
+    Ok(config)
+}
+
+fn piper_command(action: Option<PiperAction>) -> ExitCode {
+    match action {
+        None => match tts::find_python() {
+            Some(python) => println!("Piper installed: {}", python.display()),
+            None => {
+                println!("Piper isn't installed: dualeye piper install");
+                return ExitCode::FAILURE;
+            }
+        },
+        Some(PiperAction::Install { python }) => {
+            let Some(python) = python.or_else(tts::system_python) else {
+                eprintln!("no python3 on the PATH: install Python 3.9 or later, or pass --python");
+                return ExitCode::FAILURE;
+            };
+            eprintln!("installing {} with {}", tts::PIPER_REQUIREMENT, python.display());
+            match tts::install(&python, |line| eprintln!("  {line}")) {
+                Ok(p) => println!("{}", p.display()),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn model_ids() -> String {
     models::MODELS.iter().map(|m| m.id).collect::<Vec<_>>().join(", ")
 }
@@ -304,10 +425,17 @@ fn models_command(action: Option<ModelsAction>) -> ExitCode {
     let find = |id: &str| Model::by_id(id).ok_or_else(|| format!("unknown model {id:?}: {}", model_ids()));
     let result = match action {
         None => {
-            for m in models::MODELS {
-                let mark = if m.is_installed() { "installed" } else { "" };
-                let default = if m.id == models::DEFAULT_MODEL { " (default)" } else { "" };
-                println!("{:<22} {:>5} MB  {:<9}  {}{default}", m.id, m.bytes / 1_000_000, mark, m.note);
+            for (kind, title) in [(Kind::Whisper, "Speech-to-text (Whisper, --stt)"), (Kind::Voice, "Voices (Piper, --tts)")] {
+                println!("{title}");
+                for m in Model::of_kind(kind) {
+                    let mark = if m.is_installed() { "installed" } else { "" };
+                    let default = m.id == models::DEFAULT_MODEL || m.language.and_then(models::default_voice) == Some(m.id);
+                    let default = if default { " (default)" } else { "" };
+                    println!("  {:<22} {:>5} MB  {:<9}  {}{default}", m.id, m.bytes() / 1_000_000, mark, m.note);
+                    if kind == Kind::Voice {
+                        println!("  {:<22}                     license: {}", "", m.license);
+                    }
+                }
             }
             if let Some(dir) = stt::models_dir() {
                 println!("\nin {}", dir.display());

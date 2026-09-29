@@ -15,9 +15,12 @@
 //!
 //! Voice (opt-in, off by default): with it on, what the board hears after its
 //! wake word is transcribed by a whisper.cpp `whisper-server` sidecar with a
-//! model the app downloads (`dualeye_core::models`). Turning it on, or picking
-//! another model or language, swaps the bridge's shared voice config: no
-//! reconnect.
+//! model the app downloads (`dualeye_core::models`), simple commands are
+//! carried out (`dualeye_core::intents`) and answered out loud by a Piper
+//! sidecar through the board's speaker. The app installs Piper itself, into
+//! a virtualenv made with esptool's Python. Turning voice on, or picking
+//! another model, language or voice, swaps the bridge's shared voice config:
+//! no reconnect.
 //!
 //! The same binary with `--mcp` is an MCP server for Claude Code and Claude
 //! Desktop (`dualeye_core::mcp`). It reaches the board through this app's
@@ -25,7 +28,7 @@
 
 mod instances;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -35,11 +38,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
-use dualeye_core::models::{self, Model};
+use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage, Transcript};
-use dualeye_core::voice::{self, VoiceConfig};
+use dualeye_core::tts::{self, Tts, TtsConfig};
+use dualeye_core::voice::{self, Spoken, VoiceConfig};
 use dualeye_core::{
-    BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
+    Board, BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
     mcp, serial,
 };
 use serde::{Deserialize, Serialize};
@@ -75,12 +79,25 @@ struct VoiceSettings {
     language: SttLanguage,
     /// Keep each utterance as a WAV file (`voice/` in DualEye's data folder).
     keep_recordings: bool,
+    /// Answer out loud through the board's speaker.
+    speak: bool,
+    /// Voice by language (`it`, `en`): `models::MODELS` ids.
+    voices: BTreeMap<String, String>,
 }
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        Self { enabled: false, model: models::DEFAULT_MODEL.into(), language: SttLanguage::Auto, keep_recordings: false }
+        let voices = ["it", "en"].into_iter().filter_map(|l| models::default_voice(l).map(|v| (l.to_string(), v.to_string()))).collect();
+        Self { enabled: false, model: models::DEFAULT_MODEL.into(), language: SttLanguage::Auto, keep_recordings: false, speak: true, voices }
     }
+}
+
+/// What the host did about a transcript.
+#[derive(Clone, Serialize)]
+struct ReplyEntry {
+    text: String,
+    actions: Vec<String>,
+    understood: bool,
 }
 
 /// One line of the Voice tab's log.
@@ -91,6 +108,8 @@ struct TranscriptEntry {
     at: u64,
     /// `None`: Whisper heard no words.
     transcript: Option<Transcript>,
+    reply: Option<ReplyEntry>,
+    spoken: Option<Spoken>,
 }
 
 #[derive(Default)]
@@ -147,7 +166,17 @@ impl Link {
                     self.transcripts.pop_front();
                 }
                 let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-                self.transcripts.push_back(TranscriptEntry { id: *id, at, transcript: transcript.clone() });
+                self.transcripts.push_back(TranscriptEntry { id: *id, at, transcript: transcript.clone(), reply: None, spoken: None });
+            }
+            BridgeEvent::Reply { id, text, actions, understood, .. } => {
+                if let Some(entry) = self.transcripts.iter_mut().rev().find(|e| e.id == *id) {
+                    entry.reply = Some(ReplyEntry { text: text.clone(), actions: actions.clone(), understood: *understood });
+                }
+            }
+            BridgeEvent::Spoken { id, spoken } => {
+                if let Some(entry) = self.transcripts.iter_mut().rev().find(|e| e.id == *id) {
+                    entry.spoken = Some(spoken.clone());
+                }
             }
             // `AppState::stt_error` keeps the last error.
             BridgeEvent::Listening { .. } | BridgeEvent::Utterance { .. } | BridgeEvent::VoiceError { .. } => {}
@@ -182,6 +211,10 @@ struct AppState {
     voice: Arc<Mutex<VoiceConfig>>,
     /// Speech-to-text: `off`, `starting`, `ready` or `error`, and why.
     stt_state: Arc<Mutex<(&'static str, Option<String>)>>,
+    /// Text-to-speech, likewise.
+    tts_state: Arc<Mutex<(&'static str, Option<String>)>>,
+    /// Piper being installed: the latest line of its output.
+    piper_install: Mutex<Option<String>>,
     /// The model being downloaded and how far along (percent).
     download: Mutex<Option<(String, f32)>>,
     cancel_download: AtomicBool,
@@ -201,37 +234,74 @@ impl AppState {
 }
 
 /// Make the bridge's voice config match the settings: start (or keep)
-/// the whisper-server sidecar, or stop it.
+/// the whisper-server and Piper sidecars, or stop them.
 fn apply_voice(state: &AppState) {
     let settings = state.settings.lock().unwrap().voice.clone();
-    let current = state.voice.lock().unwrap().stt.clone();
-    let wanted = settings.enabled.then(|| stt_config(&settings));
-    let stt = match wanted {
+    let (current_stt, current_tts) = {
+        let voice = state.voice.lock().unwrap();
+        (voice.stt.clone(), voice.tts.clone())
+    };
+    let stt = sidecar(
+        settings.enabled.then(|| stt_config(&settings)),
+        current_stt.filter(|s| settings.enabled && stt_config(&settings).is_ok_and(|c| s.config().model == c.model && s.config().language == c.language)),
+        &state.stt_state,
+        |config| Arc::new(Stt::new(config)),
+        |stt: &Arc<Stt>| stt.warm_up().map_err(|e| e.to_string()),
+    );
+    let wanted_tts = (settings.enabled && settings.speak).then(|| tts_config(&settings));
+    let keep_tts = current_tts.filter(|t| matches!(&wanted_tts, Some(Ok(c)) if t.config() == c));
+    let tts = sidecar(wanted_tts, keep_tts, &state.tts_state, |config| Arc::new(Tts::new(config)), |tts: &Arc<Tts>| tts.warm_up().map_err(|e| e.to_string()));
+    let dump_dir = settings.keep_recordings.then(voice::default_dump_dir).flatten();
+    *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt, tts };
+}
+
+/// One sidecar for [`apply_voice`]: off (`wanted` is `None`), not possible
+/// (`Some(Err)`), the running one when `keep` has it, or a new one warmed up
+/// in the background. `status` follows.
+fn sidecar<C, T: Send + Sync + 'static>(
+    wanted: Option<Result<C, String>>,
+    keep: Option<Arc<T>>,
+    status: &Arc<Mutex<(&'static str, Option<String>)>>,
+    make: impl FnOnce(C) -> Arc<T>,
+    warm_up: impl FnOnce(&Arc<T>) -> Result<(), String> + Send + 'static,
+) -> Option<Arc<T>> {
+    match wanted {
         None => {
-            *state.stt_state.lock().unwrap() = ("off", None);
+            *status.lock().unwrap() = ("off", None);
             None
         }
         Some(Err(why)) => {
-            *state.stt_state.lock().unwrap() = ("error", Some(why));
+            *status.lock().unwrap() = ("error", Some(why));
             None
         }
-        // Same model and language: keep the running server.
-        Some(Ok(config)) if current.as_ref().is_some_and(|s| s.config().model == config.model && s.config().language == config.language) => current,
+        Some(Ok(_)) if keep.is_some() => keep,
         Some(Ok(config)) => {
-            let stt = Arc::new(Stt::new(config));
-            *state.stt_state.lock().unwrap() = ("starting", None);
-            let (warm, status) = (stt.clone(), state.stt_state.clone());
+            let sidecar = make(config);
+            *status.lock().unwrap() = ("starting", None);
+            let (warm, status) = (sidecar.clone(), status.clone());
             thread::spawn(move || {
-                *status.lock().unwrap() = match warm.warm_up() {
+                *status.lock().unwrap() = match warm_up(&warm) {
                     Ok(()) => ("ready", None),
-                    Err(e) => ("error", Some(e.to_string())),
+                    Err(e) => ("error", Some(e)),
                 }
             });
-            Some(stt)
+            Some(sidecar)
         }
-    };
-    let dump_dir = settings.keep_recordings.then(voice::default_dump_dir).flatten();
-    *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt };
+    }
+}
+
+fn tts_config(settings: &VoiceSettings) -> Result<TtsConfig, String> {
+    let python = tts::find_python().ok_or("Piper isn't installed yet")?;
+    let voices: BTreeMap<String, String> = settings
+        .voices
+        .iter()
+        .filter(|(_, id)| Model::by_id(id).is_some_and(|m| m.kind == Kind::Voice && m.is_installed()))
+        .map(|(l, id)| (l.clone(), id.clone()))
+        .collect();
+    if voices.is_empty() {
+        return Err("no voice downloaded yet".into());
+    }
+    Ok(TtsConfig { python, voices })
 }
 
 fn stt_config(settings: &VoiceSettings) -> Result<SttConfig, String> {
@@ -246,8 +316,11 @@ fn stt_config(settings: &VoiceSettings) -> Result<SttConfig, String> {
 #[derive(Serialize)]
 struct ModelInfo {
     id: &'static str,
+    kind: Kind,
+    language: Option<&'static str>,
     bytes: u64,
     note: &'static str,
+    license: &'static str,
     installed: bool,
 }
 
@@ -259,17 +332,31 @@ struct VoiceInfo {
     models: Vec<ModelInfo>,
     stt: &'static str,
     stt_error: Option<String>,
+    /// Piper's virtualenv interpreter, if installed.
+    piper: Option<String>,
+    /// While Piper installs: the latest line of its output.
+    piper_install: Option<String>,
+    tts: &'static str,
+    tts_error: Option<String>,
     download: Option<(String, f32)>,
 }
 
 fn voice_info_of(state: &AppState) -> VoiceInfo {
     let (stt, stt_error) = state.stt_state.lock().unwrap().clone();
+    let (tts, tts_error) = state.tts_state.lock().unwrap().clone();
     VoiceInfo {
         settings: state.settings.lock().unwrap().voice.clone(),
         server: stt::find_server().map(|p| p.display().to_string()),
-        models: models::MODELS.iter().map(|m| ModelInfo { id: m.id, bytes: m.bytes, note: m.note, installed: m.is_installed() }).collect(),
+        models: models::MODELS
+            .iter()
+            .map(|m| ModelInfo { id: m.id, kind: m.kind, language: m.language, bytes: m.bytes(), note: m.note, license: m.license, installed: m.is_installed() })
+            .collect(),
         stt,
         stt_error,
+        piper: tts::find_python().map(|p| p.display().to_string()),
+        piper_install: state.piper_install.lock().unwrap().clone(),
+        tts,
+        tts_error,
         download: state.download.lock().unwrap().clone(),
     }
 }
@@ -319,14 +406,82 @@ fn cancel_download(state: State<AppState>) {
 #[tauri::command]
 fn delete_model(state: State<AppState>, id: String) -> Result<VoiceInfo, String> {
     let model = Model::by_id(&id).ok_or_else(|| format!("unknown model {id}"))?;
-    let in_use = state.voice.lock().unwrap().stt.as_ref().is_some_and(|s| Some(s.config().model.clone()) == model.path());
-    if in_use {
+    {
         // Stop the server that has it open first.
-        state.voice.lock().unwrap().stt = None;
+        let mut voice = state.voice.lock().unwrap();
+        if voice.stt.as_ref().is_some_and(|s| Some(s.config().model.clone()) == model.path()) {
+            voice.stt = None;
+        }
+        if voice.tts.as_ref().is_some_and(|t| t.config().voices.values().any(|v| v == model.id)) {
+            voice.tts = None;
+        }
     }
     model.remove().map_err(|e| e.to_string())?;
     apply_voice(&state);
     Ok(voice_info_of(&state))
+}
+
+/// Set Piper up: a virtualenv made with esptool's Python (downloaded first
+/// if the machine has none), then `pip install piper-tts`.
+#[tauri::command]
+async fn install_piper(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        {
+            let mut installing = state.piper_install.lock().unwrap();
+            if installing.is_some() {
+                return Err("Piper is already being installed".to_string());
+            }
+            *installing = Some("Getting Python".into());
+        }
+        let result = setup::python(&state.esptool_dir, |e| {
+            if let FlashEvent::Setup { message, percent } = e {
+                let line = percent.map_or(message.clone(), |p| format!("{message} {p:.0}%"));
+                *state.piper_install.lock().unwrap() = Some(line);
+            }
+        })
+        .and_then(|python| tts::install(&python, |line| *state.piper_install.lock().unwrap() = Some(line)));
+        *state.piper_install.lock().unwrap() = None;
+        result.map_err(|e| e.to_string())?;
+        apply_voice(&state);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn board() -> Board {
+    Board::new(None, &format!("dualeye-app/{}", env!("CARGO_PKG_VERSION")))
+}
+
+/// The speaker's volume as the board has it (it keeps it in NVS).
+#[tauri::command]
+async fn board_volume() -> Result<Option<u8>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let state = board().call_tool("get_state", serde_json::json!({})).map_err(|e| e.to_string())?;
+        Ok(state.structured_content.and_then(|s| s.pointer("/audio/volume")?.as_u64()).map(|v| v as u8))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_board_volume(percent: u8) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = board().call_tool("set_volume", serde_json::json!({"percent": percent})).map_err(|e| e.to_string())?;
+        if result.is_error { Err(result.text()) } else { Ok(()) }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Say a test sentence through the board, with the voice of `language`.
+#[tauri::command]
+async fn test_voice(language: String) -> Result<(), String> {
+    let text = if language == "it" { "Ciao! Questa è la mia voce." } else { "Hello! This is my voice." };
+    tauri::async_runtime::spawn_blocking(move || board().say(text, Some(&language)).map(drop).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -544,7 +699,9 @@ fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
             if let BridgeEvent::VoiceError { message } = &event {
-                *state.stt_state.lock().unwrap() = ("error", Some(message.clone()));
+                // Which sidecar failed: Piper's errors say so.
+                let status = if message.starts_with("piper") { &state.tts_state } else { &state.stt_state };
+                *status.lock().unwrap() = ("error", Some(message.clone()));
             }
             // Faces and rotation came from the board (at connect, or an MCP
             // client changed them): keep them for the next launch too.
@@ -654,6 +811,8 @@ pub fn run() {
                 esptool_dir,
                 voice: Arc::default(),
                 stt_state: Arc::new(Mutex::new(("off", None))),
+                tts_state: Arc::new(Mutex::new(("off", None))),
+                piper_install: Mutex::new(None),
                 download: Mutex::new(None),
                 cancel_download: AtomicBool::new(false),
             });
@@ -677,7 +836,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_volume, set_board_volume, test_voice])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {
@@ -685,8 +844,12 @@ pub fn run() {
                 // Release the serial port before the process goes away.
                 if let Some(state) = app.try_state::<AppState>() {
                     state.bridge.lock().unwrap().take();
-                    // Stops the whisper-server sidecar.
-                    state.voice.lock().unwrap().stt = None;
+                    // Stops the whisper-server and Piper sidecars, even if a
+                    // reply being spoken still holds them.
+                    let mut voice = state.voice.lock().unwrap();
+                    voice.stt.take().inspect(|s| s.shutdown());
+                    voice.tts.take().inspect(|t| t.shutdown());
+                    drop(voice);
                     state.cancel_download.store(true, Ordering::SeqCst);
                     if let Some(hub) = &state.hub {
                         hub.set_unavailable("the DualEye app is quitting");

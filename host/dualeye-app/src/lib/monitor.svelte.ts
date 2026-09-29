@@ -68,6 +68,8 @@ type BridgeEvent =
   | { kind: "listening"; id: number; trigger: string }
   | { kind: "utterance"; utterance: Utterance; duration_ms: number; peak_db: number | null; wav: string | null }
   | { kind: "transcript"; id: number; transcript: Transcript | null }
+  | { kind: "reply"; id: number; text: string; language: string; actions: string[]; understood: boolean; elapsed_ms: number }
+  | { kind: "spoken"; id: number; spoken: Spoken }
   | { kind: "voice_error"; message: string }
   | { kind: "disconnected"; port: string; reason: string; permission_denied: boolean };
 
@@ -75,11 +77,31 @@ type BridgeEvent =
 export type VoiceState = "idle" | "listening" | "thinking" | "speaking";
 export type Utterance = { id: number; trigger: string; reason: string; speech: boolean; lost_frames: number };
 export type Transcript = { text: string; language: string; logprob: number | null; elapsed_ms: number };
+/** How a reply went out through the board's speaker. */
+export type Spoken = { text: string; first_audio_ms: number; played_ms: number; reason: string; underruns: number; lost: number };
+export type Reply = { text: string; actions: string[]; understood: boolean };
 /** One line of the Voice tab's log; `transcript` null when Whisper heard no words. */
-export type TranscriptEntry = { id: number; at: number; transcript: Transcript | null };
+export type TranscriptEntry = { id: number; at: number; transcript: Transcript | null; reply: Reply | null; spoken: Spoken | null };
 export type SttLanguage = "auto" | "it" | "en";
-export type VoiceSettings = { enabled: boolean; model: string; language: SttLanguage; keep_recordings: boolean };
-export type ModelInfo = { id: string; bytes: number; note: string; installed: boolean };
+export type VoiceSettings = {
+  enabled: boolean;
+  model: string;
+  language: SttLanguage;
+  keep_recordings: boolean;
+  /** Answer out loud through the board's speaker. */
+  speak: boolean;
+  /** Voice by language: `it`, `en`. */
+  voices: Record<string, string>;
+};
+export type ModelInfo = {
+  id: string;
+  kind: "whisper" | "voice";
+  language: string | null;
+  bytes: number;
+  note: string;
+  license: string;
+  installed: boolean;
+};
 export type SttStatus = "off" | "starting" | "ready" | "error";
 export type VoiceInfo = {
   settings: VoiceSettings;
@@ -87,6 +109,12 @@ export type VoiceInfo = {
   models: ModelInfo[];
   stt: SttStatus;
   stt_error: string | null;
+  /** Piper's Python, once installed. */
+  piper: string | null;
+  /** While Piper installs: its latest output line. */
+  piper_install: string | null;
+  tts: SttStatus;
+  tts_error: string | null;
   download: [string, number] | null;
 };
 const TRANSCRIPTS = 50;
@@ -244,9 +272,19 @@ class Monitor {
         this.voice = e.state;
         break;
       case "transcript":
-        this.transcripts.push({ id: e.id, at: now, transcript: e.transcript });
+        this.transcripts.push({ id: e.id, at: now, transcript: e.transcript, reply: null, spoken: null });
         if (this.transcripts.length > TRANSCRIPTS) this.transcripts.splice(0, this.transcripts.length - TRANSCRIPTS);
         break;
+      case "reply": {
+        const entry = this.latestTranscript(e.id);
+        if (entry) entry.reply = { text: e.text, actions: e.actions, understood: e.understood };
+        break;
+      }
+      case "spoken": {
+        const entry = this.latestTranscript(e.id);
+        if (entry) entry.spoken = e.spoken;
+        break;
+      }
       case "listening":
       case "utterance":
       case "voice_error":
@@ -353,6 +391,11 @@ class Monitor {
     return invoke<ClaudeLink>(connect ? "claude_connect" : "claude_disconnect");
   }
 
+  /** The newest log line for utterance `id` (ids wrap at 256). */
+  private latestTranscript(id: number): TranscriptEntry | undefined {
+    for (let i = this.transcripts.length - 1; i >= 0; i--) if (this.transcripts[i].id === id) return this.transcripts[i];
+  }
+
   async mcpInfo(): Promise<McpInfo> {
     if (this.preview) return previewMcp;
     return invoke<McpInfo>("mcp_info");
@@ -368,6 +411,9 @@ class Monitor {
       previewVoice.settings = settings;
       previewVoice.stt = settings.enabled ? (previewVoice.models.find((m) => m.id === settings.model)?.installed ? "ready" : "error") : "off";
       previewVoice.stt_error = previewVoice.stt === "error" ? `the ${settings.model} model isn't downloaded yet` : null;
+      const voices = Object.values(settings.voices).filter((id) => previewVoice.models.find((m) => m.id === id)?.installed);
+      previewVoice.tts = !settings.enabled || !settings.speak ? "off" : previewVoice.piper && voices.length ? "ready" : "error";
+      previewVoice.tts_error = previewVoice.tts !== "error" ? null : previewVoice.piper ? "no voice downloaded yet" : "Piper isn't installed yet";
       return this.voiceInfo();
     }
     return invoke<VoiceInfo>("set_voice", { settings });
@@ -395,6 +441,37 @@ class Monitor {
     return invoke<VoiceInfo>("delete_model", { id });
   }
 
+  async installPiper() {
+    if (this.preview) {
+      previewVoice.piper_install = "Installing piper-tts";
+      await new Promise((r) => setTimeout(r, 2500));
+      previewVoice.piper_install = null;
+      previewVoice.piper = "~/Library/Application Support/dualeye/piper/venv/bin/python";
+      await this.setVoice(previewVoice.settings);
+      return;
+    }
+    await invoke("install_piper");
+  }
+
+  /** The board's speaker volume; null when the board can't be asked. */
+  async boardVolume(): Promise<number | null> {
+    if (this.preview) return previewVolume;
+    return invoke<number | null>("board_volume");
+  }
+
+  async setBoardVolume(percent: number) {
+    if (this.preview) {
+      previewVolume = percent;
+      return;
+    }
+    await invoke("set_board_volume", { percent });
+  }
+
+  async testVoice(language: string) {
+    if (this.preview) return new Promise((r) => setTimeout(r, 1500));
+    await invoke("test_voice", { language });
+  }
+
   async readings(): Promise<Reading[]> {
     if (this.preview) return previewReadings(this.last);
     return invoke<Reading[]>("readings");
@@ -418,16 +495,33 @@ const previewMcp: McpInfo = {
 
 let previewClaudeLink: ClaudeLink = { connected: false, chained: null, last_update_s: null, settings_path: "~/.claude/settings.json" };
 
+let previewVolume = 60;
+
 const previewVoice: VoiceInfo = {
-  settings: { enabled: false, model: "small", language: "auto", keep_recordings: false },
+  settings: {
+    enabled: false,
+    model: "small",
+    language: "auto",
+    keep_recordings: false,
+    speak: true,
+    voices: { it: "it_IT-paola-medium", en: "en_GB-alba-medium" },
+  },
   server: "/opt/homebrew/bin/whisper-server",
   models: [
-    { id: "base", bytes: 147_951_465, note: "Fastest, for slow CPUs; often wrong in Italian", installed: false },
-    { id: "small", bytes: 487_601_967, note: "Good balance: about 0.7 s a command on an M1 Pro", installed: true },
-    { id: "large-v3-turbo-q5_0", bytes: 574_041_195, note: "Most accurate; wants a GPU (Apple silicon, NVIDIA)", installed: false },
+    { id: "base", kind: "whisper", language: null, bytes: 147_951_465, note: "Fastest, for slow CPUs; often wrong in Italian", license: "MIT", installed: false },
+    { id: "small", kind: "whisper", language: null, bytes: 487_601_967, note: "Good balance: about 0.7 s a command on an M1 Pro", license: "MIT", installed: true },
+    { id: "large-v3-turbo-q5_0", kind: "whisper", language: null, bytes: 574_041_195, note: "Most accurate; wants a GPU (Apple silicon, NVIDIA)", license: "MIT", installed: false },
+    { id: "it_IT-paola-medium", kind: "voice", language: "it", bytes: 63_518_137, note: "Italian, woman's voice, natural", license: "Dataset CC0 1.0 (paolapersico1/Voice-Dataset-Italian); fine-tuned from lessac", installed: true },
+    { id: "it_IT-riccardo-x_low", kind: "voice", language: "it", bytes: 28_134_952, note: "Italian, man's voice, smaller and flatter", license: "Dataset M-AILABS (BSD-style); trained from scratch", installed: false },
+    { id: "en_GB-alba-medium", kind: "voice", language: "en", bytes: 63_206_182, note: "British English, woman's voice", license: "Dataset CC BY 4.0 (Edinburgh DataShare 10283/3270); fine-tuned from lessac", installed: false },
+    { id: "en_US-ljspeech-medium", kind: "voice", language: "en", bytes: 63_536_351, note: "American English, woman's voice", license: "Dataset public domain (LJ Speech)", installed: false },
   ],
   stt: "off",
   stt_error: null,
+  piper: null,
+  piper_install: null,
+  tts: "off",
+  tts_error: null,
   download: null,
 };
 
@@ -446,17 +540,22 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
   setTimeout(() => emit({ kind: "firmware", firmware: { state: "legacy" } }), 8000);
   // Now and then someone says the wake word: listening, then thinking, then back to idle.
   const voice = (state: VoiceState, at: number) => setTimeout(() => emit({ kind: "voice_state", state }), at);
-  const phrases: [string, string][] = [
-    ["Metti la faccia rings a sinistra.", "it"],
-    ["What is the GPU temperature?", "en"],
+  const phrases: [string, string, string, string[]][] = [
+    ["Metti la faccia rings a sinistra.", "it", "Fatto: faccia rings sullo schermo sinistro.", ["set_face: left: rings"]],
+    ["What is the GPU temperature?", "en", "The GPU is at 41 degrees.", []],
   ];
   let said = 0;
   setInterval(() => {
     voice("listening", 0);
     voice("thinking", 2500);
-    const [text, language] = phrases[said++ % phrases.length];
-    setTimeout(() => emit({ kind: "transcript", id: said, transcript: { text, language, logprob: -0.2, elapsed_ms: 640 } }), 3100);
-    voice("idle", 3200);
+    const [text, language, reply, actions] = phrases[said++ % phrases.length];
+    const id = said;
+    setTimeout(() => emit({ kind: "transcript", id, transcript: { text, language, logprob: -0.2, elapsed_ms: 640 } }), 3100);
+    setTimeout(() => emit({ kind: "reply", id, text: reply, language, actions, understood: true, elapsed_ms: 12 }), 3150);
+    voice("speaking", 3300);
+    const spoken = { text: reply, first_audio_ms: 140, played_ms: 2300, reason: "done", underruns: 0, lost: 0 };
+    setTimeout(() => emit({ kind: "spoken", id, spoken }), 5700);
+    voice("idle", 5700);
   }, 30000);
 
   const t0 = performance.now();

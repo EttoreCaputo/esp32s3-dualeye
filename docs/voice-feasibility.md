@@ -102,7 +102,7 @@ Audio is raw PCM on USB; Opus is unnecessary without Wi-Fi.
 | LLM runtime | **llama.cpp `llama-server`** | Metal, CUDA, Vulkan, CPU; OpenAI-compatible API with native tool calling (`--jinja`); MIT |
 | LLM model | Qwen3 1.7B / 4B, GGUF Q4_K_M (benchmark in M6) | Good multilingual quality and tool calling at this size; Apache-2.0. Re-evaluate newer small models at M6 time |
 | STT | **whisper.cpp** (multilingual `base` / `small`, or `large-v3-turbo` on a GPU) | Same GGML ecosystem as llama.cpp; automatic IT/EN detection; MIT |
-| TTS | **Piper** | Italian and English voices; **check each voice's license** (some are non-commercial) |
+| TTS | **Piper** | Italian and English voices; **check each voice's license** (some are non-commercial). Since M5: `piper-tts` (OHF-Voice/piper1-gpl, Python, GPL-3.0) in its own process, the C++ Piper being archived |
 | VAD fallback | Silero VAD | Only if the board's VAD proves unreliable |
 
 Integration: start with **sidecar processes** (`llama-server`, `whisper-server`, `piper`) managed by `dualeye-core`, which are easy to update and crash-isolated. Move to in-process bindings (`llama-cpp-2`, `whisper-rs`) only if packaging demands it.

@@ -10,6 +10,7 @@
 #include "link.h"
 #include "lvgl_port.h"
 #include "metrics_model.h"
+#include "playback.h"
 #include "ui_toast.h"
 #include "voice.h"
 
@@ -199,6 +200,24 @@ static bool tool_set_wake_word(const cJSON *args, char *text, cJSON **structured
     return true;
 }
 
+static bool tool_set_volume(const cJSON *args, char *text, cJSON **structured)
+{
+    int pct = 0;
+    if (!get_int(args, "percent", &pct, text)) {
+        return false;
+    }
+    if (pct < 0 || pct > 100) {
+        snprintf(text, TEXT_MAX, "percent must be 0 to 100");
+        return false;
+    }
+    if (!playback_available() || board_settings_set_volume((uint8_t) pct) != ESP_OK) {
+        snprintf(text, TEXT_MAX, "the speaker is not available on this board");
+        return false;
+    }
+    snprintf(text, TEXT_MAX, "speaker volume %d%%", pct);
+    return true;
+}
+
 static const char *metrics_state_name(metrics_ui_state_t state)
 {
     switch (state) {
@@ -245,6 +264,10 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
         cJSON_AddBoolToObject(voice, "muted", voice_muted());
         cJSON_AddStringToObject(voice, "state", voice_state_name(voice_state()));
     }
+    cJSON *audio = cJSON_AddObjectToObject(st, "audio");
+    cJSON_AddBoolToObject(audio, "speaker", playback_available());
+    cJSON_AddNumberToObject(audio, "volume", settings.volume);
+    cJSON_AddBoolToObject(audio, "playing", playback_active());
     lvgl_port_stats_t ui;
     lvgl_port_get_stats(&ui);
     cJSON *u = cJSON_AddObjectToObject(st, "ui");
@@ -318,9 +341,16 @@ static const tool_t TOOLS[] = {
         .fn = tool_set_wake_word,
     },
     {
+        .name = "set_volume",
+        .description = "Set the speaker volume the board talks with; 0 is silent. The board remembers it.",
+        .schema = "{\"type\":\"object\",\"properties\":{"
+                  "\"percent\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}},\"required\":[\"percent\"]}",
+        .fn = tool_set_volume,
+    },
+    {
         .name = "get_state",
         .description = "Read the board's state: firmware, uptime, whether metrics are live, each screen's face, "
-                       "rotation and brightness, the voice state (wake word, muted, listening) and how busy the UI is.",
+                       "rotation and brightness, the voice state (wake word, muted, listening), the speaker volume and how busy the UI is.",
         .schema = "{\"type\":\"object\",\"properties\":{}}",
         .fn = tool_get_state,
     },

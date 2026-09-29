@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "board_audio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -19,6 +20,7 @@ static const char *const BL_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "bl_cpu",
 
 #define MIC_MUTED_KEY "mic_muted"
 #define WAKE_WORD_KEY "wake_word"
+#define VOLUME_KEY "volume"
 
 static SemaphoreHandle_t s_lock;
 static board_settings_t s_settings;
@@ -52,6 +54,10 @@ static void load(void)
     if (nvs_get_u8(nvs, MIC_MUTED_KEY, &muted) == ESP_OK) {
         s_settings.mic_muted = muted != 0;
     }
+    uint8_t volume = 0;
+    if (nvs_get_u8(nvs, VOLUME_KEY, &volume) == ESP_OK && volume <= 100) {
+        s_settings.volume = volume;
+    }
     size_t len = sizeof(s_settings.wake_word);
     if (nvs_get_str(nvs, WAKE_WORD_KEY, s_settings.wake_word, &len) != ESP_OK) {
         s_settings.wake_word[0] = '\0';
@@ -81,6 +87,7 @@ void board_settings_init(void)
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
         s_settings.brightness[i] = BOARD_BRIGHTNESS_DEFAULT;
     }
+    s_settings.volume = BOARD_VOLUME_DEFAULT;
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -157,6 +164,25 @@ esp_err_t board_settings_set_mic_muted(bool muted)
     xSemaphoreGive(s_lock);
     if (changed) {
         save(MIC_MUTED_KEY, muted, false);
+    }
+    return ESP_OK;
+}
+
+esp_err_t board_settings_set_volume(uint8_t percent)
+{
+    if (percent > 100) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t err = board_audio_set_volume(percent);
+    if (err != ESP_OK) {
+        return err;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool changed = s_settings.volume != percent;
+    s_settings.volume = percent;
+    xSemaphoreGive(s_lock);
+    if (changed) {
+        save(VOLUME_KEY, percent, false);
     }
     return ESP_OK;
 }

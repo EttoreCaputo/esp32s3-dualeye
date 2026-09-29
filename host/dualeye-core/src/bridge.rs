@@ -33,7 +33,8 @@ use crate::sensors::Collector;
 use crate::serial;
 use crate::snapshot::{Face, Faces, Rotation, Rotations, Snapshot};
 use crate::stt::Transcript;
-use crate::voice::{self, Receiving, Utterance, VoiceConfig};
+use crate::voice::{self, Receiving, Session, Speaker, Spoken, Utterance, VoiceConfig};
+use crate::intents;
 
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -97,7 +98,13 @@ pub enum BridgeEvent {
     Utterance { utterance: Utterance, duration_ms: u64, peak_db: Option<f64>, wav: Option<String> },
     /// What was said in utterance `id`; `None` when Whisper heard no words.
     Transcript { id: u8, transcript: Option<Transcript> },
-    /// Speech-to-text failed, or its sidecar couldn't start.
+    /// What the host made of transcript `id`: the board tools it called
+    /// (`actions`, with what each said) and the answer, in `language`.
+    /// `understood` is false when no command matched.
+    Reply { id: u8, text: String, language: String, actions: Vec<String>, understood: bool, elapsed_ms: u64 },
+    /// The answer to `id` was spoken through the board's speaker.
+    Spoken { id: u8, spoken: Spoken },
+    /// Speech-to-text or text-to-speech failed, or its sidecar couldn't start.
     VoiceError { message: String },
     /// Faces or rotation came from the board: at the handshake, or because a
     /// hub client changed them. `faces` and `rotation` in the config hold the
@@ -154,12 +161,25 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Run the bridge on the current thread until `stop` is set.
 pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
-    // Whisper loads its model meanwhile, so the first utterance doesn't wait.
-    let stt = config.voice.lock().unwrap().stt.clone();
+    // Whisper and Piper load their models meanwhile, so the first utterance doesn't wait.
+    let (stt, tts) = {
+        let voice = config.voice.lock().unwrap();
+        (voice.stt.clone(), voice.tts.clone())
+    };
     if let Some(stt) = stt {
         let sink = on_event.clone();
         let _ = thread::Builder::new().name("dualeye-stt-start".into()).spawn(move || match stt.warm_up() {
             Ok(()) => sink(BridgeEvent::BoardLog { line: format!("host: speech-to-text ready ({})", stt.config().model.display()) }),
+            Err(e) => sink(BridgeEvent::VoiceError { message: e.to_string() }),
+        });
+    }
+    if let Some(tts) = tts {
+        let sink = on_event.clone();
+        let _ = thread::Builder::new().name("dualeye-tts-start".into()).spawn(move || match tts.warm_up() {
+            Ok(()) => {
+                let voices: Vec<&str> = tts.config().voices.values().map(String::as_str).collect();
+                sink(BridgeEvent::BoardLog { line: format!("host: text-to-speech ready ({})", voices.join(", ")) })
+            }
             Err(e) => sink(BridgeEvent::VoiceError { message: e.to_string() }),
         });
     }
@@ -182,6 +202,7 @@ pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
         if let Some(hub) = &config.hub {
             let why = result.as_ref().err().map_or_else(|| "the bridge stopped".to_string(), |e| format!("board disconnected: {e}"));
             hub.set_unavailable(&why);
+            hub.set_say(None);
         }
         if let Err(err) = result {
             on_event(BridgeEvent::Disconnected {
@@ -216,15 +237,18 @@ fn session(
     on_event: &EventSink,
 ) -> io::Result<()> {
     let heard = Arc::new(Heard::default());
+    let speaker = Arc::new(Speaker::default());
+    let latest = Arc::new(Mutex::new(None::<Snapshot>));
+    let voice_changed_settings = Arc::new(AtomicBool::new(false));
     // The pipeline needs the link to answer the board; it gets it once open.
-    let (link_slot_tx, link_slot_rx) = std::sync::mpsc::channel::<std::sync::Weak<Link>>();
+    let (link_slot_tx, link_slot_rx) = std::sync::mpsc::channel::<Session>();
     let pipeline = {
         let config = config.voice.clone();
         let sink = on_event.clone();
         let (tx, rx) = std::sync::mpsc::channel::<Utterance>();
         thread::Builder::new().name("dualeye-voice".into()).spawn(move || {
-            if let Ok(link) = link_slot_rx.recv() {
-                voice::run(&config, &link, &sink, rx);
+            if let Ok(session) = link_slot_rx.recv() {
+                voice::run(&config, &session, &sink, rx);
             }
         })?;
         tx
@@ -233,6 +257,7 @@ fn session(
     let link = Arc::new({
         let heard = heard.clone();
         let sink = on_event.clone();
+        let speaker = speaker.clone();
         Link::open(port, move |event| match event {
             LinkEvent::Log(line) => sink(BridgeEvent::BoardLog { line }),
             LinkEvent::Text(line) => {
@@ -261,11 +286,17 @@ fn session(
                 });
             }
             LinkEvent::Notification { method, params } if method == "utterance_end" => receiving.lock().unwrap().end(&params),
+            LinkEvent::Notification { method, params } if method == "playback_end" => speaker.playback_end(params),
             LinkEvent::Audio(payload) => receiving.lock().unwrap().audio(&payload),
             LinkEvent::Notification { .. } | LinkEvent::Closed(_) => {}
         })?
     });
-    let _ = link_slot_tx.send(Arc::downgrade(&link));
+    let _ = link_slot_tx.send(Session {
+        link: Arc::downgrade(&link),
+        speaker: speaker.clone(),
+        snapshot: latest.clone(),
+        settings_changed: voice_changed_settings.clone(),
+    });
     on_event(BridgeEvent::Connected { port: port.to_string() });
 
     let mut reported: Option<BoardFirmware> = None;
@@ -301,6 +332,7 @@ fn session(
                     unanswered = 0;
                     if let Some(hub) = &config.hub {
                         hub.attach(link.clone(), hello.clone(), port);
+                        hub.set_say(Some(say_fn(&link, &speaker, config)));
                     }
                     report(BoardFirmware::Version { version: hello.firmware, idf: hello.idf, protocol: hello.protocol });
                     if config.adopt_board_settings {
@@ -325,7 +357,8 @@ fn session(
             }
         }
 
-        if ready && config.hub.as_ref().is_some_and(|h| h.take_settings_changed()) {
+        let hub_changed = config.hub.as_ref().is_some_and(|h| h.take_settings_changed());
+        if ready && (hub_changed | voice_changed_settings.swap(false, Ordering::Relaxed)) {
             adopt_settings(&link, config, &mut pushed, on_event)?;
         }
 
@@ -348,6 +381,7 @@ fn session(
         if let Some(hub) = &config.hub {
             hub.set_snapshot(&snapshot);
         }
+        *latest.lock().unwrap() = Some(snapshot.clone());
         let sent = ready && snapshot.is_sendable();
         if sent {
             link.send(Channel::Metrics, &snapshot.to_payload())?;
@@ -362,6 +396,18 @@ fn session(
         sleep_unless_stopped(next - now, stop);
     }
     Ok(())
+}
+
+/// `host/say` for the hub: speak with the voice config of the moment.
+fn say_fn(link: &Arc<Link>, speaker: &Arc<Speaker>, config: &BridgeConfig) -> crate::hub::SayFn {
+    let (link, speaker, voice) = (Arc::downgrade(link), speaker.clone(), config.voice.clone());
+    Arc::new(move |text: &str, language: Option<&str>| {
+        let tts = voice.lock().unwrap().tts.clone().ok_or("the bridge isn't speaking: turn on spoken replies in the app, or run dualeye --tts")?;
+        let link = link.upgrade().ok_or("the board disconnected")?;
+        let language = language.unwrap_or_else(|| intents::guess_language(text));
+        let spoken = speaker.speak(&link, &tts, text, language)?;
+        Ok(serde_json::to_value(spoken).unwrap_or_default())
+    })
 }
 
 fn push_settings(link: &Link, faces: Faces, rotation: Rotations) -> Result<(), CallError> {

@@ -4,8 +4,9 @@
 //! The board's tools are passed through as the firmware describes them in
 //! `tools/list`, so a new firmware tool shows up without a host change. The
 //! board is reached through [`Board`]: the running app or `dualeye` bridge,
-//! or the port opened for each call. Two host tools read this computer:
-//! `get_metrics` and `get_claude_usage`.
+//! or the port opened for each call. Two host tools read this computer,
+//! `get_metrics` and `get_claude_usage`, and `speak` talks through the
+//! board's speaker with the bridge's text-to-speech.
 //!
 //! The last board tool list is kept in `board-tools.json`, so the board's
 //! tools are listed even when the client starts while the board is away;
@@ -39,7 +40,8 @@ pub const FLAG: &str = "--mcp";
 const INSTRUCTIONS: &str = "DualEye is a small USB display on the user's desk with two round screens: \
 `left` shows this computer's CPU, `right` its GPU (or Claude Code usage, with the claude and clawd faces). \
 The board's tools change what the screens show; show_text puts a short ASCII message on them. \
-get_metrics and get_claude_usage read this computer, and work without the board.";
+get_metrics and get_claude_usage read this computer, and work without the board. \
+speak says a short sentence out loud through the board's speaker, in Italian or English.";
 
 /// A bridge sample older than this is not "current"; sample here instead.
 const FRESH: Duration = Duration::from_secs(5);
@@ -128,6 +130,16 @@ impl DualEyeMcp {
                 Some(usage) => json_result(usage),
                 None => text_result("No Claude Code usage on this computer: Claude Code has not run here, or keeps its data elsewhere (CLAUDE_CONFIG_DIR).", false),
             }),
+            "speak" => {
+                let text = arguments.get("text").and_then(Value::as_str).unwrap_or("");
+                if text.trim().is_empty() {
+                    return Err(ErrorData::invalid_params("text must be a non-empty string", None));
+                }
+                Ok(match self.inner.board.say(text, arguments.get("language").and_then(Value::as_str)) {
+                    Ok(spoken) => json_result(spoken),
+                    Err(e) => text_result(&format!("The DualEye board can't speak: {e}."), true),
+                })
+            }
             _ => match self.inner.board.call_tool(name, arguments) {
                 Ok(result) => to_mcp(result),
                 Err(CallError::Rpc { code: -32602, message }) => Err(ErrorData::invalid_params(message, None)),
@@ -195,6 +207,22 @@ fn host_tools() -> Vec<Value> {
                             whether Claude is working, idle or asleep, and the latest model.",
             "inputSchema": no_args,
             "annotations": {"readOnlyHint": true, "openWorldHint": false},
+        }),
+        json!({
+            "name": "speak",
+            "title": "Speak through the board",
+            "description": "Say a short text out loud through the DualEye's speaker. Returns once it has been played. \
+                            Needs the DualEye app with spoken replies on (or `dualeye --tts`) running.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "maxLength": 500, "description": "Plain sentences, no markdown"},
+                    "language": {"type": "string", "enum": ["it", "en"], "description": "Default: what the text looks like"},
+                },
+                "required": ["text"],
+                "additionalProperties": false,
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false},
         }),
     ]
 }
@@ -264,7 +292,8 @@ mod tests {
     fn host_tools_convert_to_mcp() {
         for tool in host_tools() {
             let t: McpTool = serde_json::from_value(tool).expect("valid MCP tool");
-            assert!(t.annotations.and_then(|a| a.read_only_hint).unwrap_or(false));
+            // Only speak does something.
+            assert_eq!(t.annotations.and_then(|a| a.read_only_hint), Some(t.name != "speak"), "{}", t.name);
         }
     }
 

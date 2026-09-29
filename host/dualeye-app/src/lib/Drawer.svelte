@@ -104,6 +104,58 @@
     };
   });
 
+  // The speaker's volume lives on the board: read it when the tab opens.
+  let volume = $state<number | null>(null);
+  $effect(() => {
+    if (!open || tab !== "voice" || monitor.link !== "connected") return;
+    let alive = true;
+    monitor
+      .boardVolume()
+      .then((v) => alive && (volume = v))
+      .catch(() => alive && (volume = null));
+    return () => {
+      alive = false;
+    };
+  });
+
+  async function setVolume(percent: number) {
+    volume = percent;
+    try {
+      await monitor.setBoardVolume(percent);
+    } catch (e) {
+      voiceError = String(e);
+    }
+  }
+
+  let piperError = $state("");
+  async function installPiper() {
+    piperError = "";
+    try {
+      await monitor.installPiper();
+    } catch (e) {
+      piperError = String(e);
+    }
+    voice = await monitor.voiceInfo();
+  }
+
+  let testing = $state<string | null>(null);
+  async function testVoice(language: string) {
+    testing = language;
+    voiceError = "";
+    try {
+      await monitor.testVoice(language);
+    } catch (e) {
+      voiceError = String(e);
+    } finally {
+      testing = null;
+    }
+  }
+
+  const VOICE_LANGUAGES: [string, string][] = [
+    ["it", "Italiano"],
+    ["en", "English"],
+  ];
+
   async function setVoice(change: Partial<VoiceSettings>) {
     if (!voice) return;
     voiceError = "";
@@ -135,6 +187,7 @@
     ["en", "English"],
   ];
   const STT_STATUS = { off: "Off", starting: "Loading the model…", ready: "Ready", error: "Not working" };
+  const TTS_STATUS = { off: "Off", starting: "Loading the voices…", ready: "Ready", error: "Not working" };
   const mb = (n: number) => `${Math.round(n / 1_000_000)} MB`;
   const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const newestFirst = $derived([...monitor.transcripts].reverse());
@@ -411,7 +464,8 @@
       {:else if tab === "voice"}
         <p class="hint">
           After its wake word, <b>“Alexa”</b>, the board sends what you say to this computer. With voice on, whisper.cpp transcribes it
-          here, in Italian or English. Nothing leaves the computer. Acting on what you say comes later.
+          here, in Italian or English, simple commands are carried out (“metti la faccia rings a sinistra”, “what's the temperature?”)
+          and Piper answers through the board's speaker. Nothing leaves the computer.
         </p>
         {#if !voice}
           <p class="empty">Loading…</p>
@@ -423,16 +477,42 @@
               <span class="track"><span class="knob"></span></span>
               <span class="slabel">Transcribe what the board hears</span>
             </label>
+            <label class="switch">
+              <input type="checkbox" checked={voice.settings.speak} onchange={(e) => setVoice({ speak: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Answer out loud</span>
+            </label>
             <dl class="facts">
               <div>
                 <dt>Speech-to-text</dt>
                 <dd class:good={voice.stt === "ready"} class:bad={voice.stt === "error"}>{STT_STATUS[voice.stt]}</dd>
+              </div>
+              <div>
+                <dt>Text-to-speech</dt>
+                <dd class:good={voice.tts === "ready"} class:bad={voice.tts === "error"}>{TTS_STATUS[voice.tts]}</dd>
               </div>
               <div><dt>Board</dt><dd>{monitor.link === "connected" ? monitor.voice : "offline"}</dd></div>
             </dl>
             {#if voice.stt === "error" && voice.stt_error}
               <p class="hint error">{voice.stt_error}</p>
             {/if}
+            {#if voice.tts === "error" && voice.tts_error}
+              <p class="hint error">{voice.tts_error}</p>
+            {/if}
+            <div class="volume">
+              <span class="rlabel">Volume</span>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={volume ?? 60}
+                disabled={volume === null}
+                aria-label="Speaker volume"
+                onchange={(e) => setVolume(Number(e.currentTarget.value))}
+              />
+              <span class="pmeta">{volume === null ? "—" : `${volume}%`}</span>
+            </div>
             <div class="rotation">
               <span class="rlabel">Language</span>
               <div class="rots langs" role="radiogroup" aria-label="Language">
@@ -465,7 +545,7 @@
               <p class="hint">Downloaded from Hugging Face once and checked. whisper-server: <code>{voice.server}</code></p>
             {/if}
             <div class="ports">
-              {#each voice.models as m (m.id)}
+              {#each voice.models.filter((m) => m.kind === "whisper") as m (m.id)}
                 {@const downloading = voice.download?.[0] === m.id}
                 <div class="port model" class:checked={voice.settings.model === m.id}>
                   <label class="mpick">
@@ -498,6 +578,68 @@
           </section>
 
           <section>
+            <h3>Voices</h3>
+            {#if voice.piper_install}
+              <p class="hint">Installing Piper… <code>{voice.piper_install}</code></p>
+            {:else if !voice.piper}
+              <p class="hint">
+                Piper speaks the answers. It's a Python program (GPL-3.0) that runs next to the app; installing it puts it in a private
+                virtualenv, about 100 MB from PyPI.
+              </p>
+              <button class="btn primary" onclick={installPiper}>Install Piper</button>
+            {:else}
+              <p class="hint">Piper voices from Hugging Face, one per language. Check each voice's license before sharing what it says.</p>
+            {/if}
+            {#if piperError}
+              <p class="hint error">{piperError}</p>
+            {/if}
+            {#each VOICE_LANGUAGES as [lang, label] (lang)}
+              <div class="vlang">
+                <span class="rlabel">{label}</span>
+                <button
+                  class="btn small"
+                  disabled={voice.tts !== "ready" || testing !== null || monitor.link !== "connected" || !voice.models.find((m) => m.id === voice?.settings.voices[lang])?.installed}
+                  onclick={() => testVoice(lang)}>{testing === lang ? "Speaking…" : "Test"}</button
+                >
+              </div>
+              <div class="ports">
+                {#each voice.models.filter((m) => m.kind === "voice" && m.language === lang) as m (m.id)}
+                  {@const downloading = voice.download?.[0] === m.id}
+                  {@const chosen = voice.settings.voices[lang] === m.id}
+                  <div class="port model" class:checked={chosen}>
+                    <label class="mpick" title={m.license}>
+                      <input
+                        type="radio"
+                        name={"voice-" + lang}
+                        checked={chosen}
+                        onchange={() => voice && setVoice({ voices: { ...voice.settings.voices, [lang]: m.id } })}
+                      />
+                      <span class="radio"></span>
+                      <span class="mtext">
+                        <span class="pname">{m.id}</span>
+                        <span class="mnote">{m.note}</span>
+                      </span>
+                    </label>
+                    <span class="mside">
+                      <span class="pmeta">{mb(m.bytes)}</span>
+                      {#if downloading}
+                        <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
+                      {:else if m.installed}
+                        <button class="btn small" title="Delete the files" onclick={() => removeModel(m.id)}>Delete</button>
+                      {:else}
+                        <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
+                      {/if}
+                    </span>
+                    {#if downloading}
+                      <div class="progress mprogress"><span style:width="{voice.download?.[1] ?? 0}%"></span></div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/each}
+          </section>
+
+          <section>
             <h3>Transcripts</h3>
             {#each newestFirst as entry (entry.at + "-" + entry.id)}
               <div class="transcript">
@@ -506,6 +648,15 @@
                   <span class="tlang">{entry.transcript.language}</span>
                   <span class="ttext">{entry.transcript.text}</span>
                   <span class="tmeta">{(entry.transcript.elapsed_ms / 1000).toFixed(1)} s</span>
+                  {#if entry.reply}
+                    <span class="treply" class:muted={!entry.reply.understood}>
+                      → {entry.reply.text}
+                      {#each entry.reply.actions as action, i (i)}
+                        <span class="taction">{action}</span>
+                      {/each}
+                    </span>
+                    <span class="tmeta">{entry.spoken ? `${(entry.spoken.first_audio_ms / 1000).toFixed(1)} s` : ""}</span>
+                  {/if}
                 {:else}
                   <span class="ttext muted">No words heard</span>
                 {/if}
@@ -1060,6 +1211,42 @@
   .ttext.muted {
     grid-column: span 3;
     color: var(--faint);
+  }
+  .treply {
+    grid-column: 2 / 4;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+    font: 450 12.5px/1.4 var(--sans);
+    color: var(--dim);
+  }
+  .treply.muted {
+    color: var(--faint);
+  }
+  .taction {
+    font: 500 10.5px/1.3 var(--mono);
+    color: var(--faint);
+  }
+  .volume {
+    display: grid;
+    grid-template-columns: auto 1fr 3.5em;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+  }
+  .volume input {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .volume .pmeta {
+    text-align: right;
+  }
+  .vlang {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 14px 0 8px;
   }
 
   .claude.dimmed {

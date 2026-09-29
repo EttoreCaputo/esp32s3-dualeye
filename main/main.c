@@ -12,6 +12,7 @@
 #include "metrics_model.h"
 #include "rpc.h"
 #include "board_audio.h"
+#include "playback.h"
 #include "ui_toast.h"
 #include "ui_voice.h"
 #include "ui_watch.h"
@@ -107,8 +108,10 @@ void app_main(void)
     BaseType_t ui_ok = xTaskCreatePinnedToCore(ui_refresh_task, "ui_refresh", 4096, NULL, 4, NULL, 0);
     ESP_ERROR_CHECK(ui_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     if (board_audio_init() == ESP_OK) {
+        board_audio_set_volume(settings.volume);
         audio_selftest_start();
         voice_start(settings.mic_muted, settings.wake_word);
+        playback_start();
     } else {
         ESP_LOGE(TAG, "audio init failed, continuing without audio");
     }
@@ -116,6 +119,7 @@ void app_main(void)
     rpc_init();
     link_on_receive(LINK_CHAN_CTRL, rpc_handle);
     link_on_receive(LINK_CHAN_METRICS, metrics_io_handle);
+    link_on_receive(LINK_CHAN_AUDIO_DOWN, playback_receive);
     link_start();
     // A host already listening (e.g. right after flashing) learns the board rebooted.
     rpc_announce();

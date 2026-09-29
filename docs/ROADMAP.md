@@ -21,8 +21,8 @@ M0 Audio bring-up ─► M1 Protocol v2 ─► M2 MCP server ──────�
 | M0 | Audio bring-up | 0.4.0-dev | Tone from the speaker; a mic recording saved as WAV on the host |
 | M1 | Protocol v2 (framed JSON-RPC over USB) | 0.4.0 | `dualeye call set_face --screen left --face rings` works; logs and metrics unaffected |
 | M2 | MCP server | 0.4.x | Claude Code controls the screens |
-| M3 | Wake word ("Alexa") + "listening" UI | 0.5.0 | Say "Alexa" and the eyes react |
-| M4 | Mic streaming + STT | 0.5.x | Transcript (IT/EN) shown in the app |
+| M3 | Wake word ("Alexa") + "listening" UI | 0.5.0 (shipped in 0.6.0) | Say "Alexa" and the eyes react |
+| M4 | Mic streaming + STT | 0.5.x (shipped in 0.6.0) | Transcript (IT/EN) shown in the app |
 | M5 | TTS → speaker | 0.6.0 | The board speaks a reply |
 | M6 | Local LLM agent (llama.cpp) | 0.6.x | "Metti la faccia rings a sinistra" / "Put rings on the left" works end to end |
 | M7 | Polish & release | 1.0.0 | Voice assistant in a public release |
@@ -104,10 +104,13 @@ Done when: IT and EN phrases are transcribed within 1.5 s (CPU) of the end of sp
 
 Goal: the board talks back.
 
-- [ ] Host: Piper sidecar; voice per language; sentence-level streaming
-- [ ] Firmware: `audio_down` jitter buffer → ES8311; "speaking" UI; half-duplex mic mute (or AEC from M0)
-- [ ] Temporary rule-based intents (for example "rings a sinistra" → `set_face`) so the full loop is testable before the LLM
-- [ ] Volume tool plus app setting
+- [x] Host: Piper sidecar; voice per language; sentence-level streaming. Piper is now [`piper-tts`](https://github.com/OHF-Voice/piper1-gpl) 1.8 (Python, GPL-3.0; the old C++ `rhasspy/piper` is archived), run as `python -m piper.http_server` from a virtualenv in DualEye's data folder: `dualeye piper install`, or the app's Install button with esptool's Python. `tts.rs`: one server for every voice, loaded at start; restarts and pid-file cleanup shared with whisper-server in `sidecar.rs`. Voices in the model manager (ONNX + JSON, SHA-256 pinned): `it_IT-paola-medium` (default), `it_IT-riccardo-x_low`, `en_GB-alba-medium` (default), `en_US-ljspeech-medium`, license of each shown. 22 kHz → 16 kHz with a windowed-sinc resampler; the reply goes out a sentence at a time, paced in real time 0.5 s ahead of the speaker (`Speaker` in `voice.rs`). A sentence takes 0.1–0.27 s to synthesize once the voice is loaded (M1 Pro)
+- [x] Firmware: `audio_down` jitter buffer → ES8311; "speaking" UI; half-duplex mic mute (or AEC from M0). `main/playback.c`: 4 s ring in PSRAM, speaker on at 150 ms buffered, task on core 1 above the voice tasks, silence on underrun and `starved` after 1.5 s, `playback_end` with played ms, lost frames and underruns, `audio/stop`. The ring turns green with the speaker's level on it. The mic stays on with AEC: the wake word is ignored while the speaker plays and for 0.3 s after; the board saying "Alexa, …" through its own speaker didn't even reach WakeNet. On the ES7210 loopback, what the DAC plays correlates 0.87 with what was sent, no gaps. UI while speaking: `busy_pct` about 29 %, `max_frame_ms` about 100 (the ring appearing), against 12 % and 61 idle
+- [x] Temporary rule-based intents (for example "rings a sinistra" → `set_face`) so the full loop is testable before the LLM. `intents.rs`: faces (with Whisper's spellings: "rinza", "rinusa", "clod"), screens, brightness and screens off/on, rotation, volume up/down/value, text on screen, CPU/GPU temperatures, time, help; answers in the language Whisper heard. `BridgeEvent::Reply` / `Spoken`; faces and rotation changed by voice flow back to the app's settings. Also a `speak` MCP host tool and `dualeye say`, through the hub's new `host/say`
+- [x] Volume tool plus app setting. `set_volume` (NVS, default 60), `get_state.audio`; slider in the app's Voice tab, next to "Answer out loud", the voices with Test buttons, and each reply under its transcript
+- [ ] Try it by hand with a real voice at 1–2 m, and the Voice tab's Piper install on a machine without it
+
+Tried from the Mac speaker (macOS voices, "Alexa" then a command), with the CLI and in the app: 14 of 15 commands right on the first try, the one miss being Whisper's "rinza" for "rings a", now matched. From the end of speech to the first word of the answer about 1.5 s (0.75 s end of speech, 0.6 s Whisper, 0.1–0.27 s Piper), no underruns or lost frames. Firmware 0.6.0 (0.5.0 was never released: M3–M5 ship together).
 
 Done when: a spoken command gets a spoken confirmation plus the screen action, in IT and EN.
 

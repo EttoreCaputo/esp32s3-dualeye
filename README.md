@@ -108,13 +108,14 @@ The host reads Claude Code's usage from two local sources, with nothing to set u
 
 ## MCP server (Claude Code, Claude Desktop)
 
-The board's tools, plus two that read this computer, are available to any [MCP](https://modelcontextprotocol.io) client over stdio, so you can ask Claude Code to "put the rings face on the left" or "show *build done* on the board":
+The board's tools, plus three on the host, are available to any [MCP](https://modelcontextprotocol.io) client over stdio, so you can ask Claude Code to "put the rings face on the left" or "show *build done* on the board":
 
 | Tool | From | Does |
 |------|------|------|
-| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `set_mic`, `set_wake_word`, `get_state` | Board | Passed through as the firmware describes them in `tools/list` ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
+| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `set_mic`, `set_wake_word`, `set_volume`, `get_state` | Board | Passed through as the firmware describes them in `tools/list` ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
 | `get_metrics` | Host | CPU and GPU temperature, load, clock, power, memory, fans |
 | `get_claude_usage` | Host | Claude Code tokens in the 5-hour window and today, plan limits used, time to reset, working or idle |
+| `speak` | Host | Says a short text out loud through the board's speaker, in Italian or English; needs the app with spoken replies on, or `dualeye --tts`, running |
 
 With the **app** installed, Settings → **Display** → **MCP server** shows the command and config for this computer, with Copy buttons, and how many clients are connected. It is the app's own binary with `--mcp`. On macOS:
 
@@ -138,7 +139,7 @@ Only one process can hold the serial port. While the app (or `dualeye` streaming
 
 The last list of board tools is kept in `board-tools.json` in the same folder, so they are listed even when the client starts while the board is unplugged; a call then says why it can't run. The server tells the client when the board's tools turn up later.
 
-## Wake word (preview)
+## Voice (preview)
 
 The board listens for a wake word with Espressif's [ESP-SR](https://github.com/espressif/esp-sr): the ES7210 mic and the speaker loopback go through its audio front end (echo cancellation, voice activity) into WakeNet, on core 1, with the UI on core 0. The word is **"Alexa"**, or **"Hi ESP"**: both are built-in WakeNet models, picked with the `set_wake_word` tool (`dualeye call set_wake_word --word hiesp`). When it hears it, a cyan ring lights round both screens (and in the app's mirror) for a few seconds, and the host gets a `wake` notification (`dualeye` prints it). Then the board streams what you say to the host over USB until you stop talking (a bright arc on the ring follows your voice), and the host can transcribe it in Italian or English with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), running locally:
 
@@ -148,7 +149,19 @@ dualeye models download small   # about 490 MB, once
 dualeye --stt                   # prints each transcript
 ```
 
-In the desktop app it's Settings → **Voice**: turn it on, download a model (the app checks its SHA-256) and the transcripts show there. `dualeye models` lists the same models for the CLI (`dualeye models download small`). `--stt` takes one of them or a ggml model file, `--stt-language it|en` skips language detection, and `--voice-dump` keeps each utterance as a WAV file in `voice/` in DualEye's data folder. Acting on what you say comes in the next milestones. Nothing leaves your computer.
+In the desktop app it's Settings → **Voice**: turn it on, download a model (the app checks its SHA-256) and the transcripts show there. `dualeye models` lists the same models for the CLI (`dualeye models download small`). `--stt` takes one of them or a ggml model file, `--stt-language it|en` skips language detection, and `--voice-dump` keeps each utterance as a WAV file in `voice/` in DualEye's data folder. Nothing leaves your computer.
+
+Simple commands are carried out and answered out loud, in the language you spoke: *"metti la faccia rings a sinistra"*, *"put classic on the right screen"*, *"luminosità al 50 per cento"*, *"turn the volume up"*, *"ruota gli schermi sottosopra"*, *"scrivi ciao"*, *"what's the temperature?"*, *"che ore sono?"*. These are fixed rules for now; a local LLM takes over in the next milestone. The answer is spoken by [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`, GPL-3.0, run as a separate process) through the board's speaker, a sentence at a time, while a green ring shows the speaker's level; the board ignores its wake word while it talks. From the end of what you say to the first word of the answer takes about 1.5 s on an M1 Pro.
+
+```bash
+dualeye piper install                            # a virtualenv in DualEye's data folder, about 100 MB (needs Python 3.9+)
+dualeye models download it_IT-paola-medium       # Italian voice, 64 MB
+dualeye models download en_GB-alba-medium        # English voice, 63 MB
+dualeye --stt --tts                              # voice commands with spoken replies
+dualeye say "Ciao!"                              # speak through the running app or dualeye --tts
+```
+
+The app installs Piper by itself (Settings → **Voice** → **Install Piper**, with the same Python it uses for esptool) and lists the voices next to the Whisper models, with a Test button and the speaker's volume, which the board keeps (`set_volume` tool). `--tts-voice ID` picks another voice for its language. Several voices are fine-tuned from Piper's *lessac* voice, whose dataset comes with its own license: `dualeye models` shows each voice's (the app too, on hover), so check it before using a voice beyond your own desk.
 
 Mute the mic with the `set_mic` tool (`dualeye call set_mic --muted true`, or ask Claude through MCP); the board remembers both. The models sit in their own `model` partition ([partitions.csv](partitions.csv)), written by the app's flasher as part of the merged image.
 
@@ -197,7 +210,7 @@ sdkconfig.defaults        firmware config (target esp32s3, 16 MB flash, USB Seri
 partitions.csv            flash layout: app, then the ESP-SR `model` partition
 .devcontainer/            ESP-IDF container for VS Code
 host/                     Cargo workspace
-  dualeye-core/           sensors, Claude Code usage, snapshot, serial bridge, esptool setup/flash (library)
+  dualeye-core/           sensors, Claude Code usage, snapshot, serial bridge, esptool setup/flash, voice (STT, intents, TTS) (library)
   dualeye-cli/            `dualeye` command-line bridge
   dualeye-app/            desktop app: Svelte UI in src/, Tauri shell in src-tauri/
 ```

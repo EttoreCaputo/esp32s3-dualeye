@@ -88,6 +88,16 @@ pub fn ensure(dir: &Path, mut on_event: impl FnMut(FlashEvent)) -> io::Result<Es
     Esptool::installed(dir).ok_or_else(|| io::Error::other("esptool was installed but does not run"))
 }
 
+/// A Python to build other virtualenvs with (Piper's, [`crate::tts::install`]):
+/// the one esptool's setup uses, downloaded into `dir` if the machine has none.
+pub fn python(dir: &Path, mut on_event: impl FnMut(FlashEvent)) -> io::Result<PathBuf> {
+    if let Some(python) = system_python() {
+        return Ok(python);
+    }
+    fs::create_dir_all(dir)?;
+    portable_python(dir, &mut |message: &str, percent| on_event(FlashEvent::Setup { message: message.into(), percent }))
+}
+
 /// A usable interpreter already on the machine. Never on macOS: its
 /// `/usr/bin/python3` stub pops up the Xcode tools installer.
 fn system_python() -> Option<PathBuf> {

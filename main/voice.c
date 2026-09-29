@@ -47,6 +47,8 @@ static const char *TAG = "voice";
 #define LISTEN_TIMEOUT_MS (MAX_UTTERANCE_MS + 1000)
 /* A host that set thinking or speaking and went away doesn't leave it on. */
 #define HOST_STATE_TIMEOUT_MS 30000
+/* The room's echo of the last words, after the speaker stops. */
+#define SPEAKER_TAIL_MS 300
 #define FETCH_WAIT_MS 100
 #define TASK_CORE 1
 #define TASK_PRIORITY 5
@@ -122,6 +124,9 @@ static SemaphoreHandle_t s_ctl;
 static EventGroupHandle_t s_req;
 static bool s_muted;
 static bool s_paused;
+
+/* Wake words before this are ignored: the speaker is (or just was) on. */
+static volatile int64_t s_speaker_until_us;
 
 static SemaphoreHandle_t s_state_lock;
 static voice_state_t s_state;
@@ -244,6 +249,11 @@ void voice_pause(bool pause)
     } else {
         xSemaphoreGive(s_mic);
     }
+}
+
+void voice_set_speaking(bool speaking)
+{
+    s_speaker_until_us = speaking ? INT64_MAX : esp_timer_get_time() + SPEAKER_TAIL_MS * 1000;
 }
 
 voice_state_t voice_state(void)
@@ -427,7 +437,11 @@ static void fetch_task(void *arg)
                 if (s_stream.active) {
                     stream_frame(res);
                 } else if (res->wakeup_state == WAKENET_DETECTED) {
-                    on_wake(res);
+                    if (esp_timer_get_time() >= s_speaker_until_us) {
+                        on_wake(res);
+                    } else {
+                        ESP_LOGI(TAG, "wake word ignored: the speaker is on");
+                    }
                 }
             }
         }

@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 #define BOARD_BRIGHTNESS_DEFAULT 100
+#define BOARD_VOLUME_DEFAULT 60
 
 typedef struct {
     metrics_face_t face[BOARD_LCD_COUNT];
@@ -24,6 +25,8 @@ typedef struct {
     bool mic_muted;
     /* voice_wake_words() id; empty for the default. */
     char wake_word[16];
+    /* Speaker, 0..100. */
+    uint8_t volume;
 } board_settings_t;
 
 /** Open NVS and load the saved settings (defaults where none). */
@@ -38,6 +41,8 @@ esp_err_t board_settings_set_rotation(int screen, uint16_t degrees);
 esp_err_t board_settings_set_brightness(int screen, uint8_t percent);
 esp_err_t board_settings_set_mic_muted(bool muted);
 esp_err_t board_settings_set_wake_word(const char *id);
+/** Also sets the speaker's volume right away. */
+esp_err_t board_settings_set_volume(uint8_t percent);
 
 #ifdef __cplusplus
 }

@@ -46,6 +46,11 @@ bool voice_listen(void);
 /** End the utterance being streamed, if any. */
 void voice_stop_listening(void);
 
+/** The speaker is playing (playback.c): the wake word is ignored meanwhile
+ * and for a moment after, so the board doesn't wake itself up. The AFE keeps
+ * running, echo cancellation included. */
+void voice_set_speaking(bool speaking);
+
 voice_state_t voice_state(void);
 /** What the overlay shows. The board sets LISTENING on the wake word and
  * goes back to IDLE after a timeout; the host sets the others. */

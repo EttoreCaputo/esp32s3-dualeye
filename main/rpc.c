@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "link.h"
+#include "playback.h"
 #include "voice.h"
 
 #define RPC_PROTOCOL 2
@@ -76,10 +77,21 @@ static cJSON *identity(void)
     cJSON_AddStringToObject(id, "idf", app->idf_ver);
     cJSON_AddStringToObject(id, "board", "dualeye");
     cJSON_AddNumberToObject(id, "max_payload", LINK_MAX_PAYLOAD);
-    const char *channels[] = {"ctrl", "metrics", "log", "audio_up"};
-    cJSON_AddItemToObject(id, "channels", cJSON_CreateStringArray(channels, voice_available() ? 4 : 3));
-    const char *caps[] = {"tools", "voice"};
-    cJSON_AddItemToObject(id, "capabilities", cJSON_CreateStringArray(caps, voice_available() ? 2 : 1));
+    cJSON *channels = cJSON_AddArrayToObject(id, "channels");
+    cJSON *caps = cJSON_AddArrayToObject(id, "capabilities");
+    const char *base[] = {"ctrl", "metrics", "log"};
+    for (int i = 0; i < 3; i++) {
+        cJSON_AddItemToArray(channels, cJSON_CreateString(base[i]));
+    }
+    cJSON_AddItemToArray(caps, cJSON_CreateString("tools"));
+    if (voice_available()) {
+        cJSON_AddItemToArray(channels, cJSON_CreateString("audio_up"));
+        cJSON_AddItemToArray(caps, cJSON_CreateString("voice"));
+    }
+    if (playback_available()) {
+        cJSON_AddItemToArray(channels, cJSON_CreateString("audio_down"));
+        cJSON_AddItemToArray(caps, cJSON_CreateString("speaker"));
+    }
     return id;
 }
 
@@ -166,6 +178,10 @@ void rpc_handle(uint8_t *payload, size_t len)
         }
     } else if (strcmp(name, "voice/stop") == 0) {
         voice_stop_listening();
+        result = cJSON_CreateObject();
+    } else if (strcmp(name, "audio/stop") == 0) {
+        // Stop talking: what's buffered is dropped.
+        playback_stop();
         result = cJSON_CreateObject();
     } else if (strcmp(name, "debug/audio") == 0) {
         const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(params, "cmd");

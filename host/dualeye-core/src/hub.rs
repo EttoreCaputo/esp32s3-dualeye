@@ -37,6 +37,9 @@ pub const NO_BOARD: i64 = -32000;
 const UNAUTHORIZED: i64 = -32001;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_REQUEST: i64 = -32600;
+const INVALID_PARAMS: i64 = -32602;
+/// `host/say` answers once the board has spoken.
+const SAY_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// How long the board gets for one tool call.
 pub const TOOL_TIMEOUT: Duration = Duration::from_secs(3);
@@ -83,6 +86,8 @@ struct Shared {
     one_at_a_time: Mutex<()>,
     snapshot: Mutex<Option<(Snapshot, Instant)>>,
     settings_changed: AtomicBool,
+    /// Speaks through the board, when the bridge has text-to-speech.
+    say: Mutex<Option<SayFn>>,
     clients: AtomicUsize,
     calls: AtomicU64,
     last_call: Mutex<Option<(String, Instant)>>,
@@ -127,6 +132,7 @@ impl Hub {
             one_at_a_time: Mutex::default(),
             snapshot: Mutex::default(),
             settings_changed: AtomicBool::new(false),
+            say: Mutex::default(),
             clients: AtomicUsize::new(0),
             calls: AtomicU64::new(0),
             last_call: Mutex::default(),
@@ -155,6 +161,11 @@ impl Hub {
 
     pub(crate) fn attach(&self, link: Arc<Link>, hello: Hello, port: &str) {
         *self.shared.board.lock().unwrap() = Ok(Attached { link, hello, port: port.to_string() });
+    }
+
+    /// What `host/say` runs; `None` while the bridge can't speak.
+    pub(crate) fn set_say(&self, say: Option<SayFn>) {
+        *self.shared.say.lock().unwrap() = say;
     }
 
     pub(crate) fn set_snapshot(&self, snapshot: &Snapshot) {
@@ -275,9 +286,19 @@ fn hello(shared: &Shared) -> Value {
     json!({"bridge": env!("CARGO_PKG_VERSION"), "board": hello, "port": port})
 }
 
+/// Speak `text` (in `language`, or the one it looks like) and return how it went.
+pub(crate) type SayFn = Arc<dyn Fn(&str, Option<&str>) -> Result<Value, String> + Send + Sync>;
+
 fn handle(shared: &Shared, method: &str, params: Value) -> Result<Value, (i64, String)> {
     match method {
         "tools/list" | "tools/call" => {}
+        "host/say" => {
+            let text = params.get("text").and_then(Value::as_str).filter(|t| !t.trim().is_empty());
+            let Some(text) = text else { return Err((INVALID_PARAMS, "expected {\"text\": string, \"language\"?: \"it\" | \"en\"}".into())) };
+            let say = shared.say.lock().unwrap().clone();
+            let say = say.ok_or((NO_BOARD, "the bridge isn't speaking: turn on spoken replies in the app, or run dualeye --tts".to_string()))?;
+            return say(text, params.get("language").and_then(Value::as_str)).map_err(|e| (NO_BOARD, e));
+        }
         "host/snapshot" => {
             let snapshot = shared.snapshot.lock().unwrap();
             let (snap, age) = match &*snapshot {
@@ -347,6 +368,13 @@ impl HubClient {
         let hello = serde_json::from_value(hello).map_err(io::Error::other)?;
         hub.writer.set_read_timeout(Some(CLIENT_TIMEOUT))?;
         Ok((hub, hello))
+    }
+
+    fn request_waiting(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value, CallError> {
+        self.writer.set_read_timeout(Some(timeout))?;
+        let reply = self.request(method, params);
+        self.writer.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+        reply
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
@@ -431,6 +459,22 @@ impl Board {
             |link| Ok(serde_json::to_value(link.call_tool(name, arguments.clone(), TOOL_TIMEOUT)?).unwrap()),
         )?;
         serde_json::from_value(result).map_err(|e| CallError::Invalid(e.to_string()))
+    }
+
+    /// Speak through the board's speaker, in `language` (`it`, `en`) or the
+    /// one the text looks like. Needs a bridge with text-to-speech (the app
+    /// with spoken replies on, or `dualeye --tts`). Returns once it's played.
+    pub fn say(&self, text: &str, language: Option<&str>) -> Result<Value, CallError> {
+        let mut slot = self.hub.lock().unwrap();
+        let hub = self
+            .hub_client(&mut slot)
+            .ok_or_else(|| CallError::Unavailable("speaking needs the DualEye app with spoken replies on, or dualeye --tts, running".into()))?;
+        *self.route.lock().unwrap() = Some(Route::Hub);
+        let reply = hub.request_waiting("host/say", json!({"text": text, "language": language}), SAY_TIMEOUT);
+        if matches!(reply, Err(CallError::Io(_) | CallError::Closed | CallError::Invalid(_))) {
+            *slot = None;
+        }
+        reply
     }
 
     /// The bridge's latest sample and its age; `None` without a bridge, or

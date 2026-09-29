@@ -20,7 +20,7 @@ typedef struct {
     lv_obj_t *ring;
     /* Turning arc: thinking. LVGL redraws only the arc's old and new sectors. */
     lv_obj_t *spinner;
-    /* Over the ring while listening. LVGL redraws only the sectors that change. */
+    /* Over the ring while listening (mic) and speaking (speaker). LVGL redraws only the sectors that change. */
     lv_obj_t *level;
 } ui_voice_t;
 
@@ -74,7 +74,7 @@ void ui_voice_show(voice_state_t state)
         } else {
             lv_obj_add_flag(v->ring, LV_OBJ_FLAG_HIDDEN);
         }
-        if (state != VOICE_LISTENING) {
+        if (state != VOICE_LISTENING && state != VOICE_SPEAKING) {
             lv_obj_add_flag(v->level, LV_OBJ_FLAG_HIDDEN);
             s_level_step = 0;
         }

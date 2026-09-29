@@ -35,7 +35,7 @@ There is none. The board drops input it has no room for (the USB Serial/JTAG dri
 | 1 | `metrics` | host → board | One sensor snapshot (JSON, below) |
 | 2 | `log` | board → host | One log line, UTF-8, no trailing newline |
 | 3 | `audio_up` | board → host | An utterance's audio, see [below](#audio_up) |
-| 4 | `audio_down` | host → board | Reserved (M5): PCM s16le, 16 kHz, mono |
+| 4 | `audio_down` | host → board | Speech for the speaker, see [below](#audio_down) |
 
 Receivers ignore channels they don't know.
 
@@ -51,6 +51,7 @@ Receivers ignore channels they don't know.
 | `voice/state` | `{"state":"thinking"}`: `idle` · `listening` · `thinking` · `speaking` | `{}`; what the voice overlay shows. For the host's voice pipeline (M4 on), so not a tool. A state other than `idle` goes back to `idle` by itself after 30 s (`listening`: 6 s). `-32602` without voice |
 | `voice/listen` | none | `{}`; stream an utterance as if the wake word had been heard (push-to-talk). `-32602` without voice or muted |
 | `voice/stop` | none | `{}`; end the utterance being streamed (`reason` `host`), if any |
+| `audio/stop` | none | `{}`; stop talking: what's buffered from `audio_down` is dropped and the stream ends (`reason` `stopped`) |
 | `debug/audio` | `{"cmd":"tone 440 500"}` | `{}`; the M0 audio self-test, its output comes as `log` lines (see `main/audio_selftest.h`) |
 
 `Tool` and `CallToolResult` have the shapes of the [MCP](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) `tools/list` and `tools/call` results (`name`, `description`, `inputSchema`; `content`, `structuredContent`, `isError`), so the host's MCP server (M2) can pass them through unchanged. A tool that runs but fails (bad argument, out of range) returns `isError: true` with the reason as text. Protocol errors use the standard JSON-RPC codes: `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params (including an unknown tool).
@@ -63,6 +64,7 @@ Notifications from the board:
 | `wake` | `{"word":"Alexa","model":"wn9_alexa","volume_db":-45}` | The wake word was heard (`volume_db`: input level in dBFS). The board then shows `listening` |
 | `voice_state` | `{"state":"listening"}` | The voice overlay changed: on the wake word, after a timeout, or after `voice/state` |
 | `utterance_start` | `{"id":7,"trigger":"wake","rate":16000,"format":"s16le"}` | The board starts streaming what it hears on `audio_up`: after the wake word (`trigger` `wake`) or `voice/listen` (`host`). `id` counts up and wraps at 256 |
+| `playback_end` | `{"id":3,"reason":"done","ms":2426,"lost":0,"overflow":0,"underruns":0}` | An `audio_down` stream ended. `reason`: `done` (played to its last frame), `stopped` (`audio/stop`), `replaced` (a stream with another id started) or `starved` (no audio for 1.5 s without the last frame: the host went away). `ms` were played, `lost` frames never arrived, `overflow` samples found the buffer full, `underruns` times it ran dry mid-stream |
 | `utterance_end` | `{"id":7,"reason":"end_of_speech","ms":3200,"speech":true,"frames":100,"dropped":0}` | The stream ended. `reason`: `end_of_speech` (0.75 s of silence after speech), `no_speech` (none within 5 s), `max_length` (12 s), `host` (`voice/stop`, or the wake word changed) or `muted` (`set_mic`, or the self-test took the mic). `frames` were sent, `dropped` of them lost because the host didn't read in time. With `speech` the board shows `thinking` next, otherwise `idle` |
 
 ### `metrics`
@@ -88,6 +90,19 @@ The audio of one utterance, between its `utterance_start` and `utterance_end` no
 
 The board doesn't wait for a host that doesn't read (it drops the frame after 20 ms), so the host fills gaps in the sequence with silence. WakeNet is off while the board streams: the wake word said again mid-sentence doesn't start a new utterance. Implementation: `stream_*` in `main/voice.c`, `host/dualeye-core/src/voice.rs`.
 
+### `audio_down`
+
+Speech for the speaker: 16 kHz mono PCM s16le, with the same 4-byte header as `audio_up`.
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | u8 | Stream `id`: the host counts up; a frame with a new id ends the stream playing (`replaced`) |
+| 1 | u8 | Flags: bit 0 set on the stream's last frame (it may carry no PCM) |
+| 2 | u16 LE | Sequence number, from 0 in each stream |
+| 4 | … | PCM, up to 2046 samples (the host sends 1024, 64 ms) |
+
+The board buffers about 4 s in PSRAM and starts the speaker once 150 ms are buffered (or the last frame is in), so the host paces the stream: it sends in real time, about 0.5 s ahead of the speaker, since nothing on the link tells it to slow down. When the buffer runs dry before the last frame the board plays silence; after 1.5 s of it the stream ends (`starved`). While a stream plays the board shows `speaking` with the speaker's level on the ring, and goes back to `idle` at the end; the wake word is ignored meanwhile and for 0.3 s after, and echo cancellation keeps running. Frames of a stream that has ended are dropped. At the end the board says `playback_end`. Implementation: `main/playback.c`, `Speaker` in `host/dualeye-core/src/voice.rs`.
+
 ### `log`
 
 Every `ESP_LOG*` line after the link starts, one line per frame. The level letter and timestamp are part of the text (`I (5120) link: …`), as on a plain serial console.
@@ -98,10 +113,10 @@ Every `ESP_LOG*` line after the link starts, one line per frame. The level lette
 2. The board answers:
 
    ```json
-   {"protocol":2,"firmware":"0.4.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log","audio_up"],"capabilities":["tools","voice"]}
+   {"protocol":2,"firmware":"0.6.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log","audio_up","audio_down"],"capabilities":["tools","voice","speaker"]}
    ```
 
-   `voice` (and `audio_up`) are there when the wake word runs (ESP-SR models found in the `model` partition).
+   `voice` (and `audio_up`) are there when the wake word runs (ESP-SR models found in the `model` partition), `speaker` (and `audio_down`) when the board can play speech.
 
 3. The host reads faces and rotation with `get_state` and adopts them (the CLI pushes its own with `set_face` / `set_rotation` when given on the command line), then streams `metrics`. Later changes on the host are pushed with `tools/call`.
 
@@ -109,7 +124,7 @@ When the host sees `ready` it repeats step 3. A board that never answers `hello`
 
 ## Board tools
 
-Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` is the default where a tool takes `screen`. Faces, rotation, brightness, the mic mute and the wake word are kept in NVS and survive a reboot.
+Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` is the default where a tool takes `screen`. Faces, rotation, brightness, the mic mute, the wake word and the speaker volume are kept in NVS and survive a reboot.
 
 | Tool | Arguments | Effect |
 |------|-----------|--------|
@@ -119,7 +134,8 @@ Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` i
 | `show_text` | `text` (up to 120 characters, ASCII); `screen`; `seconds`: 1–30, default 4 | Show a message over the face, then hide it |
 | `set_mic` | `muted`: boolean | Stop or restart listening for the wake word. Muted, the mic isn't read at all |
 | `set_wake_word` | `word`: `alexa` (default) · `hiesp` | Listen for "Alexa" or "Hi ESP" from now on. Refused when the `model` partition has no model for it |
-| `get_state` | none | Firmware, uptime, metrics state, each screen's face, rotation and brightness, voice (`available`, `wake_word`, `wake_word_id`, `model`, `wake_words` the board has models for, `muted`, `state`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (as `structuredContent`) |
+| `set_volume` | `percent`: 0–100 | Speaker volume (default 60) |
+| `get_state` | none | Firmware, uptime, metrics state, each screen's face, rotation and brightness, voice (`available`, `wake_word`, `wake_word_id`, `model`, `wake_words` the board has models for, `muted`, `state`), audio (`speaker`, `volume`, `playing`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (as `structuredContent`) |
 
 Example:
 
@@ -141,5 +157,6 @@ One JSON-RPC 2.0 message per line, one request at a time. The first request must
 | `hello` | `{"token":"…","client":"dualeye-mcp/0.1.0"}` | `{"bridge":"0.1.0","board":<hello result or null>,"port":"/dev/cu.usbmodem101"}` |
 | `tools/list`, `tools/call` | As on `ctrl` | Passed to the board unchanged, one at a time |
 | `host/snapshot` | none | `{"snapshot":<latest sample or null>,"age_ms":…}` |
+| `host/say` | `{"text":"Ciao!","language":"it"}` (`language` optional: what the text looks like) | Once played: `{"text":…,"first_audio_ms":…,"played_ms":…,"reason":"done","underruns":0,"lost":0}`. `-32000` unless the bridge has text-to-speech (the app with spoken replies on, or `dualeye --tts`) |
 
 While no board is attached (not found, rebooting, esptool flashing it) board methods fail with `-32000` and the reason as the message. After a successful `set_face` or `set_rotation` the bridge reads `get_state` and updates its own settings, so the app shows the change and keeps it.

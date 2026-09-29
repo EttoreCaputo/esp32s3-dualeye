@@ -5,22 +5,34 @@
 //! puts the frames back together, filling any it lost with silence so the
 //! timing stays right, and the bridge's voice thread takes each finished
 //! [`Utterance`]: it keeps a WAV copy when asked, transcribes it with
-//! [`Stt`] when there's speech and puts the eyes back to idle.
+//! [`Stt`] when there's speech, acts on the words with [`intents`] and
+//! answers with [`Tts`] through the board's speaker ([`Speaker`]), or puts
+//! the eyes back to idle.
+//!
+//! Speech goes to the board on `audio_down`, paced in real time a little
+//! ahead of the speaker, a sentence at a time: the first plays while the
+//! next is synthesized. The board says `playback_end` once it has played it.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::bridge::{BridgeEvent, EventSink};
+use crate::intents::{self, Context};
 use crate::link::Link;
+use crate::protocol::Channel;
+use crate::snapshot::Snapshot;
 use crate::stt::Stt;
+use crate::tts::{self, Tts};
 
 /// The board's audio: 16 kHz, mono, s16le.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -173,6 +185,9 @@ pub struct VoiceConfig {
     /// Transcribe what the board hears. Shared: the sidecar outlives a
     /// reconnect.
     pub stt: Option<Arc<Stt>>,
+    /// Answer out loud through the board's speaker; without it, answers
+    /// are only reported ([`BridgeEvent::Reply`]).
+    pub tts: Option<Arc<Tts>>,
 }
 
 /// Whisper's output for silence or noise rather than words.
@@ -187,11 +202,22 @@ pub fn default_dump_dir() -> Option<PathBuf> {
 }
 
 const STATE_TIMEOUT: Duration = Duration::from_secs(1);
+const TOOL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// What the voice thread shares with the bridge's session.
+pub(crate) struct Session {
+    pub link: Weak<Link>,
+    pub speaker: Arc<Speaker>,
+    /// The latest snapshot, for "how hot is the CPU".
+    pub snapshot: Arc<Mutex<Option<Snapshot>>>,
+    /// Set after a tool changed faces or rotation: the bridge reads them back.
+    pub settings_changed: Arc<AtomicBool>,
+}
 
 /// The pipeline: handles each finished utterance, on its own thread so the
-/// link's reader never waits on it, until the sender is dropped. `link` is
+/// link's reader never waits on it, until the sender is dropped. The link is
 /// weak because the link's reader holds that sender.
-pub(crate) fn run(config: &Mutex<VoiceConfig>, link: &Weak<Link>, sink: &EventSink, rx: Receiver<Utterance>) {
+pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSink, rx: Receiver<Utterance>) {
     for utterance in rx {
         let config = config.lock().unwrap().clone();
         let wav = config.dump_dir.as_deref().and_then(|dir| match dump(dir, &utterance) {
@@ -210,17 +236,212 @@ pub(crate) fn run(config: &Mutex<VoiceConfig>, link: &Weak<Link>, sink: &EventSi
         if !utterance.speech {
             continue;
         }
+        let Some(link) = session.link.upgrade() else { return };
         // The board shows thinking meanwhile.
-        if let Some(stt) = &config.stt {
-            match stt.transcribe(&utterance.samples) {
-                Ok(t) if is_non_speech(&t.text) => sink(BridgeEvent::Transcript { id: utterance.id, transcript: None }),
-                Ok(t) => sink(BridgeEvent::Transcript { id: utterance.id, transcript: Some(t) }),
-                Err(e) => sink(BridgeEvent::VoiceError { message: e.to_string() }),
+        let transcript = match &config.stt {
+            None => None,
+            Some(stt) => match stt.transcribe(&utterance.samples) {
+                Ok(t) if is_non_speech(&t.text) => {
+                    sink(BridgeEvent::Transcript { id: utterance.id, transcript: None });
+                    None
+                }
+                Ok(t) => {
+                    sink(BridgeEvent::Transcript { id: utterance.id, transcript: Some(t.clone()) });
+                    Some(t)
+                }
+                Err(e) => {
+                    sink(BridgeEvent::VoiceError { message: e.to_string() });
+                    None
+                }
+            },
+        };
+        let spoken = transcript.is_some_and(|t| respond(&link, session, config.tts.as_deref(), sink, utterance.id, &t.text, &t.language));
+        if !spoken {
+            let _ = link.call("voice/state", json!({"state": "idle"}), STATE_TIMEOUT);
+        }
+    }
+}
+
+/// Act on the words and answer. True when the answer was spoken (the board
+/// then goes back to idle by itself).
+fn respond(link: &Link, session: &Session, tts: Option<&Tts>, sink: &EventSink, id: u8, text: &str, language: &str) -> bool {
+    let started = Instant::now();
+    let volume = || {
+        let state = link.call_tool("get_state", json!({}), TOOL_TIMEOUT).ok()?;
+        Some(state.structured_content?.pointer("/audio/volume")?.as_u64()? as u8)
+    };
+    let ctx = Context { snapshot: session.snapshot.lock().unwrap().clone(), volume: volume() };
+    let plan = intents::understand(text, language, &ctx);
+    let mut ok = true;
+    let mut actions = Vec::new();
+    for (tool, args) in &plan.calls {
+        let result = link.call_tool(tool, args.clone(), TOOL_TIMEOUT);
+        let line = match &result {
+            Ok(r) if !r.is_error => format!("{tool}: {}", r.text()),
+            Ok(r) => format!("{tool} failed: {}", r.text()),
+            Err(e) => format!("{tool} failed: {e}"),
+        };
+        ok &= matches!(&result, Ok(r) if !r.is_error);
+        if ok && matches!(tool.as_str(), "set_face" | "set_rotation") {
+            session.settings_changed.store(true, Ordering::Relaxed);
+        }
+        actions.push(line);
+        if !ok {
+            break;
+        }
+    }
+    let reply = if ok { plan.reply } else { plan.failure };
+    sink(BridgeEvent::Reply { id, text: reply.clone(), language: language.to_string(), actions, understood: plan.understood, elapsed_ms: started.elapsed().as_millis() as u64 });
+    let Some(tts) = tts else { return false };
+    match session.speaker.speak(link, tts, &reply, language) {
+        Ok(spoken) => {
+            sink(BridgeEvent::Spoken { id, spoken });
+            true
+        }
+        Err(e) => {
+            sink(BridgeEvent::VoiceError { message: e });
+            false
+        }
+    }
+}
+
+/// Samples per `audio_down` frame: 64 ms, 2 KB.
+const PLAY_FRAME: usize = 1024;
+/// How far ahead of the speaker the host keeps the board's buffer.
+const PLAY_LEAD: Duration = Duration::from_millis(500);
+/// Past the end of the audio, how long to wait for `playback_end`.
+const PLAY_GRACE: Duration = Duration::from_secs(3);
+
+/// How a reply went out.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Spoken {
+    pub text: String,
+    /// From the request to the first frame sent: synthesizing the first sentence.
+    pub first_audio_ms: u64,
+    /// What the board played, from its `playback_end`.
+    pub played_ms: u64,
+    /// Why it ended: `done`, `stopped`, `replaced` or `starved`.
+    pub reason: String,
+    /// Times the board ran out of audio mid-stream.
+    pub underruns: u32,
+    /// Frames the board never got.
+    pub lost: u32,
+}
+
+/// Plays speech on the board, one reply at a time. Shared by the voice
+/// pipeline and the hub (`host/say`); the link's reader hands it the board's
+/// `playback_end` notifications.
+#[derive(Default)]
+pub struct Speaker {
+    /// Held while a reply plays; the id of the last stream.
+    playing: Mutex<u8>,
+    ended: Mutex<Option<Value>>,
+    ended_cv: Condvar,
+}
+
+impl Speaker {
+    /// `playback_end` from the board.
+    pub fn playback_end(&self, params: Value) {
+        *self.ended.lock().unwrap() = Some(params);
+        self.ended_cv.notify_all();
+    }
+
+    /// Synthesize `text` in `language` and play it, a sentence at a time.
+    /// Returns once the board has played it.
+    pub fn speak(&self, link: &Link, tts: &Tts, text: &str, language: &str) -> Result<Spoken, String> {
+        let started = Instant::now();
+        let (tx, rx) = mpsc::sync_channel::<Result<Vec<i16>, String>>(2);
+        let sentences = tts::sentences(text);
+        thread::scope(|scope| {
+            scope.spawn(move || {
+                for s in sentences {
+                    let audio = tts.synthesize(&s, language).map_err(|e| e.to_string());
+                    let failed = audio.is_err();
+                    if tx.send(audio).is_err() || failed {
+                        return;
+                    }
+                }
+            });
+            let mut first_audio_ms = None;
+            let played = self.play(link, rx.into_iter().inspect(|_| {
+                first_audio_ms.get_or_insert(started.elapsed().as_millis() as u64);
+            }))?;
+            Ok(Spoken { text: text.to_string(), first_audio_ms: first_audio_ms.unwrap_or(0), ..played })
+        })
+    }
+
+    /// Stream audio to the board as it comes, paced in real time, then wait
+    /// for the board to finish playing it.
+    pub fn play(&self, link: &Link, audio: impl IntoIterator<Item = Result<Vec<i16>, String>>) -> Result<Spoken, String> {
+        let mut id = self.playing.lock().unwrap();
+        *id = id.wrapping_add(1);
+        let id = *id;
+        *self.ended.lock().unwrap() = None;
+        let mut seq = 0u16;
+        let mut pending: Vec<i16> = Vec::new();
+        // Where the board's speaker is: `sent` samples are due at `clock + sent / rate`.
+        let mut clock: Option<Instant> = None;
+        let mut sent = 0u64;
+        let mut failure = None;
+        let mut send = |samples: &[i16], last: bool, clock: &mut Option<Instant>, sent: &mut u64| -> io::Result<()> {
+            let start = *clock.get_or_insert_with(Instant::now);
+            let due = |n: u64| start + Duration::from_micros(n * 1_000_000 / SAMPLE_RATE as u64);
+            // Keep at most PLAY_LEAD in the board's buffer.
+            let now = Instant::now();
+            if due(*sent) < now {
+                // We fell behind (a slow sentence): the board played
+                // silence meanwhile, so its clock moved on.
+                *clock = Some(now - Duration::from_micros(*sent * 1_000_000 / SAMPLE_RATE as u64));
+            } else if let Some(wait) = due(*sent).checked_duration_since(now + PLAY_LEAD) {
+                thread::sleep(wait);
+            }
+            let mut frame = Vec::with_capacity(4 + samples.len() * 2);
+            frame.extend_from_slice(&[id, u8::from(last)]);
+            frame.extend_from_slice(&seq.to_le_bytes());
+            for s in samples {
+                frame.extend_from_slice(&s.to_le_bytes());
+            }
+            seq = seq.wrapping_add(1);
+            *sent += samples.len() as u64;
+            link.send(Channel::AudioDown, &frame)
+        };
+        for chunk in audio {
+            match chunk {
+                Ok(samples) => pending.extend(samples),
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            }
+            while pending.len() > PLAY_FRAME {
+                let rest = pending.split_off(PLAY_FRAME);
+                send(&pending, false, &mut clock, &mut sent).map_err(|e| e.to_string())?;
+                pending = rest;
             }
         }
-        // Nothing acts on the words yet (M5, M6).
-        if let Some(link) = link.upgrade() {
-            let _ = link.call("voice/state", json!({"state": "idle"}), STATE_TIMEOUT);
+        send(&pending, true, &mut clock, &mut sent).map_err(|e| e.to_string())?;
+        let deadline = clock.unwrap_or_else(Instant::now) + Duration::from_micros(sent * 1_000_000 / SAMPLE_RATE as u64) + PLAY_GRACE;
+        let mut ended = self.ended.lock().unwrap();
+        loop {
+            if let Some(p) = ended.as_ref().filter(|p| p["id"].as_u64() == Some(id as u64)) {
+                if let Some(e) = failure {
+                    return Err(e);
+                }
+                let n = |k: &str| p[k].as_u64().unwrap_or(0);
+                return Ok(Spoken {
+                    text: String::new(),
+                    first_audio_ms: 0,
+                    played_ms: n("ms"),
+                    reason: p["reason"].as_str().unwrap_or("done").to_string(),
+                    underruns: n("underruns") as u32,
+                    lost: n("lost") as u32,
+                });
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(failure.unwrap_or_else(|| "the board didn't say it had played the reply".into()));
+            }
+            ended = self.ended_cv.wait_timeout(ended, deadline - now).unwrap().0;
         }
     }
 }
