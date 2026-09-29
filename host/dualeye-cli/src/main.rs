@@ -17,6 +17,10 @@
 //!   dualeye piper install         # Piper, for `dualeye --tts` (needs Python 3)
 //!   dualeye models download it_IT-paola-medium   # a voice for it
 //!   dualeye --stt --tts           # voice commands with spoken replies
+//!   dualeye models download qwen3-4b-2507        # a language model, for `dualeye --llm`
+//!   dualeye --stt --tts --llm     # ...understood by a local language model (llama-server)
+//!   dualeye ask "metti rings a sinistra"         # type a command to the language model
+//!   dualeye eval                  # run the voice commands' eval set against the language model
 //!   dualeye say "Ciao!"           # speak through a running bridge's speaker
 
 use std::process::ExitCode;
@@ -31,9 +35,11 @@ use dualeye_core::claude::statusline;
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::tts::{self, Tts, TtsConfig};
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage};
+use dualeye_core::eval::{self, EvalSet, Responder};
+use dualeye_core::llm::{self, Llm, LlmConfig};
 use dualeye_core::voice::{self, VoiceConfig};
-use dualeye_core::{Board, BoardFirmware, ClaudeUsage, Collector, Face, Faces, Hub, Memory, Rotation, Rotations, Snapshot, mcp, serial};
-use serde_json::{Map, Value};
+use dualeye_core::{Agent, Board, BoardFirmware, ClaudeUsage, Collector, Face, Faces, Hub, Memory, Rotation, Rotations, Snapshot, Tool, Toolbox, intents, mcp, serial};
+use serde_json::{Map, Value, json};
 
 #[derive(Parser)]
 #[command(name = "dualeye", version, about = "Stream PC sensors to the ESP32-S3 DualEye board", args_conflicts_with_subcommands = true)]
@@ -96,6 +102,21 @@ struct Args {
     /// default one (repeat for Italian and English)
     #[arg(long, value_name = "VOICE", requires = "tts")]
     tts_voice: Vec<String>,
+    #[command(flatten)]
+    llm: LlmArgs,
+}
+
+#[derive(clap::Args, Clone)]
+struct LlmArgs {
+    /// Understand voice commands with a local language model (llama.cpp's
+    /// `llama-server` on the PATH): a model from `dualeye models`, or a GGUF
+    /// file. Without it, a few fixed phrases are understood
+    #[arg(long, value_name = "MODEL|FILE", num_args = 0..=1, default_missing_value = models::DEFAULT_LLM)]
+    llm: Option<String>,
+    /// Layers of the language model on the GPU; 0 runs it on the CPU
+    /// (default: as many as fit)
+    #[arg(long, value_name = "N")]
+    llm_gpu_layers: Option<u32>,
 }
 
 /// Talk to the board's tools. While the app or a streaming `dualeye` runs,
@@ -143,6 +164,40 @@ enum Command {
         #[command(subcommand)]
         action: Option<PiperAction>,
     },
+    /// Type a command to the language model, as if said to the board: it
+    /// runs the board's tools and prints its answer
+    Ask {
+        text: String,
+        /// it or en (default: what the text looks like)
+        #[arg(long)]
+        language: Option<String>,
+        #[arg(long, env = "DUALEYE_PORT")]
+        port: Option<String>,
+        #[command(flatten)]
+        llm: LlmArgs,
+    },
+    /// Run the voice commands' eval set (about 50, Italian and English) on a
+    /// simulated board: accuracy and latency of a language model, or of the
+    /// fixed phrases with --rules
+    Eval {
+        #[command(flatten)]
+        llm: LlmArgs,
+        /// The fixed phrases (M5) instead of a language model
+        #[arg(long, conflicts_with = "llm")]
+        rules: bool,
+        /// commands (the main set), holdout (other phrasings), or a JSON file
+        #[arg(long, default_value = "commands")]
+        set: String,
+        /// Only the cases in this language: it or en
+        #[arg(long)]
+        language: Option<String>,
+        /// Print every case, not only the failures
+        #[arg(long, short)]
+        verbose: bool,
+        /// Print the results as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Speak through the board's speaker. Needs the app with spoken replies
     /// on, or `dualeye --tts`, running
     Say {
@@ -178,6 +233,8 @@ fn main() -> ExitCode {
         Some(Command::Call { port, json, tool, args }) => return call(port, json, &tool, &args),
         Some(Command::Models { action }) => return models_command(action),
         Some(Command::Piper { action }) => return piper_command(action),
+        Some(Command::Ask { text, language, port, llm }) => return ask(&text, language.as_deref(), port, &llm),
+        Some(Command::Eval { llm, rules, set, language, verbose, json }) => return eval(&llm, rules, &set, language.as_deref(), verbose, json),
         Some(Command::Say { text, language }) => {
             return match board(None).say(&text, language.as_deref()) {
                 Ok(r) => {
@@ -247,6 +304,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let agent = match args.llm.llm.is_some().then(|| agent(&args.llm)) {
+        None => None,
+        Some(Ok(agent)) => Some(agent),
+        Some(Err(why)) => {
+            eprintln!("{why}");
+            return ExitCode::FAILURE;
+        }
+    };
     // Lets `dualeye mcp` and `dualeye call` use the board while this streams.
     let hub = Hub::start().inspect_err(|e| eprintln!("not sharing the board with other processes: {e}")).ok();
     let config = BridgeConfig {
@@ -263,6 +328,7 @@ fn main() -> ExitCode {
             dump_dir: args.voice_dump.map(|d| if d.as_os_str().is_empty() { voice::default_dump_dir().unwrap_or(d) } else { d }),
             stt,
             tts,
+            agent,
         })),
     };
     let stop = Arc::new(AtomicBool::new(false));
@@ -295,11 +361,11 @@ fn main() -> ExitCode {
             }
             BridgeEvent::Transcript { id, transcript: None } => println!("utterance {id}: no words"),
             BridgeEvent::VoiceError { message } => eprintln!("{message}"),
-            BridgeEvent::Reply { id, text, actions, elapsed_ms, .. } => {
+            BridgeEvent::Reply { id, text, actions, by, elapsed_ms, .. } => {
                 for a in actions {
                     println!("utterance {id}: {a}");
                 }
-                println!("utterance {id}: reply ({elapsed_ms} ms): {text}")
+                println!("utterance {id}: reply ({by}, {elapsed_ms} ms): {text}")
             }
             BridgeEvent::Spoken { id, spoken } => println!(
                 "utterance {id}: spoken, first audio after {} ms, {:.1} s played ({}{})",
@@ -353,7 +419,184 @@ fn main() -> ExitCode {
     let voice = config.voice.lock().unwrap();
     voice.stt.iter().for_each(|s| s.shutdown());
     voice.tts.iter().for_each(|t| t.shutdown());
+    voice.agent.iter().for_each(|a| a.llm().shutdown());
     if fatal.load(Ordering::Relaxed) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+/// `--llm qwen3-4b-2507` (a model from `dualeye models`) or `--llm path/to/model.gguf`.
+fn llm_config(args: &LlmArgs) -> Result<LlmConfig, String> {
+    let server = llm::find_server().ok_or("llama-server not found: install llama.cpp (brew install llama.cpp)")?;
+    let model = args.llm.as_deref().unwrap_or(models::DEFAULT_LLM);
+    let path = match Model::by_id(model) {
+        Some(m) if m.kind == Kind::Llm && m.is_installed() => m.path().ok_or("no data folder for the models")?,
+        Some(m) if m.kind == Kind::Llm => return Err(format!("the {model} model isn't downloaded: dualeye models download {model}")),
+        _ if std::path::Path::new(model).is_file() => model.into(),
+        _ => {
+            let ids: Vec<&str> = Model::of_kind(Kind::Llm).map(|m| m.id).collect();
+            return Err(format!("{model}: not a language model ({}) or a GGUF file", ids.join(", ")));
+        }
+    };
+    Ok(LlmConfig { server, model: path, gpu_layers: args.llm_gpu_layers })
+}
+
+fn agent(args: &LlmArgs) -> Result<Arc<Agent>, String> {
+    Ok(Arc::new(Agent::new(Arc::new(Llm::new(llm_config(args)?)))))
+}
+
+/// The board's tools for `dualeye ask`, through a running bridge or the port.
+struct BoardTools {
+    board: Board,
+}
+
+impl Toolbox for BoardTools {
+    fn tools(&self) -> Vec<Tool> {
+        voice::voice_tools(self.board.list_tools().unwrap_or_default())
+    }
+
+    fn call(&self, name: &str, arguments: &Value) -> Result<String, String> {
+        if name == "get_metrics" {
+            let snapshot = match self.board.bridge_snapshot() {
+                Some((s, _)) => s,
+                None => {
+                    let mut collector = Collector::new();
+                    collector.sample();
+                    thread::sleep(Duration::from_millis(500));
+                    collector.sample()
+                }
+            };
+            return Ok(snapshot.metrics_json().to_string());
+        }
+        let result = self.board.call_tool(name, arguments.clone()).map_err(|e| e.to_string())?;
+        match (result.is_error, name, &result.structured_content) {
+            (true, ..) => Err(result.text()),
+            (false, "get_state", Some(state)) => Ok(voice::trim_state(state).to_string()),
+            _ => Ok(result.text()),
+        }
+    }
+}
+
+fn ask(text: &str, language: Option<&str>, port: Option<String>, args: &LlmArgs) -> ExitCode {
+    let agent = match agent(args) {
+        Ok(a) => a,
+        Err(why) => {
+            eprintln!("{why}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("loading {}", agent.llm().config().model.display());
+    if let Err(e) = agent.llm().warm_up() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    let language = language.unwrap_or_else(|| intents::guess_language(text));
+    let result = agent.respond(text, language, &BoardTools { board: board(port) });
+    agent.llm().shutdown();
+    match result {
+        Ok(turn) => {
+            for a in &turn.actions {
+                println!("{}({}) -> {}{}", a.tool, a.arguments, if a.ok { "" } else { "failed: " }, a.result);
+            }
+            println!("{}", turn.reply);
+            eprintln!(
+                "{} requests, {} ms{}",
+                turn.rounds,
+                turn.elapsed_ms,
+                turn.first_action_ms.map(|ms| format!(", first action after {ms} ms")).unwrap_or_default()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn eval(args: &LlmArgs, rules: bool, set: &str, language: Option<&str>, verbose: bool, json: bool) -> ExitCode {
+    let set = match EvalSet::named(set) {
+        Ok(s) => s,
+        Err(why) => {
+            eprintln!("{why}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let agent = if rules {
+        None
+    } else {
+        match agent(args) {
+            Ok(a) => Some(a),
+            Err(why) => {
+                eprintln!("{why}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+    if let Some(agent) = &agent {
+        eprintln!("loading {}", agent.llm().config().model.display());
+        if let Err(e) = agent.llm().warm_up() {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    let responder = match &agent {
+        Some(a) => Responder::Llm(a),
+        None => Responder::Rules,
+    };
+    if let Err(e) = eval::prime(&set, &responder) {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    let cases: Vec<_> = set.cases.iter().filter(|c| language.is_none_or(|l| c.lang == l)).collect();
+    let mut results = Vec::new();
+    for (i, case) in cases.iter().enumerate() {
+        let result = match eval::run_case(&set, case, &responder) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if !json && (verbose || !result.pass) {
+            let mark = if result.pass { "ok  " } else { "FAIL" };
+            println!("{mark} {:>2} [{}] {}", i + 1, result.lang, result.say.join(" / "));
+            for a in &result.actions {
+                println!("          {}({}){}", a.tool, a.arguments, if a.ok { String::new() } else { format!(" -> {}", a.result) });
+            }
+            println!("          \"{}\" ({} ms{})", result.reply, result.reply_ms, if result.wrong_language { ", wrong language" } else { "" });
+            if let Some(why) = &result.why {
+                println!("          {why}");
+            }
+        } else if !json {
+            eprint!(".");
+        }
+        results.push(result);
+    }
+    if let Some(agent) = &agent {
+        agent.llm().shutdown();
+    }
+    let s = eval::summarize(&results);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&json!({"summary": s, "results": results})).unwrap_or_default());
+    } else {
+        eprintln!();
+        let pct = |(p, n): (usize, usize)| if n == 0 { 0.0 } else { 100.0 * p as f64 / n as f64 };
+        println!(
+            "{} of {} right ({:.0} %): Italian {}/{}, English {}/{}; {} replies in the wrong language",
+            s.passed,
+            s.cases,
+            pct((s.passed, s.cases)),
+            s.passed_it.0,
+            s.passed_it.1,
+            s.passed_en.0,
+            s.passed_en.1,
+            s.wrong_language
+        );
+        println!(
+            "first action (or answer): median {} ms, 90th percentile {} ms; reply: median {} ms, 90th percentile {} ms",
+            s.first_ms_median, s.first_ms_p90, s.reply_ms_median, s.reply_ms_p90
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 /// `--stt small` (a model from `dualeye models`) or `--stt path/to/ggml-model.bin`.
@@ -425,14 +668,15 @@ fn models_command(action: Option<ModelsAction>) -> ExitCode {
     let find = |id: &str| Model::by_id(id).ok_or_else(|| format!("unknown model {id:?}: {}", model_ids()));
     let result = match action {
         None => {
-            for (kind, title) in [(Kind::Whisper, "Speech-to-text (Whisper, --stt)"), (Kind::Voice, "Voices (Piper, --tts)")] {
+            let kinds = [(Kind::Whisper, "Speech-to-text (Whisper, --stt)"), (Kind::Voice, "Voices (Piper, --tts)"), (Kind::Llm, "Language models (llama.cpp, --llm)")];
+            for (kind, title) in kinds {
                 println!("{title}");
                 for m in Model::of_kind(kind) {
                     let mark = if m.is_installed() { "installed" } else { "" };
-                    let default = m.id == models::DEFAULT_MODEL || m.language.and_then(models::default_voice) == Some(m.id);
+                    let default = m.id == models::DEFAULT_MODEL || m.id == models::DEFAULT_LLM || m.language.and_then(models::default_voice) == Some(m.id);
                     let default = if default { " (default)" } else { "" };
                     println!("  {:<22} {:>5} MB  {:<9}  {}{default}", m.id, m.bytes() / 1_000_000, mark, m.note);
-                    if kind == Kind::Voice {
+                    if kind != Kind::Whisper {
                         println!("  {:<22}                     license: {}", "", m.license);
                     }
                 }

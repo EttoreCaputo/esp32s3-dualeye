@@ -151,15 +151,31 @@ dualeye --stt                   # prints each transcript
 
 In the desktop app it's Settings → **Voice**: turn it on, download a model (the app checks its SHA-256) and the transcripts show there. `dualeye models` lists the same models for the CLI (`dualeye models download small`). `--stt` takes one of them or a ggml model file, `--stt-language it|en` skips language detection, and `--voice-dump` keeps each utterance as a WAV file in `voice/` in DualEye's data folder. Nothing leaves your computer.
 
-Simple commands are carried out and answered out loud, in the language you spoke: *"metti la faccia rings a sinistra"*, *"put classic on the right screen"*, *"luminosità al 50 per cento"*, *"turn the volume up"*, *"ruota gli schermi sottosopra"*, *"scrivi ciao"*, *"what's the temperature?"*, *"che ore sono?"*. These are fixed rules for now; a local LLM takes over in the next milestone. The answer is spoken by [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`, GPL-3.0, run as a separate process) through the board's speaker, a sentence at a time, while a green ring shows the speaker's level; the board ignores its wake word while it talks. From the end of what you say to the first word of the answer takes about 1.5 s on an M1 Pro.
+What you say is understood by a small language model running locally in llama.cpp's `llama-server`, which calls the board's tools (the same ones MCP offers, plus the computer's sensors and the time) and answers in one short sentence, in the language you spoke: *"metti la faccia rings a sinistra"*, *"put classic on the right screen"*, *"abbassa la luminosità al 30 per cento"*, *"make your voice louder"*, *"gira gli schermi sottosopra"*, *"scrivi ciao a tutti"*, *"how hot is the GPU?"*, *"che ore sono?"*, and follow-ups like *"e anche a destra"* within a few minutes. The default model, Qwen3 4B Instruct 2507 (Apache-2.0, 2.5 GB), gets all 53 commands of the eval set right and acts about 0.9 s after the transcript on an M1 Pro. Without llama-server, or with the language model turned off, a few fixed phrases still work. The answer is spoken by [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`, GPL-3.0, run as a separate process) through the board's speaker, a sentence at a time, while a green ring shows the speaker's level; the board ignores its wake word while it talks.
 
 ```bash
 dualeye piper install                            # a virtualenv in DualEye's data folder, about 100 MB (needs Python 3.9+)
 dualeye models download it_IT-paola-medium       # Italian voice, 64 MB
 dualeye models download en_GB-alba-medium        # English voice, 63 MB
-dualeye --stt --tts                              # voice commands with spoken replies
+dualeye --stt --tts                              # voice commands with spoken replies (fixed phrases)
+brew install llama.cpp                           # or build llama-server from source
+dualeye models download qwen3-4b-2507            # the language model, 2.5 GB
+dualeye --stt --tts --llm                        # ...understood by the language model
+dualeye ask "metti rings a sinistra"             # type a command instead of saying it
+dualeye eval                                     # the eval set on a simulated board: accuracy and latency
 dualeye say "Ciao!"                              # speak through the running app or dualeye --tts
 ```
+
+`--llm` takes a model from `dualeye models` or a GGUF file, and `--llm-gpu-layers 0` keeps it on the CPU. The model stays loaded while voice is on (about 3 GB of memory for the default). `dualeye eval` runs about 50 Italian and English commands ([eval/commands.json](host/dualeye-core/eval/commands.json)) against a simulated board and checks where the board ends up; `--set holdout` runs other phrasings, `--rules` the fixed phrases. On an M1 Pro:
+
+| Model | Right (of 53) | Other phrasings (of 27) | Time to action, median |
+|---|---|---|---|
+| `qwen3-4b-2507` (default) | 53 | 25 | 0.9 s |
+| `qwen3.5-4b` | 52 | 27 | 1.4 s |
+| `qwen3.5-2b` | 49 | 24 | 0.65 s |
+| fixed phrases | 39 | 20 | — |
+
+The two Qwen3.5 models often answer an Italian question in English. Qwen3 1.7B (45) and Gemma 4 E2B (39) were tried and left out.
 
 The app installs Piper by itself (Settings → **Voice** → **Install Piper**, with the same Python it uses for esptool) and lists the voices next to the Whisper models, with a Test button and the speaker's volume, which the board keeps (`set_volume` tool). `--tts-voice ID` picks another voice for its language. Several voices are fine-tuned from Piper's *lessac* voice, whose dataset comes with its own license: `dualeye models` shows each voice's (the app too, on hover), so check it before using a voice beyond your own desk.
 
@@ -210,7 +226,7 @@ sdkconfig.defaults        firmware config (target esp32s3, 16 MB flash, USB Seri
 partitions.csv            flash layout: app, then the ESP-SR `model` partition
 .devcontainer/            ESP-IDF container for VS Code
 host/                     Cargo workspace
-  dualeye-core/           sensors, Claude Code usage, snapshot, serial bridge, esptool setup/flash, voice (STT, intents, TTS) (library)
+  dualeye-core/           sensors, Claude Code usage, snapshot, serial bridge, esptool setup/flash, voice (STT, language model agent and its eval set, fixed phrases, TTS) (library)
   dualeye-cli/            `dualeye` command-line bridge
   dualeye-app/            desktop app: Svelte UI in src/, Tauri shell in src-tauri/
 ```

@@ -15,9 +15,11 @@
 //!
 //! Voice (opt-in, off by default): with it on, what the board hears after its
 //! wake word is transcribed by a whisper.cpp `whisper-server` sidecar with a
-//! model the app downloads (`dualeye_core::models`), simple commands are
-//! carried out (`dualeye_core::intents`) and answered out loud by a Piper
-//! sidecar through the board's speaker. The app installs Piper itself, into
+//! model the app downloads (`dualeye_core::models`), understood by a small
+//! language model in a llama.cpp `llama-server` sidecar that calls the
+//! board's tools (`dualeye_core::agent`; without one, a few fixed phrases,
+//! `dualeye_core::intents`) and answered out loud by a Piper sidecar through
+//! the board's speaker. The app installs Piper itself, into
 //! a virtualenv made with esptool's Python. Turning voice on, or picking
 //! another model, language or voice, swaps the bridge's shared voice config:
 //! no reconnect.
@@ -38,12 +40,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
+use dualeye_core::llm::{self, Llm, LlmConfig};
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage, Transcript};
 use dualeye_core::tts::{self, Tts, TtsConfig};
 use dualeye_core::voice::{self, Spoken, VoiceConfig};
 use dualeye_core::{
-    Board, BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
+    Agent, Board, BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
     mcp, serial,
 };
 use serde::{Deserialize, Serialize};
@@ -83,12 +86,26 @@ struct VoiceSettings {
     speak: bool,
     /// Voice by language (`it`, `en`): `models::MODELS` ids.
     voices: BTreeMap<String, String>,
+    /// Understand commands with a local language model; without it, a few
+    /// fixed phrases.
+    llm: bool,
+    /// A `models::MODELS` id of kind `llm`.
+    llm_model: String,
 }
 
 impl Default for VoiceSettings {
     fn default() -> Self {
         let voices = ["it", "en"].into_iter().filter_map(|l| models::default_voice(l).map(|v| (l.to_string(), v.to_string()))).collect();
-        Self { enabled: false, model: models::DEFAULT_MODEL.into(), language: SttLanguage::Auto, keep_recordings: false, speak: true, voices }
+        Self {
+            enabled: false,
+            model: models::DEFAULT_MODEL.into(),
+            language: SttLanguage::Auto,
+            keep_recordings: false,
+            speak: true,
+            voices,
+            llm: true,
+            llm_model: models::DEFAULT_LLM.into(),
+        }
     }
 }
 
@@ -98,6 +115,8 @@ struct ReplyEntry {
     text: String,
     actions: Vec<String>,
     understood: bool,
+    /// `llm` or `rules`.
+    by: String,
 }
 
 /// One line of the Voice tab's log.
@@ -168,9 +187,9 @@ impl Link {
                 let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
                 self.transcripts.push_back(TranscriptEntry { id: *id, at, transcript: transcript.clone(), reply: None, spoken: None });
             }
-            BridgeEvent::Reply { id, text, actions, understood, .. } => {
+            BridgeEvent::Reply { id, text, actions, understood, by, .. } => {
                 if let Some(entry) = self.transcripts.iter_mut().rev().find(|e| e.id == *id) {
-                    entry.reply = Some(ReplyEntry { text: text.clone(), actions: actions.clone(), understood: *understood });
+                    entry.reply = Some(ReplyEntry { text: text.clone(), actions: actions.clone(), understood: *understood, by: by.clone() });
                 }
             }
             BridgeEvent::Spoken { id, spoken } => {
@@ -213,6 +232,8 @@ struct AppState {
     stt_state: Arc<Mutex<(&'static str, Option<String>)>>,
     /// Text-to-speech, likewise.
     tts_state: Arc<Mutex<(&'static str, Option<String>)>>,
+    /// The language model, likewise.
+    llm_state: Arc<Mutex<(&'static str, Option<String>)>>,
     /// Piper being installed: the latest line of its output.
     piper_install: Mutex<Option<String>>,
     /// The model being downloaded and how far along (percent).
@@ -234,12 +255,12 @@ impl AppState {
 }
 
 /// Make the bridge's voice config match the settings: start (or keep)
-/// the whisper-server and Piper sidecars, or stop them.
+/// the whisper-server, Piper and llama-server sidecars, or stop them.
 fn apply_voice(state: &AppState) {
     let settings = state.settings.lock().unwrap().voice.clone();
-    let (current_stt, current_tts) = {
+    let (current_stt, current_tts, current_agent) = {
         let voice = state.voice.lock().unwrap();
-        (voice.stt.clone(), voice.tts.clone())
+        (voice.stt.clone(), voice.tts.clone(), voice.agent.clone())
     };
     let stt = sidecar(
         settings.enabled.then(|| stt_config(&settings)),
@@ -251,8 +272,17 @@ fn apply_voice(state: &AppState) {
     let wanted_tts = (settings.enabled && settings.speak).then(|| tts_config(&settings));
     let keep_tts = current_tts.filter(|t| matches!(&wanted_tts, Some(Ok(c)) if t.config() == c));
     let tts = sidecar(wanted_tts, keep_tts, &state.tts_state, |config| Arc::new(Tts::new(config)), |tts: &Arc<Tts>| tts.warm_up().map_err(|e| e.to_string()));
+    let wanted_llm = (settings.enabled && settings.llm).then(|| llm_config(&settings));
+    let keep_agent = current_agent.filter(|a| matches!(&wanted_llm, Some(Ok(c)) if a.llm().config() == c));
+    let agent = sidecar(
+        wanted_llm,
+        keep_agent,
+        &state.llm_state,
+        |config| Arc::new(Agent::new(Arc::new(Llm::new(config)))),
+        |agent: &Arc<Agent>| agent.llm().warm_up().map_err(|e| e.to_string()),
+    );
     let dump_dir = settings.keep_recordings.then(voice::default_dump_dir).flatten();
-    *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt, tts };
+    *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt, tts, agent };
 }
 
 /// One sidecar for [`apply_voice`]: off (`wanted` is `None`), not possible
@@ -304,6 +334,15 @@ fn tts_config(settings: &VoiceSettings) -> Result<TtsConfig, String> {
     Ok(TtsConfig { python, voices })
 }
 
+fn llm_config(settings: &VoiceSettings) -> Result<LlmConfig, String> {
+    let server = llm::find_server().ok_or("llama-server not found: install llama.cpp (brew install llama.cpp on macOS)")?;
+    let model = Model::by_id(&settings.llm_model).filter(|m| m.kind == Kind::Llm).ok_or_else(|| format!("unknown language model {}", settings.llm_model))?;
+    if !model.is_installed() {
+        return Err(format!("the {} model isn't downloaded yet", model.id));
+    }
+    Ok(LlmConfig { server, model: model.path().ok_or("no data folder for the models")?, gpu_layers: None })
+}
+
 fn stt_config(settings: &VoiceSettings) -> Result<SttConfig, String> {
     let server = stt::find_server().ok_or("whisper-server not found: install whisper.cpp (brew install whisper-cpp on macOS)")?;
     let model = Model::by_id(&settings.model).ok_or_else(|| format!("unknown model {}", settings.model))?;
@@ -338,12 +377,17 @@ struct VoiceInfo {
     piper_install: Option<String>,
     tts: &'static str,
     tts_error: Option<String>,
+    /// The llama-server binary, if found.
+    llm_server: Option<String>,
+    llm: &'static str,
+    llm_error: Option<String>,
     download: Option<(String, f32)>,
 }
 
 fn voice_info_of(state: &AppState) -> VoiceInfo {
     let (stt, stt_error) = state.stt_state.lock().unwrap().clone();
     let (tts, tts_error) = state.tts_state.lock().unwrap().clone();
+    let (llm, llm_error) = state.llm_state.lock().unwrap().clone();
     VoiceInfo {
         settings: state.settings.lock().unwrap().voice.clone(),
         server: stt::find_server().map(|p| p.display().to_string()),
@@ -357,6 +401,9 @@ fn voice_info_of(state: &AppState) -> VoiceInfo {
         piper_install: state.piper_install.lock().unwrap().clone(),
         tts,
         tts_error,
+        llm_server: llm::find_server().map(|p| p.display().to_string()),
+        llm,
+        llm_error,
         download: state.download.lock().unwrap().clone(),
     }
 }
@@ -414,6 +461,9 @@ fn delete_model(state: State<AppState>, id: String) -> Result<VoiceInfo, String>
         }
         if voice.tts.as_ref().is_some_and(|t| t.config().voices.values().any(|v| v == model.id)) {
             voice.tts = None;
+        }
+        if let Some(agent) = voice.agent.take_if(|a| Some(a.llm().config().model.clone()) == model.path()) {
+            agent.llm().shutdown();
         }
     }
     model.remove().map_err(|e| e.to_string())?;
@@ -699,8 +749,14 @@ fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
             if let BridgeEvent::VoiceError { message } = &event {
-                // Which sidecar failed: Piper's errors say so.
-                let status = if message.starts_with("piper") { &state.tts_state } else { &state.stt_state };
+                // Which sidecar failed: Piper's and llama.cpp's errors say so.
+                let status = if message.starts_with("piper") {
+                    &state.tts_state
+                } else if message.starts_with("llama-server") {
+                    &state.llm_state
+                } else {
+                    &state.stt_state
+                };
                 *status.lock().unwrap() = ("error", Some(message.clone()));
             }
             // Faces and rotation came from the board (at connect, or an MCP
@@ -812,6 +868,7 @@ pub fn run() {
                 voice: Arc::default(),
                 stt_state: Arc::new(Mutex::new(("off", None))),
                 tts_state: Arc::new(Mutex::new(("off", None))),
+                llm_state: Arc::new(Mutex::new(("off", None))),
                 piper_install: Mutex::new(None),
                 download: Mutex::new(None),
                 cancel_download: AtomicBool::new(false),
@@ -844,11 +901,12 @@ pub fn run() {
                 // Release the serial port before the process goes away.
                 if let Some(state) = app.try_state::<AppState>() {
                     state.bridge.lock().unwrap().take();
-                    // Stops the whisper-server and Piper sidecars, even if a
-                    // reply being spoken still holds them.
+                    // Stops the whisper-server, Piper and llama-server sidecars,
+                    // even if a reply being spoken still holds them.
                     let mut voice = state.voice.lock().unwrap();
                     voice.stt.take().inspect(|s| s.shutdown());
                     voice.tts.take().inspect(|t| t.shutdown());
+                    voice.agent.take().inspect(|a| a.llm().shutdown());
                     drop(voice);
                     state.cancel_download.store(true, Ordering::SeqCst);
                     if let Some(hub) = &state.hub {

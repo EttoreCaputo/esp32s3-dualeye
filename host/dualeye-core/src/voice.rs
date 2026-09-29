@@ -5,9 +5,10 @@
 //! puts the frames back together, filling any it lost with silence so the
 //! timing stays right, and the bridge's voice thread takes each finished
 //! [`Utterance`]: it keeps a WAV copy when asked, transcribes it with
-//! [`Stt`] when there's speech, acts on the words with [`intents`] and
-//! answers with [`Tts`] through the board's speaker ([`Speaker`]), or puts
-//! the eyes back to idle.
+//! [`Stt`] when there's speech, acts on the words with the local language
+//! model ([`Agent`]), or the rules of [`intents`] without one or when it
+//! fails, and answers with [`Tts`] through the board's speaker
+//! ([`Speaker`]), or puts the eyes back to idle.
 //!
 //! Speech goes to the board on `audio_down`, paced in real time a little
 //! ahead of the speaker, a sentence at a time: the first plays while the
@@ -26,9 +27,10 @@ use chrono::Local;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::agent::{Action, Agent, Toolbox};
 use crate::bridge::{BridgeEvent, EventSink};
 use crate::intents::{self, Context};
-use crate::link::Link;
+use crate::link::{Link, Tool};
 use crate::protocol::Channel;
 use crate::snapshot::Snapshot;
 use crate::stt::Stt;
@@ -188,6 +190,9 @@ pub struct VoiceConfig {
     /// Answer out loud through the board's speaker; without it, answers
     /// are only reported ([`BridgeEvent::Reply`]).
     pub tts: Option<Arc<Tts>>,
+    /// Understand what was said with a local language model; without it,
+    /// with the rules of [`intents`].
+    pub agent: Option<Arc<Agent>>,
 }
 
 /// Whisper's output for silence or noise rather than words.
@@ -212,14 +217,35 @@ pub(crate) struct Session {
     pub snapshot: Arc<Mutex<Option<Snapshot>>>,
     /// Set after a tool changed faces or rotation: the bridge reads them back.
     pub settings_changed: Arc<AtomicBool>,
+    /// The board's tools for the agent, asked for once per connection.
+    pub tools: Mutex<Option<Vec<Tool>>>,
+}
+
+/// What the link's reader hands the pipeline.
+pub enum Hearing {
+    /// The board started streaming: the language model can read its prompt
+    /// meanwhile.
+    Started,
+    Utterance(Utterance),
 }
 
 /// The pipeline: handles each finished utterance, on its own thread so the
 /// link's reader never waits on it, until the sender is dropped. The link is
 /// weak because the link's reader holds that sender.
-pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSink, rx: Receiver<Utterance>) {
-    for utterance in rx {
+pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSink, rx: Receiver<Hearing>) {
+    for heard in rx {
         let config = config.lock().unwrap().clone();
+        let utterance = match heard {
+            Hearing::Utterance(u) => u,
+            Hearing::Started => {
+                if let (Some(agent), Some(link)) = (&config.agent, session.link.upgrade())
+                    && let Err(e) = agent.prime(&BoardToolbox { link: &link, session })
+                {
+                    sink(BridgeEvent::VoiceError { message: e.to_string() });
+                }
+                continue;
+            }
+        };
         let wav = config.dump_dir.as_deref().and_then(|dir| match dump(dir, &utterance) {
             Ok(path) => Some(path),
             Err(e) => {
@@ -255,7 +281,7 @@ pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSi
                 }
             },
         };
-        let spoken = transcript.is_some_and(|t| respond(&link, session, config.tts.as_deref(), sink, utterance.id, &t.text, &t.language));
+        let spoken = transcript.is_some_and(|t| respond(&link, session, &config, sink, utterance.id, &t.text, &t.language));
         if !spoken {
             let _ = link.call("voice/state", json!({"state": "idle"}), STATE_TIMEOUT);
         }
@@ -264,35 +290,22 @@ pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSi
 
 /// Act on the words and answer. True when the answer was spoken (the board
 /// then goes back to idle by itself).
-fn respond(link: &Link, session: &Session, tts: Option<&Tts>, sink: &EventSink, id: u8, text: &str, language: &str) -> bool {
+fn respond(link: &Link, session: &Session, config: &VoiceConfig, sink: &EventSink, id: u8, text: &str, language: &str) -> bool {
     let started = Instant::now();
-    let volume = || {
-        let state = link.call_tool("get_state", json!({}), TOOL_TIMEOUT).ok()?;
-        Some(state.structured_content?.pointer("/audio/volume")?.as_u64()? as u8)
-    };
-    let ctx = Context { snapshot: session.snapshot.lock().unwrap().clone(), volume: volume() };
-    let plan = intents::understand(text, language, &ctx);
-    let mut ok = true;
-    let mut actions = Vec::new();
-    for (tool, args) in &plan.calls {
-        let result = link.call_tool(tool, args.clone(), TOOL_TIMEOUT);
-        let line = match &result {
-            Ok(r) if !r.is_error => format!("{tool}: {}", r.text()),
-            Ok(r) => format!("{tool} failed: {}", r.text()),
-            Err(e) => format!("{tool} failed: {e}"),
-        };
-        ok &= matches!(&result, Ok(r) if !r.is_error);
-        if ok && matches!(tool.as_str(), "set_face" | "set_rotation") {
-            session.settings_changed.store(true, Ordering::Relaxed);
+    let answer = config.agent.as_ref().and_then(|agent| match agent.respond(text, language, &BoardToolbox { link, session }) {
+        Ok(turn) => Some((turn.reply, turn.actions.iter().map(action_line).collect(), true, "llm")),
+        Err(e) => {
+            sink(BridgeEvent::VoiceError { message: format!("{e}; answering with the rules instead") });
+            None
         }
-        actions.push(line);
-        if !ok {
-            break;
-        }
-    }
-    let reply = if ok { plan.reply } else { plan.failure };
-    sink(BridgeEvent::Reply { id, text: reply.clone(), language: language.to_string(), actions, understood: plan.understood, elapsed_ms: started.elapsed().as_millis() as u64 });
-    let Some(tts) = tts else { return false };
+    });
+    let (reply, actions, understood, by) = answer.unwrap_or_else(|| {
+        let (reply, actions, understood) = rules(link, session, text, language);
+        (reply, actions, understood, "rules")
+    });
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    sink(BridgeEvent::Reply { id, text: reply.clone(), language: language.to_string(), actions, understood, by: by.into(), elapsed_ms });
+    let Some(tts) = config.tts.as_deref() else { return false };
     match session.speaker.speak(link, tts, &reply, language) {
         Ok(spoken) => {
             sink(BridgeEvent::Spoken { id, spoken });
@@ -302,6 +315,94 @@ fn respond(link: &Link, session: &Session, tts: Option<&Tts>, sink: &EventSink, 
             sink(BridgeEvent::VoiceError { message: e });
             false
         }
+    }
+}
+
+/// "set_face: left: rings", "set_face failed: …"
+fn action_line(a: &Action) -> String {
+    if a.ok { format!("{}: {}", a.tool, a.result) } else { format!("{} failed: {}", a.tool, a.result.trim_start_matches("error: ")) }
+}
+
+/// The M5 rules: the reply, the actions taken, and whether anything matched.
+fn rules(link: &Link, session: &Session, text: &str, language: &str) -> (String, Vec<String>, bool) {
+    let volume = || {
+        let state = link.call_tool("get_state", json!({}), TOOL_TIMEOUT).ok()?;
+        Some(state.structured_content?.pointer("/audio/volume")?.as_u64()? as u8)
+    };
+    let ctx = Context { snapshot: session.snapshot.lock().unwrap().clone(), volume: volume() };
+    let plan = intents::understand(text, language, &ctx);
+    let toolbox = BoardToolbox { link, session };
+    let mut actions = Vec::new();
+    for (tool, args) in &plan.calls {
+        let result = toolbox.call(tool, args);
+        let ok = result.is_ok();
+        actions.push(action_line(&Action { tool: tool.clone(), arguments: args.clone(), result: result.unwrap_or_else(|e| e), ok }));
+        if !ok {
+            return (plan.failure, actions, plan.understood);
+        }
+    }
+    (plan.reply, actions, plan.understood)
+}
+
+/// Board tools the voice agent doesn't get: muted by voice, the board
+/// couldn't be unmuted by voice.
+const NOT_BY_VOICE: &[&str] = &["set_mic"];
+
+/// The board's tools as the voice agent gets them: without those in
+/// [`NOT_BY_VOICE`], plus the host's `get_metrics`.
+pub fn voice_tools(board: Vec<Tool>) -> Vec<Tool> {
+    let metrics = Tool {
+        name: "get_metrics".into(),
+        description: "Current CPU and GPU temperature, load, clock, power and memory of this computer, and its fan speeds.".into(),
+        input_schema: json!({"type": "object", "properties": {}}),
+    };
+    board.into_iter().filter(|t| !NOT_BY_VOICE.contains(&t.name.as_str())).chain([metrics]).collect()
+}
+
+/// `get_state` without what only a developer wants (memory, link and UI
+/// statistics): fewer tokens for the model to read.
+pub fn trim_state(state: &Value) -> Value {
+    let mut out = json!({"screens": state["screens"], "voice": {}, "audio": {"volume": state["audio"]["volume"]}});
+    for key in ["wake_word", "wake_words", "muted"] {
+        out["voice"][key] = state["voice"][key].clone();
+    }
+    out
+}
+
+/// The board's tools, run over the link.
+struct BoardToolbox<'a> {
+    link: &'a Link,
+    session: &'a Session,
+}
+
+impl Toolbox for BoardToolbox<'_> {
+    fn tools(&self) -> Vec<Tool> {
+        let mut tools = self.session.tools.lock().unwrap();
+        if tools.is_none() {
+            *tools = self.link.list_tools(TOOL_TIMEOUT).ok().map(voice_tools);
+        }
+        tools.clone().unwrap_or_default()
+    }
+
+    fn call(&self, name: &str, arguments: &Value) -> Result<String, String> {
+        if name == "get_metrics" {
+            let snapshot = self.session.snapshot.lock().unwrap().clone().ok_or("no sensor reading yet")?;
+            return Ok(snapshot.metrics_json().to_string());
+        }
+        if NOT_BY_VOICE.contains(&name) {
+            return Err(format!("{name} can't be used by voice"));
+        }
+        let result = self.link.call_tool(name, arguments.clone(), TOOL_TIMEOUT).map_err(|e| e.to_string())?;
+        if result.is_error {
+            return Err(result.text());
+        }
+        if matches!(name, "set_face" | "set_rotation") {
+            self.session.settings_changed.store(true, Ordering::Relaxed);
+        }
+        Ok(match (name, &result.structured_content) {
+            ("get_state", Some(state)) => trim_state(state).to_string(),
+            _ => result.text(),
+        })
     }
 }
 
@@ -456,16 +557,17 @@ fn dump(dir: &Path, utterance: &Utterance) -> io::Result<PathBuf> {
 /// Keeps the capture and the pipeline's sender together for the link's reader.
 pub struct Receiving {
     capture: Capture,
-    pipeline: Sender<Utterance>,
+    pipeline: Sender<Hearing>,
 }
 
 impl Receiving {
-    pub fn new(pipeline: Sender<Utterance>) -> Self {
+    pub fn new(pipeline: Sender<Hearing>) -> Self {
         Self { capture: Capture::default(), pipeline }
     }
 
     pub fn start(&mut self, params: &Value) {
         self.capture.start(params);
+        let _ = self.pipeline.send(Hearing::Started);
     }
 
     pub fn audio(&mut self, payload: &[u8]) {
@@ -474,7 +576,7 @@ impl Receiving {
 
     pub fn end(&mut self, params: &Value) {
         if let Some(u) = self.capture.end(params) {
-            let _ = self.pipeline.send(u);
+            let _ = self.pipeline.send(Hearing::Utterance(u));
         }
     }
 }

@@ -33,7 +33,7 @@ use crate::sensors::Collector;
 use crate::serial;
 use crate::snapshot::{Face, Faces, Rotation, Rotations, Snapshot};
 use crate::stt::Transcript;
-use crate::voice::{self, Receiving, Session, Speaker, Spoken, Utterance, VoiceConfig};
+use crate::voice::{self, Hearing, Receiving, Session, Speaker, Spoken, Utterance, VoiceConfig};
 use crate::intents;
 
 #[derive(Debug, Clone)]
@@ -100,8 +100,9 @@ pub enum BridgeEvent {
     Transcript { id: u8, transcript: Option<Transcript> },
     /// What the host made of transcript `id`: the board tools it called
     /// (`actions`, with what each said) and the answer, in `language`.
-    /// `understood` is false when no command matched.
-    Reply { id: u8, text: String, language: String, actions: Vec<String>, understood: bool, elapsed_ms: u64 },
+    /// `understood` is false when no command matched. `by` is `llm` (the
+    /// local language model) or `rules` (without one, or when it failed).
+    Reply { id: u8, text: String, language: String, actions: Vec<String>, understood: bool, by: String, elapsed_ms: u64 },
     /// The answer to `id` was spoken through the board's speaker.
     Spoken { id: u8, spoken: Spoken },
     /// Speech-to-text or text-to-speech failed, or its sidecar couldn't start.
@@ -161,11 +162,18 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Run the bridge on the current thread until `stop` is set.
 pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
-    // Whisper and Piper load their models meanwhile, so the first utterance doesn't wait.
-    let (stt, tts) = {
+    // Whisper, Piper and llama.cpp load their models meanwhile, so the first utterance doesn't wait.
+    let (stt, tts, agent) = {
         let voice = config.voice.lock().unwrap();
-        (voice.stt.clone(), voice.tts.clone())
+        (voice.stt.clone(), voice.tts.clone(), voice.agent.clone())
     };
+    if let Some(agent) = agent {
+        let sink = on_event.clone();
+        let _ = thread::Builder::new().name("dualeye-llm-start".into()).spawn(move || match agent.llm().warm_up() {
+            Ok(()) => sink(BridgeEvent::BoardLog { line: format!("host: language model ready ({})", agent.llm().config().model.display()) }),
+            Err(e) => sink(BridgeEvent::VoiceError { message: e.to_string() }),
+        });
+    }
     if let Some(stt) = stt {
         let sink = on_event.clone();
         let _ = thread::Builder::new().name("dualeye-stt-start".into()).spawn(move || match stt.warm_up() {
@@ -245,7 +253,7 @@ fn session(
     let pipeline = {
         let config = config.voice.clone();
         let sink = on_event.clone();
-        let (tx, rx) = std::sync::mpsc::channel::<Utterance>();
+        let (tx, rx) = std::sync::mpsc::channel::<Hearing>();
         thread::Builder::new().name("dualeye-voice".into()).spawn(move || {
             if let Ok(session) = link_slot_rx.recv() {
                 voice::run(&config, &session, &sink, rx);
@@ -296,6 +304,7 @@ fn session(
         speaker: speaker.clone(),
         snapshot: latest.clone(),
         settings_changed: voice_changed_settings.clone(),
+        tools: Mutex::default(),
     });
     on_event(BridgeEvent::Connected { port: port.to_string() });
 

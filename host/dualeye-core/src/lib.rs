@@ -10,15 +10,18 @@
 //! [`ClaudeUsage`] adds Claude Code's usage for the Claude faces. The CLI
 //! and a Tauri app are both thin shells over this.
 
+pub mod agent;
 pub mod bridge;
 pub mod claude;
 #[cfg(feature = "download")]
 pub mod download;
+pub mod eval;
 pub mod firmware;
 pub mod flasher;
 pub mod hub;
 pub mod intents;
 pub mod link;
+pub mod llm;
 pub mod models;
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -31,12 +34,14 @@ pub mod stt;
 pub mod tts;
 pub mod voice;
 
+pub use agent::{Agent, Toolbox, Turn};
 pub use bridge::{Bridge, BridgeConfig, BridgeEvent};
 pub use claude::{ClaudeMetrics, ClaudeState, ClaudeUsage};
 pub use firmware::{BoardFirmware, ImageInfo};
 pub use flasher::{ChipInfo, Esptool, FlashEvent};
 pub use hub::{Board, Hub, HubStatus, Route};
 pub use link::{CallError, Hello, Link, LinkEvent, Tool, ToolResult};
+pub use llm::{Llm, LlmConfig};
 pub use sensors::{Collector, Reading};
 pub use serial::PortInfo;
 pub use stt::{Stt, SttConfig, SttLanguage, Transcript};

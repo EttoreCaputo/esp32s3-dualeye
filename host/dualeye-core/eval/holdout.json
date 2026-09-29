@@ -1,0 +1,43 @@
+{
+  "about": "Held out: other phrasings of the same kinds of command, not used to tune the system prompt. `dualeye eval --set holdout`. Same format and start state as commands.json.",
+  "start": {
+    "left.face": "bar", "right.face": "claude",
+    "left.rotation": 0, "right.rotation": 0,
+    "left.brightness": 80, "right.brightness": 80,
+    "volume": 60, "muted": false, "wake_word": "alexa",
+    "text": "", "text.screen": ""
+  },
+  "metrics": {"cpu": {"temp_c": 52.3, "load_pct": 23.0, "clock_mhz": 3228, "power_w": 18.4, "mem": {"used_mb": 11468, "total_mb": 32768}},
+              "gpu": {"temp_c": 41.2, "load_pct": 7.0, "clock_mhz": 1296, "power_w": 6.1},
+              "fans": [{"id": "cpu", "rpm": 1200}]},
+  "cases": [
+    {"lang": "it", "say": ["Voglio vedere gli anelli sullo schermo di sinistra."], "expect": {"left.face": "rings"}},
+    {"lang": "it", "say": ["Puoi mettere la faccia classic a destra?"], "expect": {"right.face": "classic"}},
+    {"lang": "it", "say": ["Imposta la luminosità di entrambi gli schermi al 70 per cento."], "expect": {"left.brightness": 70, "right.brightness": 70}},
+    {"lang": "it", "say": ["Spegni tutti e due gli schermi."], "expect": {"left.brightness": 0, "right.brightness": 0}},
+    {"lang": "it", "say": ["Capovolgi lo schermo destro."], "expect": {"right.rotation": 180}},
+    {"lang": "it", "say": ["Volume al massimo."], "expect": {"volume": 100}},
+    {"lang": "it", "say": ["Abbassa un po' la voce."], "expect": {"volume": "<60"}},
+    {"lang": "it", "say": ["Mostra la scritta buongiorno sullo schermo sinistro."], "expect": {"text": "~buongiorno", "text.screen": "left"}},
+    {"lang": "it", "say": ["A quanti gradi è la GPU?"], "expect": {}, "reply": ["41"]},
+    {"lang": "it", "say": ["Quanta memoria sta usando il computer?"], "expect": {}, "reply": ["11", "35"]},
+    {"lang": "it", "say": ["Metti Claude su tutti e due gli schermi."], "expect": {"left.face": "claude"}},
+    {"lang": "it", "say": ["Metti bar a destra.", "No, meglio rings."], "expect": {"right.face": "rings"}},
+    {"lang": "it", "say": ["Grazie mille!"], "expect": {}},
+
+    {"lang": "en", "say": ["I'd like the rings face on the right."], "expect": {"right.face": "rings"}},
+    {"lang": "en", "say": ["Can you switch the left screen to plus?"], "expect": {"left.face": "plus"}},
+    {"lang": "en", "say": ["Brightness to 40 on the right screen."], "expect": {"right.brightness": 40}},
+    {"lang": "en", "say": ["Turn both screens off."], "expect": {"left.brightness": 0, "right.brightness": 0}},
+    {"lang": "en", "say": ["Flip the left screen upside down."], "expect": {"left.rotation": 180}},
+    {"lang": "en", "say": ["Max volume, please."], "expect": {"volume": 100}},
+    {"lang": "en", "say": ["Please be a little quieter."], "expect": {"volume": "<60"}},
+    {"lang": "en", "say": ["Display 'back in five' on both screens."], "expect": {"text": "~back in five", "text.screen": "both"}},
+    {"lang": "en", "say": ["Is the CPU running hot?"], "expect": {}, "reply": ["52"]},
+    {"lang": "en", "say": ["How busy is the graphics card?"], "expect": {}, "reply": ["7"]},
+    {"lang": "en", "say": ["Put the mascot on both screens."], "expect": {"left.face": "clawd", "right.face": "clawd"}},
+    {"lang": "en", "say": ["Set the left screen to classic.", "Actually, make it bar."], "expect": {}},
+    {"lang": "en", "say": ["Good morning!"], "expect": {}},
+    {"lang": "en", "say": ["Turn the volume down to 20."], "expect": {"volume": 20}}
+  ]
+}

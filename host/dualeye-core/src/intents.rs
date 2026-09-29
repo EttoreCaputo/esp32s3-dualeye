@@ -248,11 +248,26 @@ pub fn understand(text: &str, language: &str, ctx: &Context) -> Plan {
     }
 }
 
+/// Whether `text` asks the time, the day or the date.
+pub fn asks_time(text: &str) -> bool {
+    let w = words(text);
+    has(&w, &["orario", "clock"])
+        || has_pair(&w, &[("che", "or"), ("che", "giorn"), ("che", "data"), ("what", "time"), ("the", "time"), ("what", "day"), ("what", "date"), ("the", "date"), ("e", "oggi")])
+}
+
 /// `it` or `en`, whichever `text` looks more like (for text not heard but
 /// typed, which Whisper didn't label).
 pub fn guess_language(text: &str) -> &'static str {
-    const IT: &[&str] = &["il", "lo", "la", "gli", "le", "di", "che", "e", "un", "una", "per", "non", "sono", "ciao", "questo", "come", "sei", "ho", "del", "della", "con"];
-    const EN: &[&str] = &["the", "a", "an", "of", "and", "is", "are", "to", "you", "it", "this", "hello", "what", "i", "in", "on", "with", "for", "not"];
+    const IT: &[&str] = &[
+        "il", "lo", "la", "gli", "le", "di", "che", "e", "un", "una", "per", "non", "sono", "ciao", "questo", "come", "sei", "ho", "del",
+        "della", "con", "sullo", "sulla", "sui", "al", "alla", "ai", "gradi", "fatto", "ecco", "schermo", "schermi", "faccia", "posso",
+        "ti", "mi", "si", "anche", "ancora", "piu", "ora", "adesso", "sinistra", "destra", "sinistro", "destro", "entrambi",
+    ];
+    const EN: &[&str] = &[
+        // Not "a" or "i": Italian has them too.
+        "the", "an", "of", "and", "is", "are", "to", "you", "it", "this", "hello", "what", "in", "on", "with", "for", "not", "i'm",
+        "done", "screen", "screens", "degrees", "turned", "set", "can", "your", "my", "here", "now", "left", "right", "both", "sorry",
+    ];
     let w = words(text);
     let count = |list: &[&str]| w.iter().filter(|x| list.contains(&x.as_str())).count();
     if count(IT) > count(EN) || w.iter().any(|x| x.ends_with("zione") || x.ends_with("mente")) && count(EN) == 0 { "it" } else { "en" }
@@ -341,6 +356,16 @@ mod tests {
         assert_eq!(calls("Scrivi: ciao a tutti!", "it"), [tool("show_text", json!({"text": "ciao a tutti", "screen": "both"}))]);
         assert_eq!(calls("Write hello world.", "en"), [tool("show_text", json!({"text": "hello world", "screen": "both"}))]);
         assert_eq!(calls("Scrivi perché sì", "it")[0].1["text"], "perche si");
+    }
+
+    #[test]
+    fn time_questions() {
+        for q in ["Che ore sono?", "Che giorno è oggi?", "What time is it?", "What's the date today?", "Tell me the time"] {
+            assert!(asks_time(q), "{q}");
+        }
+        for q in ["Ora metti rings a sinistra", "Put rings on the left", "Quanto è calda la CPU?"] {
+            assert!(!asks_time(q), "{q}");
+        }
     }
 
     #[test]

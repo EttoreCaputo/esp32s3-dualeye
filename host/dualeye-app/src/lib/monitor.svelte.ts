@@ -68,7 +68,7 @@ type BridgeEvent =
   | { kind: "listening"; id: number; trigger: string }
   | { kind: "utterance"; utterance: Utterance; duration_ms: number; peak_db: number | null; wav: string | null }
   | { kind: "transcript"; id: number; transcript: Transcript | null }
-  | { kind: "reply"; id: number; text: string; language: string; actions: string[]; understood: boolean; elapsed_ms: number }
+  | { kind: "reply"; id: number; text: string; language: string; actions: string[]; understood: boolean; by: ReplyBy; elapsed_ms: number }
   | { kind: "spoken"; id: number; spoken: Spoken }
   | { kind: "voice_error"; message: string }
   | { kind: "disconnected"; port: string; reason: string; permission_denied: boolean };
@@ -79,7 +79,9 @@ export type Utterance = { id: number; trigger: string; reason: string; speech: b
 export type Transcript = { text: string; language: string; logprob: number | null; elapsed_ms: number };
 /** How a reply went out through the board's speaker. */
 export type Spoken = { text: string; first_audio_ms: number; played_ms: number; reason: string; underruns: number; lost: number };
-export type Reply = { text: string; actions: string[]; understood: boolean };
+/** Who understood the words: the language model, or the fixed phrases. */
+export type ReplyBy = "llm" | "rules";
+export type Reply = { text: string; actions: string[]; understood: boolean; by: ReplyBy };
 /** One line of the Voice tab's log; `transcript` null when Whisper heard no words. */
 export type TranscriptEntry = { id: number; at: number; transcript: Transcript | null; reply: Reply | null; spoken: Spoken | null };
 export type SttLanguage = "auto" | "it" | "en";
@@ -92,10 +94,13 @@ export type VoiceSettings = {
   speak: boolean;
   /** Voice by language: `it`, `en`. */
   voices: Record<string, string>;
+  /** Understand with a local language model (else fixed phrases). */
+  llm: boolean;
+  llm_model: string;
 };
 export type ModelInfo = {
   id: string;
-  kind: "whisper" | "voice";
+  kind: "whisper" | "voice" | "llm";
   language: string | null;
   bytes: number;
   note: string;
@@ -115,6 +120,10 @@ export type VoiceInfo = {
   piper_install: string | null;
   tts: SttStatus;
   tts_error: string | null;
+  /** llama-server, if found. */
+  llm_server: string | null;
+  llm: SttStatus;
+  llm_error: string | null;
   download: [string, number] | null;
 };
 const TRANSCRIPTS = 50;
@@ -277,7 +286,7 @@ class Monitor {
         break;
       case "reply": {
         const entry = this.latestTranscript(e.id);
-        if (entry) entry.reply = { text: e.text, actions: e.actions, understood: e.understood };
+        if (entry) entry.reply = { text: e.text, actions: e.actions, understood: e.understood, by: e.by };
         break;
       }
       case "spoken": {
@@ -414,6 +423,9 @@ class Monitor {
       const voices = Object.values(settings.voices).filter((id) => previewVoice.models.find((m) => m.id === id)?.installed);
       previewVoice.tts = !settings.enabled || !settings.speak ? "off" : previewVoice.piper && voices.length ? "ready" : "error";
       previewVoice.tts_error = previewVoice.tts !== "error" ? null : previewVoice.piper ? "no voice downloaded yet" : "Piper isn't installed yet";
+      const llmReady = previewVoice.models.find((m) => m.id === settings.llm_model)?.installed;
+      previewVoice.llm = !settings.enabled || !settings.llm ? "off" : llmReady ? "ready" : "error";
+      previewVoice.llm_error = previewVoice.llm === "error" ? `the ${settings.llm_model} model isn't downloaded yet` : null;
       return this.voiceInfo();
     }
     return invoke<VoiceInfo>("set_voice", { settings });
@@ -505,6 +517,8 @@ const previewVoice: VoiceInfo = {
     keep_recordings: false,
     speak: true,
     voices: { it: "it_IT-paola-medium", en: "en_GB-alba-medium" },
+    llm: true,
+    llm_model: "qwen3-4b-2507",
   },
   server: "/opt/homebrew/bin/whisper-server",
   models: [
@@ -515,6 +529,8 @@ const previewVoice: VoiceInfo = {
     { id: "it_IT-riccardo-x_low", kind: "voice", language: "it", bytes: 28_134_952, note: "Italian, man's voice, smaller and flatter", license: "Dataset M-AILABS (BSD-style); trained from scratch", installed: false },
     { id: "en_GB-alba-medium", kind: "voice", language: "en", bytes: 63_206_182, note: "British English, woman's voice", license: "Dataset CC BY 4.0 (Edinburgh DataShare 10283/3270); fine-tuned from lessac", installed: false },
     { id: "en_US-ljspeech-medium", kind: "voice", language: "en", bytes: 63_536_351, note: "American English, woman's voice", license: "Dataset public domain (LJ Speech)", installed: false },
+    { id: "qwen3-4b-2507", kind: "llm", language: null, bytes: 2_497_281_120, note: "Recommended: all 53 test commands right, about 0.9 s each on an M1 Pro", license: "Apache-2.0", installed: true },
+    { id: "qwen3.5-2b", kind: "llm", language: null, bytes: 1_280_835_840, note: "Lighter and faster (0.65 s); more mistakes, often answers in English", license: "Apache-2.0", installed: false },
   ],
   stt: "off",
   stt_error: null,
@@ -522,6 +538,9 @@ const previewVoice: VoiceInfo = {
   piper_install: null,
   tts: "off",
   tts_error: null,
+  llm_server: "/opt/homebrew/bin/llama-server",
+  llm: "off",
+  llm_error: null,
   download: null,
 };
 
@@ -551,7 +570,7 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
     const [text, language, reply, actions] = phrases[said++ % phrases.length];
     const id = said;
     setTimeout(() => emit({ kind: "transcript", id, transcript: { text, language, logprob: -0.2, elapsed_ms: 640 } }), 3100);
-    setTimeout(() => emit({ kind: "reply", id, text: reply, language, actions, understood: true, elapsed_ms: 12 }), 3150);
+    setTimeout(() => emit({ kind: "reply", id, text: reply, language, actions, understood: true, by: "llm", elapsed_ms: 12 }), 3150);
     voice("speaking", 3300);
     const spoken = { text: reply, first_audio_ms: 140, played_ms: 2300, reason: "done", underruns: 0, lost: 0 };
     setTimeout(() => emit({ kind: "spoken", id, spoken }), 5700);

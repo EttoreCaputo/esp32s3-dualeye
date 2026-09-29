@@ -183,6 +183,11 @@ pub struct Fan {
     pub rpm: u32,
 }
 
+/// Through a string, so an `f32` reads `34.8` rather than `34.79999923706055`.
+pub fn short_floats(value: &impl Serialize) -> serde_json::Value {
+    serde_json::to_string(value).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::Value::Null)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub v: u32,
@@ -208,6 +213,17 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// What the `get_metrics` tool returns (over MCP and to the voice
+    /// agent): the sensor part, with the units spelled out.
+    pub fn metrics_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "cpu": short_floats(&self.cpu),
+            "gpu": short_floats(&self.gpu),
+            "fans": self.fans,
+            "note": "temperatures in °C, clocks in MHz, power in W, memory in MiB (system RAM under cpu, VRAM under gpu), fan speeds in RPM",
+        })
+    }
+
     /// The firmware drops lines that carry neither temperature.
     pub fn is_sendable(&self) -> bool {
         self.cpu.temp_c.is_some() || self.gpu.temp_c.is_some()

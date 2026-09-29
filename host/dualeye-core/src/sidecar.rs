@@ -1,5 +1,6 @@
 //! Helper processes serving HTTP on `127.0.0.1`: whisper.cpp's
-//! `whisper-server` ([`crate::stt`]) and Piper's `http_server` ([`crate::tts`]).
+//! `whisper-server` ([`crate::stt`]), Piper's `http_server` ([`crate::tts`])
+//! and llama.cpp's `llama-server` ([`crate::llm`]).
 //!
 //! A [`Process`] is started on a free port and waited for until it accepts
 //! connections; dropping it stops it. Its pid is kept in a file, so one left
@@ -94,6 +95,16 @@ fn kill_stale(pid_file: &PathBuf, marker: &str) {
 
 fn free_port() -> io::Result<u16> {
     Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?.port())
+}
+
+/// GET `path`; the response body (status 200 only).
+pub(crate) fn get(addr: SocketAddr, path: &str, timeout: Duration) -> io::Result<Vec<u8>> {
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(timeout))?;
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    http_body(&response)
 }
 
 /// POST `body` to `path`; the response body (status 200 only).

@@ -2,7 +2,8 @@
 //! [`crate::stt::models_dir`]: multilingual Whisper models (ggml, from
 //! `ggerganov/whisper.cpp` on Hugging Face) for speech-to-text, and Piper
 //! voices (ONNX plus its JSON config, from `rhasspy/piper-voices`) for
-//! speaking. Each file is pinned by size and SHA-256.
+//! speaking, and small language models (GGUF, quantized by Unsloth) for the
+//! voice agent ([`crate::llm`]). Each file is pinned by size and SHA-256.
 //!
 //! A download goes to `<file>.part` and is renamed once its checksum
 //! matches, so a model file that exists is a complete one.
@@ -22,6 +23,8 @@ pub enum Kind {
     Whisper,
     /// Text-to-speech, for [`crate::Tts`].
     Voice,
+    /// A language model for [`crate::Llm`]: what the voice agent thinks with.
+    Llm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -44,6 +47,8 @@ pub struct Model {
     pub note: &'static str,
     /// Where its license is stated (the dataset's, for a voice).
     pub license: &'static str,
+    /// The Hugging Face repository of a language model.
+    pub repo: Option<&'static str>,
 }
 
 const WHISPER_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
@@ -62,6 +67,7 @@ pub const MODELS: &[Model] = &[
         files: &[file("ggml-base.bin", 147_951_465, "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe")],
         note: "Fastest, for slow CPUs; often wrong in Italian",
         license: "MIT",
+        repo: None,
     },
     Model {
         id: "small",
@@ -70,6 +76,7 @@ pub const MODELS: &[Model] = &[
         files: &[file("ggml-small.bin", 487_601_967, "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b")],
         note: "Good balance: about 0.7 s a command on an M1 Pro",
         license: "MIT",
+        repo: None,
     },
     Model {
         id: "large-v3-turbo-q5_0",
@@ -78,6 +85,7 @@ pub const MODELS: &[Model] = &[
         files: &[file("ggml-large-v3-turbo-q5_0.bin", 574_041_195, "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2")],
         note: "Most accurate; wants a GPU (Apple silicon, NVIDIA)",
         license: "MIT",
+        repo: None,
     },
     Model {
         id: "it_IT-paola-medium",
@@ -89,6 +97,7 @@ pub const MODELS: &[Model] = &[
         ],
         note: "Italian, woman's voice, natural",
         license: "Dataset CC0 1.0 (paolapersico1/Voice-Dataset-Italian); fine-tuned from lessac",
+        repo: None,
     },
     Model {
         id: "it_IT-riccardo-x_low",
@@ -100,6 +109,7 @@ pub const MODELS: &[Model] = &[
         ],
         note: "Italian, man's voice, smaller and flatter",
         license: "Dataset M-AILABS (BSD-style); trained from scratch",
+        repo: None,
     },
     Model {
         id: "en_GB-alba-medium",
@@ -111,6 +121,7 @@ pub const MODELS: &[Model] = &[
         ],
         note: "British English, woman's voice",
         license: "Dataset CC BY 4.0 (Edinburgh DataShare 10283/3270); fine-tuned from lessac",
+        repo: None,
     },
     Model {
         id: "en_US-ljspeech-medium",
@@ -122,10 +133,40 @@ pub const MODELS: &[Model] = &[
         ],
         note: "American English, woman's voice",
         license: "Dataset public domain (LJ Speech)",
+        repo: None,
+    },
+    Model {
+        id: "qwen3.5-2b",
+        kind: Kind::Llm,
+        language: None,
+        files: &[file("Qwen3.5-2B-Q4_K_M.gguf", 1_280_835_840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223")],
+        note: "Lighter and faster (0.65 s); more mistakes, often answers in English",
+        license: "Apache-2.0",
+        repo: Some("unsloth/Qwen3.5-2B-GGUF"),
+    },
+    Model {
+        id: "qwen3-4b-2507",
+        kind: Kind::Llm,
+        language: None,
+        files: &[file("Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2_497_281_120, "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597")],
+        note: "Recommended: all 53 test commands right, about 0.9 s each on an M1 Pro",
+        license: "Apache-2.0",
+        repo: Some("unsloth/Qwen3-4B-Instruct-2507-GGUF"),
+    },
+    Model {
+        id: "qwen3.5-4b",
+        kind: Kind::Llm,
+        language: None,
+        files: &[file("Qwen3.5-4B-Q4_K_M.gguf", 2_740_937_888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4")],
+        note: "About as accurate, slower (1.4 s); sometimes answers in the wrong language",
+        license: "Apache-2.0",
+        repo: Some("unsloth/Qwen3.5-4B-GGUF"),
     },
 ];
 
 pub const DEFAULT_MODEL: &str = "small";
+/// The language model the voice agent uses unless another is picked.
+pub const DEFAULT_LLM: &str = "qwen3-4b-2507";
 
 /// The voice a language speaks with unless another is picked.
 pub fn default_voice(language: &str) -> Option<&'static str> {
@@ -160,6 +201,7 @@ impl Model {
                 let family = locale.split('_').next().unwrap_or("");
                 format!("{PIPER_URL}{family}/{locale}/{name}/{quality}/")
             }
+            Kind::Llm => format!("https://huggingface.co/{}/resolve/main/", self.repo.unwrap_or_default()),
         };
         format!("{base}{}", file.name)
     }
@@ -232,6 +274,7 @@ mod tests {
     #[test]
     fn catalogue_is_consistent() {
         assert!(Model::by_id(DEFAULT_MODEL).is_some_and(|m| m.kind == Kind::Whisper));
+        assert!(Model::by_id(DEFAULT_LLM).is_some_and(|m| m.kind == Kind::Llm));
         for lang in ["it", "en"] {
             let voice = Model::by_id(default_voice(lang).unwrap()).unwrap();
             assert_eq!((voice.kind, voice.language), (Kind::Voice, Some(lang)));
@@ -245,6 +288,7 @@ mod tests {
             match m.kind {
                 Kind::Whisper => assert!(m.files[0].name.starts_with("ggml-") && m.language.is_none()),
                 Kind::Voice => assert_eq!(m.files.iter().map(|f| f.name.to_string()).collect::<Vec<_>>(), [format!("{}.onnx", m.id), format!("{}.onnx.json", m.id)]),
+                Kind::Llm => assert!(m.files[0].name.ends_with(".gguf") && m.repo.is_some() && m.language.is_none()),
             }
         }
     }

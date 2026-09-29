@@ -1,0 +1,187 @@
+[
+  {
+    "name": "set_face",
+    "description": "Switch the watch face of one or both round screens.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "face": {
+          "type": "string",
+          "enum": [
+            "classic",
+            "rings",
+            "plus",
+            "bar",
+            "claude",
+            "clawd"
+          ],
+          "description": "classic: temperature, clock, power, load ring and fan; rings: load, temperature and memory rings; plus: classic with a memory bar and numbers; bar: classic with a small memory bar; claude: Claude Code usage limits and tokens; clawd: animated Claude Code mascot"
+        },
+        "screen": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "both"
+          ],
+          "default": "both",
+          "description": "left is the CPU screen, right the GPU screen"
+        }
+      },
+      "required": [
+        "face"
+      ]
+    }
+  },
+  {
+    "name": "set_rotation",
+    "description": "Turn one or both screens clockwise, for a board that sits another way round.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "degrees": {
+          "type": "integer",
+          "enum": [
+            0,
+            90,
+            180,
+            270
+          ]
+        },
+        "screen": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "both"
+          ],
+          "default": "both",
+          "description": "left is the CPU screen, right the GPU screen"
+        }
+      },
+      "required": [
+        "degrees"
+      ]
+    }
+  },
+  {
+    "name": "set_brightness",
+    "description": "Set the backlight of one or both screens; 0 turns it off.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "screen": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "both"
+          ],
+          "default": "both",
+          "description": "left is the CPU screen, right the GPU screen"
+        }
+      },
+      "required": [
+        "percent"
+      ]
+    }
+  },
+  {
+    "name": "show_text",
+    "description": "Show a short message over the watch face for a few seconds.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Letters without accents show best; accented ones lose the accent"
+        },
+        "seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30,
+          "default": 4
+        },
+        "screen": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "both"
+          ],
+          "default": "both",
+          "description": "left is the CPU screen, right the GPU screen"
+        }
+      },
+      "required": [
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "set_mic",
+    "description": "Mute or unmute the microphone. Muted, the board doesn't listen for its wake word.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "muted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "muted"
+      ]
+    }
+  },
+  {
+    "name": "set_wake_word",
+    "description": "Choose the word the board listens for before a voice command. The board remembers it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "word": {
+          "type": "string",
+          "enum": [
+            "alexa",
+            "hiesp"
+          ],
+          "description": "alexa: say Alexa (default); hiesp: say Hi ESP"
+        }
+      },
+      "required": [
+        "word"
+      ]
+    }
+  },
+  {
+    "name": "set_volume",
+    "description": "Set the speaker volume the board talks with; 0 is silent. The board remembers it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "percent"
+      ]
+    }
+  },
+  {
+    "name": "get_state",
+    "description": "Read the board's state: firmware, uptime, whether metrics are live, each screen's face, rotation and brightness, the voice state (wake word, muted, listening), the speaker volume and how busy the UI is.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+]

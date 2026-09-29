@@ -32,7 +32,7 @@ use crate::claude::ClaudeUsage;
 use crate::hub::Board;
 use crate::link::{CallError, Tool, ToolResult};
 use crate::sensors::Collector;
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Snapshot, short_floats};
 
 /// The argument that turns the app binary into the MCP server.
 pub const FLAG: &str = "--mcp";
@@ -125,7 +125,7 @@ impl DualEyeMcp {
 
     fn call(&self, name: &str, arguments: Value) -> Result<CallToolResult, ErrorData> {
         match name {
-            "get_metrics" => Ok(json_result(metrics_json(&self.metrics()))),
+            "get_metrics" => Ok(json_result(self.metrics().metrics_json())),
             "get_claude_usage" => Ok(match self.claude_usage() {
                 Some(usage) => json_result(usage),
                 None => text_result("No Claude Code usage on this computer: Claude Code has not run here, or keeps its data elsewhere (CLAUDE_CONFIG_DIR).", false),
@@ -172,21 +172,6 @@ impl DualEyeMcp {
         let usage = from_bridge.or_else(|| self.inner.claude.lock().unwrap().get_or_insert_with(ClaudeUsage::new).sample())?;
         Some(short_floats(&usage))
     }
-}
-
-/// What `get_metrics` returns: the sensor part of a snapshot, with units in the names.
-fn metrics_json(s: &Snapshot) -> Value {
-    json!({
-        "cpu": short_floats(&s.cpu),
-        "gpu": short_floats(&s.gpu),
-        "fans": s.fans,
-        "note": "temperatures in °C, clocks in MHz, power in W, memory in MiB (system RAM under cpu, VRAM under gpu), fan speeds in RPM",
-    })
-}
-
-/// Through a string, so an `f32` reads `34.8` rather than `34.79999923706055`.
-fn short_floats(value: &impl serde::Serialize) -> Value {
-    serde_json::to_string(value).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)
 }
 
 fn host_tools() -> Vec<Value> {

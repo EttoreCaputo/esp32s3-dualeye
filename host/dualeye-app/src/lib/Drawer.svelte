@@ -188,6 +188,7 @@
   ];
   const STT_STATUS = { off: "Off", starting: "Loading the model…", ready: "Ready", error: "Not working" };
   const TTS_STATUS = { off: "Off", starting: "Loading the voices…", ready: "Ready", error: "Not working" };
+  const LLM_STATUS = { off: "Off", starting: "Loading the model…", ready: "Ready", error: "Not working" };
   const mb = (n: number) => `${Math.round(n / 1_000_000)} MB`;
   const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const newestFirst = $derived([...monitor.transcripts].reverse());
@@ -464,8 +465,8 @@
       {:else if tab === "voice"}
         <p class="hint">
           After its wake word, <b>“Alexa”</b>, the board sends what you say to this computer. With voice on, whisper.cpp transcribes it
-          here, in Italian or English, simple commands are carried out (“metti la faccia rings a sinistra”, “what's the temperature?”)
-          and Piper answers through the board's speaker. Nothing leaves the computer.
+          here, in Italian or English, a small language model works out what to do (“metti la faccia rings a sinistra”, “what's the
+          temperature?”) and Piper answers through the board's speaker. Nothing leaves the computer.
         </p>
         {#if !voice}
           <p class="empty">Loading…</p>
@@ -482,6 +483,11 @@
               <span class="track"><span class="knob"></span></span>
               <span class="slabel">Answer out loud</span>
             </label>
+            <label class="switch">
+              <input type="checkbox" checked={voice.settings.llm} onchange={(e) => setVoice({ llm: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Understand with a language model</span>
+            </label>
             <dl class="facts">
               <div>
                 <dt>Speech-to-text</dt>
@@ -491,6 +497,10 @@
                 <dt>Text-to-speech</dt>
                 <dd class:good={voice.tts === "ready"} class:bad={voice.tts === "error"}>{TTS_STATUS[voice.tts]}</dd>
               </div>
+              <div>
+                <dt>Language model</dt>
+                <dd class:good={voice.llm === "ready"} class:bad={voice.llm === "error"}>{LLM_STATUS[voice.llm]}</dd>
+              </div>
               <div><dt>Board</dt><dd>{monitor.link === "connected" ? monitor.voice : "offline"}</dd></div>
             </dl>
             {#if voice.stt === "error" && voice.stt_error}
@@ -498,6 +508,9 @@
             {/if}
             {#if voice.tts === "error" && voice.tts_error}
               <p class="hint error">{voice.tts_error}</p>
+            {/if}
+            {#if voice.llm === "error" && voice.llm_error}
+              <p class="hint error">{voice.llm_error}. Meanwhile a few fixed phrases work.</p>
             {/if}
             <div class="volume">
               <span class="rlabel">Volume</span>
@@ -535,7 +548,7 @@
           </section>
 
           <section>
-            <h3>Model</h3>
+            <h3>Speech model</h3>
             {#if !voice.server}
               <p class="hint error">
                 whisper-server isn't installed. On macOS: <code>brew install whisper-cpp</code>; elsewhere, build it from
@@ -575,6 +588,50 @@
             {#if voiceError}
               <p class="hint error">{voiceError}</p>
             {/if}
+          </section>
+
+          <section>
+            <h3>Language model</h3>
+            {#if !voice.llm_server}
+              <p class="hint error">
+                llama-server isn't installed. On macOS: <code>brew install llama.cpp</code>; elsewhere, get it from
+                <code>github.com/ggml-org/llama.cpp</code> and put it on the PATH.
+              </p>
+            {:else}
+              <p class="hint">
+                It turns what you say into actions on the board and a short answer. Bigger models understand more and take longer.
+                llama-server: <code>{voice.llm_server}</code>
+              </p>
+            {/if}
+            <div class="ports">
+              {#each voice.models.filter((m) => m.kind === "llm") as m (m.id)}
+                {@const downloading = voice.download?.[0] === m.id}
+                {@const chosen = voice.settings.llm_model === m.id}
+                <div class="port model" class:checked={chosen}>
+                  <label class="mpick" title={"License: " + m.license}>
+                    <input type="radio" name="llm" checked={chosen} onchange={() => setVoice({ llm_model: m.id })} />
+                    <span class="radio"></span>
+                    <span class="mtext">
+                      <span class="pname">{m.id}</span>
+                      <span class="mnote">{m.note}</span>
+                    </span>
+                  </label>
+                  <span class="mside">
+                    <span class="pmeta">{mb(m.bytes)}</span>
+                    {#if downloading}
+                      <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
+                    {:else if m.installed}
+                      <button class="btn small" disabled={chosen && voice.settings.enabled && voice.settings.llm} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
+                    {:else}
+                      <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
+                    {/if}
+                  </span>
+                  {#if downloading}
+                    <div class="progress mprogress"><span style:width="{voice.download?.[1] ?? 0}%"></span></div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
           </section>
 
           <section>
@@ -651,6 +708,9 @@
                   {#if entry.reply}
                     <span class="treply" class:muted={!entry.reply.understood}>
                       → {entry.reply.text}
+                      {#if entry.reply.by === "rules" && voice.settings.llm}
+                        <span class="taction" title="The language model wasn't available: a fixed phrase answered">fixed phrase</span>
+                      {/if}
                       {#each entry.reply.actions as action, i (i)}
                         <span class="taction">{action}</span>
                       {/each}
