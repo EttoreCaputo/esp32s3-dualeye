@@ -3,7 +3,7 @@
   import { cubicOut } from "svelte/easing";
   import Eye from "./Eye.svelte";
   import { DEVICES, FACES, ROTATIONS, formatTokens, isClaudeFace, screenFor, type DeviceId, type Face, type Rotation } from "./firmware";
-  import { fanRpm, monitor, type ClaudeLink, type FirmwareInfo, type PortInfo, type Reading } from "./monitor.svelte";
+  import { fanRpm, monitor, type ClaudeLink, type FirmwareInfo, type McpInfo, type PortInfo, type Reading } from "./monitor.svelte";
 
   type Tab = "connection" | "display" | "device" | "sensors" | "console";
   const TABS: [Tab, string][] = [
@@ -24,6 +24,8 @@
   let claudeLink = $state<ClaudeLink | null>(null);
   let claudeError = $state("");
   let claudeBusy = $state(false);
+  let mcp = $state<McpInfo | null>(null);
+  let copied = $state<"code" | "desktop" | null>(null);
   let follow = $state(true);
 
   $effect(() => {
@@ -62,7 +64,10 @@
   $effect(() => {
     if (!open || tab !== "display") return;
     let alive = true;
-    const load = () => monitor.claudeLink().then((l) => alive && (claudeLink = l));
+    const load = () => {
+      monitor.claudeLink().then((l) => alive && (claudeLink = l));
+      monitor.mcpInfo().then((m) => alive && (mcp = m));
+    };
     load();
     const id = setInterval(load, 3000);
     return () => {
@@ -81,6 +86,19 @@
     } finally {
       claudeBusy = false;
     }
+  }
+
+  // What to paste into Claude Code's terminal and into Claude Desktop's config.
+  const shellQuote = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : s.includes("\\") ? `"${s}"` : `'${s.replaceAll("'", `'\\''`)}'`);
+  const mcpCommand = $derived(mcp?.command ? `claude mcp add --scope user dualeye -- ${shellQuote(mcp.command)} ${mcp.args.join(" ")}` : "");
+  const mcpDesktop = $derived(
+    mcp?.command ? JSON.stringify({ mcpServers: { dualeye: { command: mcp.command, args: mcp.args } } }, null, 2) : "",
+  );
+
+  async function copy(which: "code" | "desktop") {
+    await navigator.clipboard.writeText(which === "code" ? mcpCommand : mcpDesktop);
+    copied = which;
+    setTimeout(() => copied === which && (copied = null), 1500);
   }
 
   const claudeUsage = $derived(monitor.last?.claude);
@@ -291,6 +309,40 @@
           {/if}
           {#if claudeError}
             <p class="hint error">{claudeError}</p>
+          {/if}
+        </section>
+
+        <section class="mcp">
+          <h3>MCP server</h3>
+          <p class="hint">
+            Let Claude Code, Claude Desktop or another MCP client change the faces, show messages and read this computer's metrics.
+            While the app runs they go through it, so the board stays connected here.
+          </p>
+          {#if mcp?.hub}
+            <dl class="facts">
+              <div>
+                <dt>Clients</dt>
+                <dd>{mcp.hub.clients === 0 ? "None connected" : mcp.hub.clients === 1 ? "1 connected" : `${mcp.hub.clients} connected`}</dd>
+              </div>
+              <div>
+                <dt>Last tool call</dt>
+                <dd>{mcp.hub.last_tool === null || mcp.hub.last_call_age_ms === null ? "None yet" : `${mcp.hub.last_tool}, ${ago(Math.round(mcp.hub.last_call_age_ms / 1000))}`}</dd>
+              </div>
+            </dl>
+          {:else if mcp?.hub_error}
+            <p class="hint error">MCP clients can't reach the board through the app: {mcp.hub_error}</p>
+          {/if}
+          {#if mcpCommand}
+            <p class="hint">Claude Code: run this once in a terminal.</p>
+            <div class="snippet">
+              <pre>{mcpCommand}</pre>
+              <button class="btn" onclick={() => copy("code")}>{copied === "code" ? "Copied" : "Copy"}</button>
+            </div>
+            <p class="hint">Claude Desktop: add this to <code>claude_desktop_config.json</code> (Settings → Developer → Edit Config), then restart it.</p>
+            <div class="snippet">
+              <pre>{mcpDesktop}</pre>
+              <button class="btn" onclick={() => copy("desktop")}>{copied === "desktop" ? "Copied" : "Copy"}</button>
+            </div>
           {/if}
         </section>
       {:else if tab === "device"}
@@ -699,6 +751,32 @@
   }
   .hint.error {
     color: var(--hot);
+  }
+  .mcp .facts {
+    margin-bottom: 12px;
+  }
+  .mcp .hint + .snippet {
+    margin-top: 8px;
+  }
+  .snippet + .hint {
+    margin-top: 12px;
+  }
+  .snippet {
+    position: relative;
+  }
+  .snippet pre {
+    padding-right: 72px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: text;
+  }
+  .snippet .btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    height: 24px;
+    padding: 0 10px;
+    font-size: 11px;
   }
 
   .alert {

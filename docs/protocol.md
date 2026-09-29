@@ -81,7 +81,7 @@ Every `ESP_LOG*` line after the link starts, one line per frame. The level lette
    {"protocol":2,"firmware":"0.4.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log"],"capabilities":["tools"]}
    ```
 
-3. The host pushes its settings (faces, rotation) with `tools/call`, then streams `metrics`.
+3. The host reads faces and rotation with `get_state` and adopts them (the CLI pushes its own with `set_face` / `set_rotation` when given on the command line), then streams `metrics`. Later changes on the host are pushed with `tools/call`.
 
 When the host sees `ready` it repeats step 3. A board that never answers `hello` but prints protocol 1's version line (`{"dualeye":"0.3.0",…}`, in answer to the text line `?version`) is reported as that version, so the app can offer to update it.
 
@@ -104,4 +104,18 @@ Example:
 ← {"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"left: rings"}],"isError":false}}
 ```
 
-From the CLI: `dualeye tools`, `dualeye call set_face --screen left --face rings`, or `dualeye call set_face '{"screen":"left","face":"rings"}'`. The CLI opens the port itself, so quit the app first (until M2).
+From the CLI: `dualeye tools`, `dualeye call set_face --screen left --face rings`, or `dualeye call set_face '{"screen":"left","face":"rings"}'`. MCP clients get the same tools from `dualeye mcp` (see the README).
+
+## Sharing the board between host processes
+
+Only one process can hold the port. The bridge (in the app, or `dualeye` streaming) runs a **hub**: a TCP server on `127.0.0.1`, on a port the OS picks, announced with a random token in `hub.json` in DualEye's data folder (mode 0600). Other processes (`dualeye mcp`, `dualeye call`) use the board through it; when there is no hub, they open the port for one call and close it. Implementation: `host/dualeye-core/src/hub.rs`.
+
+One JSON-RPC 2.0 message per line, one request at a time. The first request must be `hello` with the token; otherwise the hub answers `-32001` and closes the connection.
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `hello` | `{"token":"…","client":"dualeye-mcp/0.1.0"}` | `{"bridge":"0.1.0","board":<hello result or null>,"port":"/dev/cu.usbmodem101"}` |
+| `tools/list`, `tools/call` | As on `ctrl` | Passed to the board unchanged, one at a time |
+| `host/snapshot` | none | `{"snapshot":<latest sample or null>,"age_ms":…}` |
+
+While no board is attached (not found, rebooting, esptool flashing it) board methods fail with `-32000` and the reason as the message. After a successful `set_face` or `set_rotation` the bridge reads `get_state` and updates its own settings, so the app shows the change and keeps it.

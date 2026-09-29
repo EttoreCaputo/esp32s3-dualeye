@@ -28,7 +28,7 @@ End users only need the desktop app installer, from the [latest release](https:/
   <img src="assets/image-2.png" alt="Display settings: pick a watch face and rotation per screen" width="720">
 </p>
 
-**Stack:** ESP-IDF ≥ 5.4 · [lvgl/lvgl](https://components.espressif.com/components/lvgl/lvgl) `9.3.0` · [espressif/esp_lcd_gc9a01](https://components.espressif.com/components/espressif/esp_lcd_gc9a01) `^2.0.4` · Rust (sysinfo, nvml-wrapper, serialport)
+**Stack:** ESP-IDF ≥ 5.4 · [lvgl/lvgl](https://components.espressif.com/components/lvgl/lvgl) `9.3.0` · [espressif/esp_lcd_gc9a01](https://components.espressif.com/components/espressif/esp_lcd_gc9a01) `^2.0.4` · Rust (sysinfo, nvml-wrapper, serialport, rmcp)
 
 ## Host bridge
 
@@ -44,10 +44,11 @@ cargo run --release -- --cpu-rotation 180 --gpu-rotation 180   # board upside do
 cargo run --release -- tools                                      # the board's tools
 cargo run --release -- call set_face --screen left --face rings
 cargo run --release -- call show_text --text "Ciao!" --seconds 5
+cargo run --release -- mcp                                        # MCP server on stdio, see below
 cargo run --release -- --help
 ```
 
-`tools` and `call` talk to the board's tools directly (firmware 0.4 or later, see [docs/protocol.md](docs/protocol.md)). They open the port themselves, so quit the app or a running `dualeye` first.
+`tools` and `call` use the board's tools (firmware 0.4 or later, see [docs/protocol.md](docs/protocol.md)). While the app or a streaming `dualeye` runs they go through it; otherwise they open the port for the call and close it right after.
 
 The binary ends up in `host/target/release/dualeye` (`dualeye.exe` on Windows) and has no runtime dependencies.
 
@@ -92,7 +93,7 @@ Each screen shows one of six faces, chosen independently (left = CPU, right = GP
 | `claude` | Claude Code: 5-hour limit used on the outer ring and in the middle, weekly limit on the inner ring (orange from 80 %, red from 95 %), time to the 5-hour reset, and a small Clawd. Without the status line: tokens in the 5-hour window, the window's progress on the ring, and today's tokens |
 | `clawd` | Claude Code's mascot, large and animated: walks while Claude works, blinks when idle, sleeps after 30 min; model name, state and tokens in the window |
 
-Pick them in the app (Settings → **Display**, saved across restarts), with `--cpu-face` / `--gpu-face` on the CLI, or with the `set_face` tool (`dualeye call set_face --screen left --face rings`). The bridge sets them on the board when it connects and whenever they change; the board keeps them in NVS and boots showing them.
+Pick them in the app (Settings → **Display**, saved across restarts), with `--cpu-face` / `--gpu-face` on the CLI, or with the `set_face` tool (`dualeye call set_face --screen left --face rings`). The board keeps them in NVS and boots showing them. When the bridge connects it adopts the board's faces and rotation (so a change made over MCP while the app was closed sticks), then sets them whenever you change them; the CLI pushes its own instead when you pass any face or rotation flag.
 
 ### Rotation
 
@@ -104,6 +105,38 @@ The host reads Claude Code's usage from two local sources, with nothing to set u
 
 - **Transcripts** (`~/.claude/projects/**/*.jsonl`, or `$CLAUDE_CONFIG_DIR/projects`): tokens per reply (input, output and cache writes; cache reads are left out, they would swamp the figure), counted in Claude Code's 5-hour windows and since midnight. A transcript written in the last 20 s means Claude is working. The format is internal to Claude Code, so it is read leniently.
 - **Status line**, for the plan's 5-hour and weekly limits (Pro and Max): Settings → **Display** → **Connect status line** sets `statusLine` in `~/.claude/settings.json` to `dualeye-app --claude-statusline` (a copy of the file is kept as `settings.json.dualeye-backup`). Claude Code then pipes its status JSON to the app, which keeps the latest copy and prints your previous status line (or a short default: model, 5h %, 7d %). **Disconnect** puts the previous one back. The CLI takes the same `--claude-statusline` flag.
+
+## MCP server (Claude Code, Claude Desktop)
+
+The board's tools, plus two that read this computer, are available to any [MCP](https://modelcontextprotocol.io) client over stdio, so you can ask Claude Code to "put the rings face on the left" or "show *build done* on the board":
+
+| Tool | From | Does |
+|------|------|------|
+| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `get_state` | Board | Passed through as the firmware describes them in `tools/list` ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
+| `get_metrics` | Host | CPU and GPU temperature, load, clock, power, memory, fans |
+| `get_claude_usage` | Host | Claude Code tokens in the 5-hour window and today, plan limits used, time to reset, working or idle |
+
+With the **app** installed, Settings → **Display** → **MCP server** shows the command and config for this computer, with Copy buttons, and how many clients are connected. It is the app's own binary with `--mcp`. On macOS:
+
+```bash
+claude mcp add --scope user dualeye -- /Applications/DualEye.app/Contents/MacOS/dualeye-app --mcp
+```
+
+With the **CLI** on your `PATH`:
+
+```bash
+claude mcp add --scope user dualeye -- dualeye mcp
+```
+
+For Claude Desktop, add the same command to `claude_desktop_config.json` (Settings → Developer → Edit Config) and restart it:
+
+```json
+{ "mcpServers": { "dualeye": { "command": "/Applications/DualEye.app/Contents/MacOS/dualeye-app", "args": ["--mcp"] } } }
+```
+
+Only one process can hold the serial port. While the app (or `dualeye` streaming) runs, the MCP server goes through it over a local socket: the bridge listens on `127.0.0.1` and leaves the port and a random token in `hub.json` in DualEye's data folder (`~/Library/Application Support/dualeye` on macOS, `%APPDATA%\dualeye` on Windows, `~/.config/dualeye` on Linux), readable by you only. A face or rotation changed this way shows up in the app and is saved in its settings. When nothing streams, the MCP server opens the port for each call and closes it right after, so the app can still start. Any number of MCP clients can run at once.
+
+The last list of board tools is kept in `board-tools.json` in the same folder, so they are listed even when the client starts while the board is unplugged; a call then says why it can't run. The server tells the client when the board's tools turn up later.
 
 ## Desktop app
 
@@ -134,7 +167,7 @@ The app reads the version of the image it carries from that same app descriptor.
 
 To release a new firmware: bump `version.txt`, add its `## <version>` section to `FIRMWARE_CHANGELOG.md` (the release pipeline fails without it), and rebuild the image.
 
-The app talks to the bridge through `dualeye_core::Bridge`; its events (`waiting`, `connected`, `snapshot`, `board_log`, `firmware`, `disconnected`) are forwarded to the webview as `bridge`.
+The app talks to the bridge through `dualeye_core::Bridge`; its events (`waiting`, `connected`, `snapshot`, `board_log`, `firmware`, `settings`, `disconnected`) are forwarded to the webview as `bridge`.
 
 ## Building from source
 
@@ -212,7 +245,7 @@ Each screen shows one of six faces, chosen independently (left = CPU, right = GP
 | `claude` | Claude Code: 5-hour limit used on the outer ring and in the middle, weekly limit on the inner ring (orange from 80 %, red from 95 %), time to the 5-hour reset, and a small Clawd. Without the status line: tokens in the 5-hour window, the window's progress on the ring, and today's tokens |
 | `clawd` | Claude Code's mascot, large and animated: walks while Claude works, blinks when idle, sleeps after 30 min; model name, state and tokens in the window |
 
-Pick them in the app (Settings → **Display**, saved across restarts), with `--cpu-face` / `--gpu-face` on the CLI, or with the `set_face` tool (`dualeye call set_face --screen left --face rings`). The bridge sets them on the board when it connects and whenever they change; the board keeps them in NVS and boots showing them.
+Pick them in the app (Settings → **Display**, saved across restarts), with `--cpu-face` / `--gpu-face` on the CLI, or with the `set_face` tool (`dualeye call set_face --screen left --face rings`). The board keeps them in NVS and boots showing them. When the bridge connects it adopts the board's faces and rotation (so a change made over MCP while the app was closed sticks), then sets them whenever you change them; the CLI pushes its own instead when you pass any face or rotation flag.
 
 ### Rotation
 

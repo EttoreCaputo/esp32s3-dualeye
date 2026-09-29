@@ -12,6 +12,10 @@
 //!
 //! For the Claude faces the app can also point Claude Code's status line at
 //! itself (`main.rs` handles that invocation); see `dualeye_core::claude`.
+//!
+//! The same binary with `--mcp` is an MCP server for Claude Code and Claude
+//! Desktop (`dualeye_core::mcp`). It reaches the board through this app's
+//! [`Hub`], which lives as long as the app, across bridge restarts.
 
 mod instances;
 
@@ -25,7 +29,8 @@ use std::time::Instant;
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
 use dualeye_core::{
-    BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware, serial,
+    BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
+    mcp, serial,
 };
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -90,6 +95,8 @@ impl Link {
                 self.logs.push_back(line.clone());
             }
             BridgeEvent::Firmware { firmware } => self.firmware = Some(firmware.clone()),
+            // `AppState` keeps faces and rotation.
+            BridgeEvent::Settings { .. } => {}
             BridgeEvent::Disconnected { reason, .. } => {
                 self.kind = "offline";
                 self.message = Some(reason.clone());
@@ -107,6 +114,9 @@ struct AppState {
     faces: Arc<Mutex<Faces>>,
     /// Likewise for the rotation of each screen.
     rotation: Arc<Mutex<Rotations>>,
+    /// Shares the bridge's connection with MCP servers; `None` if it couldn't listen.
+    hub: Option<Arc<Hub>>,
+    hub_error: Option<String>,
     /// Separate from the bridge's own collector, for the sensor list.
     collector: Mutex<Option<Collector>>,
     /// esptool holds the port (identify or flash in progress).
@@ -249,6 +259,25 @@ async fn flash_board(app: AppHandle, port: Option<String>) -> Result<(), String>
     .await
 }
 
+#[derive(Serialize)]
+struct McpInfo {
+    /// What MCP clients run: this executable with `args`.
+    command: Option<String>,
+    args: Vec<&'static str>,
+    hub: Option<HubStatus>,
+    hub_error: Option<String>,
+}
+
+#[tauri::command]
+fn mcp_info(state: State<AppState>) -> McpInfo {
+    McpInfo {
+        command: std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()),
+        args: vec![mcp::FLAG],
+        hub: state.hub.as_ref().map(|h| h.status()),
+        hub_error: state.hub_error.clone(),
+    }
+}
+
 #[tauri::command]
 fn claude_link() -> LinkStatus {
     statusline::status()
@@ -292,6 +321,9 @@ async fn with_device<T: Send + 'static>(
             let old = state.bridge.lock().unwrap().take();
             drop(old);
             let paused = BridgeEvent::Waiting { reason: "esptool is using the port".into() };
+            if let Some(hub) = &state.hub {
+                hub.set_unavailable("esptool is using the port (the DualEye app is identifying or flashing the board)");
+            }
             let mut link = Link { kind: "searching", ..Default::default() };
             link.record(&paused);
             *state.link.lock().unwrap() = link;
@@ -312,10 +344,19 @@ async fn with_device<T: Send + 'static>(
 fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
     let handle = app.clone();
     let state = app.state::<AppState>();
-    let (faces, rotation) = (state.faces.clone(), state.rotation.clone());
-    Bridge::spawn(BridgeConfig { port, faces, rotation, ..Default::default() }, move |event| {
+    let (faces, rotation, hub) = (state.faces.clone(), state.rotation.clone(), state.hub.clone());
+    Bridge::spawn(BridgeConfig { port, faces, rotation, hub, ..Default::default() }, move |event| {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
+            // Faces and rotation came from the board (at connect, or an MCP
+            // client changed them): keep them for the next launch too.
+            if let BridgeEvent::Settings { faces, rotation } = &event {
+                let mut settings = state.settings.lock().unwrap();
+                settings.faces = *faces;
+                settings.rotation = *rotation;
+                drop(settings);
+                state.save_settings();
+            }
         }
         if let BridgeEvent::Snapshot { snapshot, .. } = &event {
             update_tray(&handle, snapshot);
@@ -397,6 +438,10 @@ pub fn run() {
             let port = settings.port.clone();
             let faces = Arc::new(Mutex::new(settings.faces));
             let rotation = Arc::new(Mutex::new(settings.rotation));
+            let (hub, hub_error) = match Hub::start() {
+                Ok(hub) => (Some(hub), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
             app.manage(AppState {
                 link: Mutex::new(Link { kind: "searching", ..Default::default() }),
                 bridge: Mutex::new(None),
@@ -404,6 +449,8 @@ pub fn run() {
                 settings_path,
                 faces,
                 rotation,
+                hub,
+                hub_error,
                 collector: Mutex::new(None),
                 device_busy: AtomicBool::new(false),
                 esptool_dir,
@@ -423,7 +470,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {
@@ -431,6 +478,9 @@ pub fn run() {
                 // Release the serial port before the process goes away.
                 if let Some(state) = app.try_state::<AppState>() {
                     state.bridge.lock().unwrap().take();
+                    if let Some(hub) = &state.hub {
+                        hub.set_unavailable("the DualEye app is quitting");
+                    }
                 }
             }
             // macOS: the Dock icon, or opening the app while it runs.

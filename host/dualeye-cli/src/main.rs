@@ -2,7 +2,7 @@
 //!
 //! Close `idf.py monitor` first: it owns the same serial port.
 //!
-//!   dualeye                 # auto-detect the board and stream
+//!   dualeye                 # auto-detect the board and stream; faces and rotation stay as the board has them
 //!   dualeye --once          # print one snapshot, no serial
 //!   dualeye --sensors       # list every raw sensor the backends see
 //!   dualeye --cpu-face rings --gpu-face claude
@@ -11,6 +11,7 @@
 //!   dualeye tools                 # list the board's tools
 //!   dualeye call set_face --screen left --face rings
 //!   dualeye call show_text '{"text":"Ciao"}'
+//!   dualeye mcp                   # MCP server on stdio, for Claude Code / Claude Desktop
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -21,7 +22,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
 use dualeye_core::claude::statusline;
-use dualeye_core::{BoardFirmware, ClaudeUsage, Collector, Face, Faces, Link, LinkEvent, Memory, Rotation, Rotations, Snapshot, serial};
+use dualeye_core::{Board, BoardFirmware, ClaudeUsage, Collector, Face, Faces, Hub, Memory, Rotation, Rotations, Snapshot, mcp, serial};
 use serde_json::{Map, Value};
 
 #[derive(Parser)]
@@ -35,18 +36,20 @@ struct Args {
     /// Milliseconds between snapshots
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(200..))]
     interval_ms: u64,
-    /// Watch face on the left (CPU) screen: classic, rings, plus, bar, claude or clawd
-    #[arg(long, default_value = "classic")]
-    cpu_face: Face,
+    /// Watch face on the left (CPU) screen: classic, rings, plus, bar, claude or clawd.
+    /// Without any face or rotation flag the board keeps its own; with one,
+    /// the others fall back to classic and 0
+    #[arg(long)]
+    cpu_face: Option<Face>,
     /// Watch face on the right (GPU) screen: classic, rings, plus, bar, claude or clawd
-    #[arg(long, default_value = "classic")]
-    gpu_face: Face,
+    #[arg(long)]
+    gpu_face: Option<Face>,
     /// Turn the left (CPU) screen clockwise: 0, 90, 180 or 270 degrees
-    #[arg(long, default_value = "0")]
-    cpu_rotation: Rotation,
+    #[arg(long)]
+    cpu_rotation: Option<Rotation>,
     /// Turn the right (GPU) screen clockwise: 0, 90, 180 or 270 degrees
-    #[arg(long, default_value = "0")]
-    gpu_rotation: Rotation,
+    #[arg(long)]
+    gpu_rotation: Option<Rotation>,
     /// Print one snapshot as JSON and exit, without opening the port
     #[arg(long, conflicts_with_all = ["sensors", "list_ports"])]
     once: bool,
@@ -65,8 +68,8 @@ struct Args {
     quiet: bool,
 }
 
-/// Talk to the board's tools directly. These open the port themselves, so
-/// quit the app (or a running `dualeye`) first.
+/// Talk to the board's tools. While the app or a streaming `dualeye` runs,
+/// these go through it; otherwise they open the port for the call.
 #[derive(Subcommand)]
 enum Command {
     /// List the tools the board offers
@@ -91,6 +94,14 @@ enum Command {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Run an MCP server on stdin/stdout with the board's tools plus
+    /// get_metrics and get_claude_usage. Add it to Claude Code with
+    /// `claude mcp add dualeye -- dualeye mcp`
+    Mcp {
+        /// Used only when neither the app nor a streaming `dualeye` is running
+        #[arg(long, env = "DUALEYE_PORT")]
+        port: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -98,6 +109,15 @@ fn main() -> ExitCode {
     match args.command {
         Some(Command::Tools { port, json }) => return tools(port, json),
         Some(Command::Call { port, json, tool, args }) => return call(port, json, &tool, &args),
+        Some(Command::Mcp { port }) => {
+            return match mcp::serve_stdio(port) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("mcp: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         None => {}
     }
     if args.claude_statusline {
@@ -130,11 +150,18 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Lets `dualeye mcp` and `dualeye call` use the board while this streams.
+    let hub = Hub::start().inspect_err(|e| eprintln!("not sharing the board with other processes: {e}")).ok();
     let config = BridgeConfig {
         port: args.port,
         interval: Duration::from_millis(args.interval_ms),
-        faces: Arc::new(Mutex::new(Faces { cpu: args.cpu_face, gpu: args.gpu_face })),
-        rotation: Arc::new(Mutex::new(Rotations { cpu: args.cpu_rotation, gpu: args.gpu_rotation })),
+        faces: Arc::new(Mutex::new(Faces { cpu: args.cpu_face.unwrap_or_default(), gpu: args.gpu_face.unwrap_or_default() })),
+        rotation: Arc::new(Mutex::new(Rotations {
+            cpu: args.cpu_rotation.unwrap_or_default(),
+            gpu: args.gpu_rotation.unwrap_or_default(),
+        })),
+        hub,
+        adopt_board_settings: args.cpu_face.is_none() && args.gpu_face.is_none() && args.cpu_rotation.is_none() && args.gpu_rotation.is_none(),
     };
     let stop = Arc::new(AtomicBool::new(false));
     let fatal = Arc::new(AtomicBool::new(false));
@@ -150,6 +177,13 @@ fn main() -> ExitCode {
             }
             BridgeEvent::Snapshot { .. } => {}
             BridgeEvent::BoardLog { line } => eprintln!("board: {line}"),
+            BridgeEvent::Settings { faces, rotation } => println!(
+                "board settings: faces {}/{}, rotation {}/{}",
+                faces.cpu.name(),
+                faces.gpu.name(),
+                rotation.cpu.degrees(),
+                rotation.gpu.degrees()
+            ),
             BridgeEvent::Firmware { firmware } => match firmware {
                 BoardFirmware::Version { version, protocol: 1, .. } => {
                     println!("board runs DualEye firmware {version}, which this version can't drive: reflash it from the app")
@@ -172,23 +206,12 @@ fn main() -> ExitCode {
     if fatal.load(Ordering::Relaxed) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
-const TOOL_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Open the board and do the handshake; board log lines go to stderr.
-fn connect(port: Option<String>) -> Result<Link, String> {
-    let port = port.or_else(serial::detect_board).ok_or("board not found on USB (pass --port)")?;
-    let link = Link::open(&port, |event| {
-        if let LinkEvent::Log(line) | LinkEvent::Text(line) = event {
-            eprintln!("board: {line}");
-        }
-    })
-    .map_err(|e| format!("{port}: {e}"))?;
-    link.handshake(Duration::from_secs(5)).map_err(|e| format!("{port}: handshake failed: {e} (firmware 0.4 or later needed)"))?;
-    Ok(link)
+fn board(port: Option<String>) -> Board {
+    Board::new(port, &format!("dualeye-cli/{}", env!("CARGO_PKG_VERSION")))
 }
 
 fn tools(port: Option<String>, json: bool) -> ExitCode {
-    let result = connect(port).and_then(|link| link.list_tools(TOOL_TIMEOUT).map_err(|e| e.to_string()));
+    let result = board(port).list_tools().map_err(|e| e.to_string());
     match result {
         Ok(tools) if json => println!("{}", serde_json::to_string_pretty(&serde_json::json!({"tools": tools})).unwrap()),
         Ok(tools) => {
@@ -226,7 +249,7 @@ fn call(port: Option<String>, json: bool, tool: &str, raw: &[String]) -> ExitCod
             return ExitCode::FAILURE;
         }
     };
-    let result = connect(port).and_then(|link| link.call_tool(tool, arguments, TOOL_TIMEOUT).map_err(|e| e.to_string()));
+    let result = board(port).call_tool(tool, arguments).map_err(|e| e.to_string());
     match result {
         Ok(result) => {
             if json {

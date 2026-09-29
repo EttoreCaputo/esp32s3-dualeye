@@ -4,7 +4,8 @@
 //! CoolerControl or other daemon), [`Snapshot`] is the JSON the firmware
 //! parses, [`Link`] speaks the board's USB protocol (framing in [`protocol`],
 //! JSON-RPC and board tools), [`Bridge`] ties them together on a background
-//! thread, and [`Esptool`] identifies and flashes the board.
+//! thread, [`Hub`] shares the bridge's connection with other processes and
+//! [`Board`] uses it (or the port, when no bridge runs), and [`Esptool`] identifies and flashes the board.
 //! [`firmware`] reads the version of a flash image and of the board's firmware.
 //! [`ClaudeUsage`] adds Claude Code's usage for the Claude faces. The CLI
 //! and a Tauri app are both thin shells over this.
@@ -13,7 +14,10 @@ pub mod bridge;
 pub mod claude;
 pub mod firmware;
 pub mod flasher;
+pub mod hub;
 pub mod link;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod protocol;
 pub mod sensors;
 pub mod serial;
@@ -23,6 +27,7 @@ pub use bridge::{Bridge, BridgeConfig, BridgeEvent};
 pub use claude::{ClaudeMetrics, ClaudeState, ClaudeUsage};
 pub use firmware::{BoardFirmware, ImageInfo};
 pub use flasher::{ChipInfo, Esptool, FlashEvent};
+pub use hub::{Board, Hub, HubStatus, Route};
 pub use link::{CallError, Hello, Link, LinkEvent, Tool, ToolResult};
 pub use sensors::{Collector, Reading};
 pub use serial::PortInfo;

@@ -5,8 +5,15 @@
 //! a Tauri app can forward them to the webview with `app.emit(..)`.
 //!
 //! Each connection starts with the protocol v2 handshake (see [`crate::link`]).
-//! The faces and rotation the frontend picked are pushed with board tools
-//! then, whenever they change, and again after the board reboots.
+//! Faces and rotation live on the board (NVS), so by default the bridge then
+//! reads them with `get_state` and adopts them, raising [`BridgeEvent::Settings`]:
+//! a change made while no bridge ran (say, over MCP) survives. From then on,
+//! whatever the frontend picks is pushed with board tools.
+//!
+//! With a [`Hub`] other processes (the MCP server, `dualeye call`) use the
+//! board through this connection. When one of them changes a face or a
+//! rotation, the bridge reads the board's state back into `faces` and
+//! `rotation` and raises [`BridgeEvent::Settings`], so the frontend follows.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,11 +26,12 @@ use serde_json::json;
 
 use crate::claude::ClaudeUsage;
 use crate::firmware::{self, BoardFirmware};
+use crate::hub::Hub;
 use crate::link::{CallError, Link, LinkEvent};
 use crate::protocol::Channel;
 use crate::sensors::Collector;
 use crate::serial;
-use crate::snapshot::{Faces, Rotations, Snapshot};
+use crate::snapshot::{Face, Faces, Rotation, Rotations, Snapshot};
 
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -36,6 +44,11 @@ pub struct BridgeConfig {
     pub faces: Arc<Mutex<Faces>>,
     /// How each screen is turned, shared the same way as `faces`.
     pub rotation: Arc<Mutex<Rotations>>,
+    /// Lets other processes use the board through this bridge.
+    pub hub: Option<Arc<Hub>>,
+    /// On each handshake, take `faces` and `rotation` from the board instead
+    /// of pushing ours. Off when the user asked for specific ones.
+    pub adopt_board_settings: bool,
 }
 
 impl Default for BridgeConfig {
@@ -45,6 +58,8 @@ impl Default for BridgeConfig {
             interval: Duration::from_secs(1),
             faces: Arc::default(),
             rotation: Arc::default(),
+            hub: None,
+            adopt_board_settings: true,
         }
     }
 }
@@ -63,6 +78,10 @@ pub enum BridgeEvent {
     BoardLog { line: String },
     /// What the board runs; raised once per connection, and again if it reboots into another version.
     Firmware { firmware: BoardFirmware },
+    /// Faces or rotation came from the board: at the handshake, or because a
+    /// hub client changed them. `faces` and `rotation` in the config hold the
+    /// new values already.
+    Settings { faces: Faces, rotation: Rotations },
     Disconnected { port: String, reason: String, permission_denied: bool },
 }
 
@@ -119,13 +138,22 @@ pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
     let mut delay = Duration::from_secs(1);
     while !stop.load(Ordering::Relaxed) {
         let Some(port) = config.port.clone().or_else(serial::detect_board) else {
-            on_event(BridgeEvent::Waiting { reason: "board not found on USB".into() });
+            let reason = "board not found on USB";
+            if let Some(hub) = &config.hub {
+                hub.set_unavailable(reason);
+            }
+            on_event(BridgeEvent::Waiting { reason: reason.into() });
             sleep_unless_stopped(delay, stop);
             delay = (delay * 2).min(Duration::from_secs(5));
             continue;
         };
         let started = Instant::now();
-        if let Err(err) = session(&port, config, stop, &mut collector, &mut claude, &on_event) {
+        let result = session(&port, config, stop, &mut collector, &mut claude, &on_event);
+        if let Some(hub) = &config.hub {
+            let why = result.as_ref().err().map_or_else(|| "the bridge stopped".to_string(), |e| format!("board disconnected: {e}"));
+            hub.set_unavailable(&why);
+        }
+        if let Err(err) = result {
             on_event(BridgeEvent::Disconnected {
                 port,
                 reason: err.to_string(),
@@ -158,7 +186,7 @@ fn session(
     on_event: &EventSink,
 ) -> io::Result<()> {
     let heard = Arc::new(Heard::default());
-    let link = {
+    let link = Arc::new({
         let heard = heard.clone();
         let sink = on_event.clone();
         Link::open(port, move |event| match event {
@@ -174,7 +202,7 @@ fn session(
             LinkEvent::Notification { method, .. } if method == "ready" => heard.rebooted.store(true, Ordering::Relaxed),
             LinkEvent::Notification { .. } | LinkEvent::Closed(_) => {}
         })?
-    };
+    });
     on_event(BridgeEvent::Connected { port: port.to_string() });
 
     let mut reported: Option<BoardFirmware> = None;
@@ -196,6 +224,9 @@ fn session(
             return Err(closed(&link));
         }
         if heard.rebooted.swap(false, Ordering::Relaxed) {
+            if let Some(hub) = &config.hub {
+                hub.set_unavailable("the board is restarting");
+            }
             ready = false;
             pushed = None;
             next_hello = Instant::now();
@@ -205,7 +236,14 @@ fn session(
                 Ok(hello) => {
                     ready = true;
                     unanswered = 0;
+                    if let Some(hub) = &config.hub {
+                        hub.attach(link.clone(), hello.clone(), port);
+                    }
                     report(BoardFirmware::Version { version: hello.firmware, idf: hello.idf, protocol: hello.protocol });
+                    if config.adopt_board_settings {
+                        // Otherwise `pushed` stays empty and ours are pushed below.
+                        adopt_settings(&link, config, &mut pushed, on_event)?;
+                    }
                 }
                 Err(CallError::Io(e)) => return Err(e),
                 Err(CallError::Closed) => return Err(closed(&link)),
@@ -224,6 +262,10 @@ fn session(
             }
         }
 
+        if ready && config.hub.as_ref().is_some_and(|h| h.take_settings_changed()) {
+            adopt_settings(&link, config, &mut pushed, on_event)?;
+        }
+
         if ready {
             let want = (*config.faces.lock().unwrap(), *config.rotation.lock().unwrap());
             if pushed != Some(want) {
@@ -240,6 +282,9 @@ fn session(
         snapshot.face = Some(*config.faces.lock().unwrap());
         snapshot.rot = Some(*config.rotation.lock().unwrap()).filter(|r| !r.is_upright());
         snapshot.claude = claude.sample();
+        if let Some(hub) = &config.hub {
+            hub.set_snapshot(&snapshot);
+        }
         let sent = ready && snapshot.is_sendable();
         if sent {
             link.send(Channel::Metrics, &snapshot.to_payload())?;
@@ -270,6 +315,36 @@ fn push_settings(link: &Link, faces: Faces, rotation: Rotations) -> Result<(), C
         }
     }
     Ok(())
+}
+
+/// Take the board's faces and rotation as ours. Only an I/O error is returned;
+/// on any other failure `pushed` is left alone.
+fn adopt_settings(link: &Link, config: &BridgeConfig, pushed: &mut Option<(Faces, Rotations)>, on_event: &EventSink) -> io::Result<()> {
+    match read_settings(link) {
+        Ok((faces, rotation)) => {
+            *config.faces.lock().unwrap() = faces;
+            *config.rotation.lock().unwrap() = rotation;
+            *pushed = Some((faces, rotation));
+            on_event(BridgeEvent::Settings { faces, rotation });
+        }
+        Err(CallError::Io(e)) => return Err(e),
+        Err(e) => on_event(BridgeEvent::BoardLog { line: format!("host: could not read the board's settings: {e}") }),
+    }
+    Ok(())
+}
+
+/// Faces and rotation as the board has them, from `get_state`.
+fn read_settings(link: &Link) -> Result<(Faces, Rotations), CallError> {
+    let state = link.call_tool("get_state", json!({}), TOOL_TIMEOUT)?;
+    let screens = state.structured_content.as_ref().and_then(|s| s.get("screens")).ok_or_else(|| CallError::Invalid("get_state: no screens".into()))?;
+    let screen = |name: &str| -> Result<(Face, Rotation), CallError> {
+        let s = &screens[name];
+        let face = s["face"].as_str().and_then(|f| f.parse().ok());
+        let rotation = s["rotation"].as_u64().and_then(|d| Rotation::from_degrees(d as u16));
+        face.zip(rotation).ok_or_else(|| CallError::Invalid(format!("get_state: {name} screen")))
+    };
+    let (left, right) = (screen("left")?, screen("right")?);
+    Ok((Faces { cpu: left.0, gpu: right.0 }, Rotations { cpu: left.1, gpu: right.1 }))
 }
 
 fn sleep_unless_stopped(duration: Duration, stop: &AtomicBool) {

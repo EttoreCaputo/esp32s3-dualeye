@@ -62,11 +62,12 @@ Done when: the app, the CLI and board-console logs work on 0.4 firmware. ~~A 0.3
 
 Goal: board tools available to any MCP client. This is a useful milestone on its own.
 
-- [ ] `dualeye-core`: MCP server with `rmcp`; tools proxied from the board's `tools/list`
-- [ ] `dualeye mcp` subcommand (stdio transport), with setup instructions for Claude Code and Claude Desktop in the README
-- [ ] Share the serial port between the bridge and MCP. They run in the same process: when the app or bridge is running, MCP attaches to it over a local socket rather than opening the port twice
-- [ ] Host tools: `get_metrics`, `get_claude_usage`
-- [ ] App: "MCP" section with status and a copy-paste config snippet
+- [x] `dualeye-core`: MCP server with `rmcp` 3.5 (`mcp.rs`, feature `mcp`); tools proxied from the board's `tools/list`, last list cached in `board-tools.json`, `tools/list_changed` when the board's tools turn up later
+- [x] `dualeye mcp` subcommand and `dualeye-app --mcp` (stdio transport), with setup instructions for Claude Code and Claude Desktop in the README
+- [x] Share the serial port between the bridge and MCP: the bridge runs a hub on `127.0.0.1` (port and token in `hub.json`, `hub.rs`); MCP and `dualeye call` go through it, or open the port for one call when nothing streams. Faces and rotation changed through the hub flow back to the app's settings; on connect the bridge adopts the board's faces and rotation instead of overwriting them
+- [x] Host tools: `get_metrics`, `get_claude_usage`
+- [x] App: "MCP server" section (Settings → Display) with connected clients, last call and copy-paste snippets for Claude Code and Claude Desktop
+- [ ] Try it from Claude Code and Claude Desktop by hand
 
 Done when: Claude Code changes faces and shows text on the board.
 

@@ -25,6 +25,10 @@ export type ClaudeMetrics = {
   state: ClaudeState;
   model?: string;
 };
+/** `HubStatus` in dualeye-core: MCP servers using the board through the app. */
+export type HubStatus = { clients: number; calls: number; last_tool: string | null; last_call_age_ms: number | null };
+/** How MCP clients start the server (this app with `--mcp`), and who is using it. */
+export type McpInfo = { command: string | null; args: string[]; hub: HubStatus | null; hub_error: string | null };
 export type ClaudeLink = { connected: boolean; chained: string | null; last_update_s: number | null; settings_path: string | null };
 export type Snapshot = { v: number; ts: number; cpu?: Metrics; gpu?: Metrics; fans?: Fan[]; face?: Faces; rot?: Rotations; claude?: ClaudeMetrics };
 export type PortInfo = { name: string; vid: number; pid: number; product: string | null; is_board: boolean };
@@ -58,6 +62,7 @@ type BridgeEvent =
   | { kind: "snapshot"; snapshot: Snapshot; sent: boolean }
   | { kind: "board_log"; line: string }
   | { kind: "firmware"; firmware: BoardFirmware }
+  | { kind: "settings"; faces: Faces; rotation: Rotations }
   | { kind: "disconnected"; port: string; reason: string; permission_denied: boolean };
 
 type Status = {
@@ -193,6 +198,11 @@ class Monitor {
       case "firmware":
         this.boardFirmware = e.firmware;
         break;
+      case "settings":
+        // An MCP client changed the board.
+        this.faces = e.faces;
+        this.rotation = e.rotation;
+        break;
       case "disconnected":
         this.link = "offline";
         this.message = e.reason;
@@ -294,6 +304,11 @@ class Monitor {
     return invoke<ClaudeLink>(connect ? "claude_connect" : "claude_disconnect");
   }
 
+  async mcpInfo(): Promise<McpInfo> {
+    if (this.preview) return previewMcp;
+    return invoke<McpInfo>("mcp_info");
+  }
+
   async readings(): Promise<Reading[]> {
     if (this.preview) return previewReadings(this.last);
     return invoke<Reading[]>("readings");
@@ -307,6 +322,13 @@ export function fanRpm(s: Snapshot | null, id: string): number | undefined {
 }
 
 // ── Preview feed ────────────────────────────────────────────────────────────
+
+const previewMcp: McpInfo = {
+  command: "/Applications/DualEye.app/Contents/MacOS/dualeye-app",
+  args: ["--mcp"],
+  hub: { clients: 1, calls: 3, last_tool: "set_face", last_call_age_ms: 42000 },
+  hub_error: null,
+};
 
 let previewClaudeLink: ClaudeLink = { connected: false, chained: null, last_update_s: null, settings_path: "~/.claude/settings.json" };
 

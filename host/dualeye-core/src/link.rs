@@ -42,6 +42,9 @@ pub enum CallError {
     Rpc { code: i64, message: String },
     /// A response that doesn't have the expected shape.
     Invalid(String),
+    /// No board to send it to: not found on USB, not answering, or held by
+    /// esptool. The text says which.
+    Unavailable(String),
 }
 
 impl fmt::Display for CallError {
@@ -52,6 +55,7 @@ impl fmt::Display for CallError {
             CallError::Closed => write!(f, "the connection to the board closed"),
             CallError::Rpc { code, message } => write!(f, "{message} ({code})"),
             CallError::Invalid(why) => write!(f, "unexpected reply: {why}"),
+            CallError::Unavailable(why) => write!(f, "{why}"),
         }
     }
 }
