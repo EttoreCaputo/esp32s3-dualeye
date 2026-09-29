@@ -39,21 +39,35 @@ static const char *TAG = "playback";
 #define TASK_CORE 1
 /* Above the voice tasks: an underrun is heard, a late fetch isn't. */
 #define TASK_PRIORITY 6
+/* Earcons: sine notes with this much fade in and out, at this amplitude
+ * (the speaker volume applies on top). */
+#define EARCON_FADE_MS 8
+#define EARCON_AMPLITUDE 9000.0f
 
 typedef enum {
     END_DONE,
     END_STOPPED,
     END_REPLACED,
     END_STARVED,
+    END_BARGE_IN,
 } end_reason_t;
 
 static const char *const END_NAMES[] = {
-    [END_DONE] = "done", [END_STOPPED] = "stopped", [END_REPLACED] = "replaced", [END_STARVED] = "starved",
+    [END_DONE] = "done",       [END_STOPPED] = "stopped",   [END_REPLACED] = "replaced",
+    [END_STARVED] = "starved", [END_BARGE_IN] = "barge_in",
 };
+
+typedef struct {
+    float hz; /* 0: a pause */
+    int ms;
+} note_t;
+
+static const note_t ERROR_NOTES[] = {{587.3f, 110}, {0, 40}, {392.0f, 200}};
 
 typedef struct {
     bool active;   /* frames of `id` are coming or buffered */
     bool end;      /* its last frame arrived */
+    bool local;    /* an earcon, not the host's */
     uint8_t id;
     uint16_t next_seq;
     uint32_t received; /* samples */
@@ -104,7 +118,9 @@ static void end_locked(end_reason_t reason)
     s_ended_reason = reason;
     s_ended_pending = true;
     s_stream.active = false;
-    s_last_id = s_stream.id;
+    if (!s_stream.local) {
+        s_last_id = s_stream.id;
+    }
     s_read = s_write;
 }
 
@@ -121,7 +137,7 @@ void playback_receive(uint8_t *payload, size_t len)
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     stream_t *st = &s_stream;
-    if (!st->active || st->id != id) {
+    if (!st->active || st->local || st->id != id) {
         if (st->active) {
             end_locked(END_REPLACED);
         } else if (id == s_last_id) {
@@ -153,19 +169,75 @@ void playback_receive(uint8_t *payload, size_t len)
     xTaskNotifyGive(s_task);
 }
 
-void playback_stop(void)
+static void stop(end_reason_t reason)
 {
     if (!s_available) {
         return;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    end_locked(END_STOPPED);
+    end_locked(reason);
+    xSemaphoreGive(s_lock);
+    xTaskNotifyGive(s_task);
+}
+
+void playback_stop(void)
+{
+    stop(END_STOPPED);
+}
+
+void playback_barge_in(void)
+{
+    stop(END_BARGE_IN);
+}
+
+void playback_earcon(playback_earcon_t earcon)
+{
+    const note_t *notes = ERROR_NOTES;
+    size_t count = sizeof(ERROR_NOTES) / sizeof(ERROR_NOTES[0]);
+    (void) earcon;
+    if (!s_available) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    stream_t *st = &s_stream;
+    if (st->active) {
+        // Speech (or another earcon) is playing: it says enough.
+        xSemaphoreGive(s_lock);
+        return;
+    }
+    memset(st, 0, sizeof(*st));
+    st->active = true;
+    st->local = true;
+    st->end = true;
+    const uint32_t rate_ms = BOARD_AUDIO_SAMPLE_RATE / 1000;
+    const uint32_t fade = EARCON_FADE_MS * rate_ms;
+    for (size_t i = 0; i < count; i++) {
+        uint32_t n = (uint32_t) notes[i].ms * rate_ms;
+        if (n > BUFFER_SAMPLES - buffered()) {
+            break;
+        }
+        for (uint32_t k = 0; k < n; k++) {
+            float gain = 1.0f;
+            if (k < fade) {
+                gain = (float) k / fade;
+            } else if (n - k < fade) {
+                gain = (float) (n - k) / fade;
+            }
+            float v = notes[i].hz > 0 ? EARCON_AMPLITUDE * gain * sinf(2.0f * (float) M_PI * notes[i].hz * k / BOARD_AUDIO_SAMPLE_RATE) : 0;
+            s_buf[(s_write + k) % BUFFER_SAMPLES] = (int16_t) v;
+        }
+        s_write += n;
+        st->received += n;
+    }
     xSemaphoreGive(s_lock);
     xTaskNotifyGive(s_task);
 }
 
 static void report(const stream_t *st, end_reason_t reason)
 {
+    if (st->local) {
+        return;
+    }
     int ms = (int) (st->played / (BOARD_AUDIO_SAMPLE_RATE / 1000));
     ESP_LOGI(TAG, "stream %d: %d ms, %s, %lu lost, %lu underruns", st->id, ms, END_NAMES[reason],
              (unsigned long) st->lost, (unsigned long) st->underruns);
@@ -186,12 +258,15 @@ static void set_level(float level)
     lvgl_port_unlock();
 }
 
-/** Speaker on, eyes speaking, the wake word ignored (it would hear us). */
-static void begin(void)
+/** Speaker on, eyes speaking (not for an earcon), the wake word ignored
+ * or barging in. */
+static void begin(bool local)
 {
     voice_set_speaking(true);
     board_audio_set_mute(false);
-    voice_set_state(VOICE_SPEAKING);
+    if (!local) {
+        voice_set_state(VOICE_SPEAKING);
+    }
 }
 
 static void finish(void)
@@ -240,7 +315,9 @@ static void playback_task(void *arg)
         stream_t now = *st;
         if (drained) {
             st->active = false;
-            s_last_id = st->id;
+            if (!st->local) {
+                s_last_id = st->id;
+            }
         }
         xSemaphoreGive(s_lock);
 
@@ -253,7 +330,7 @@ static void playback_task(void *arg)
             }
         }
         if (start) {
-            begin();
+            begin(now.local);
             playing = true;
             starved_since = 0;
         }

@@ -149,7 +149,7 @@ pub const MODELS: &[Model] = &[
         kind: Kind::Llm,
         language: None,
         files: &[file("Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2_497_281_120, "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597")],
-        note: "Recommended: all 53 test commands right, about 0.9 s each on an M1 Pro",
+        note: "Most accurate: all 53 test commands right, about 0.9 s each on an M1 Pro",
         license: "Apache-2.0",
         repo: Some("unsloth/Qwen3-4B-Instruct-2507-GGUF"),
     },

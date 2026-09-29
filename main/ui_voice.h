@@ -1,7 +1,7 @@
 #pragma once
 
 /* The "eyes" overlay: a ring round the edge of both screens that shows the
- * voice state (listening, thinking, speaking) over the watch face. */
+ * voice state (listening, thinking, speaking, error) over the watch face. */
 
 #include "board_display.h"
 #include "lvgl.h"

@@ -8,6 +8,7 @@
     monitor,
     type ClaudeLink,
     type FirmwareInfo,
+    type Hardware,
     type McpInfo,
     type PortInfo,
     type Reading,
@@ -170,6 +171,27 @@
       if (!/cancel/i.test(String(e))) voiceError = String(e);
     }
     voice = await monitor.voiceInfo();
+  }
+
+  const gb = (mbytes: number) => `${Math.round(mbytes / 1024)} GB`;
+  function hardwareLine(hw: Hardware): string {
+    const gpu = hw.gpu.kind === "apple" ? "Apple silicon GPU" : hw.gpu.kind === "nvidia" ? `${hw.gpu.name} (${gb(hw.gpu.memory_mb)})` : "no GPU the models can use";
+    return `${hw.cpu}, ${hw.cores} cores, ${gb(hw.memory_mb)}, ${gpu}`;
+  }
+
+  function usesRecommended(v: VoiceInfo): boolean {
+    const r = v.recommendation;
+    return v.settings.model === r.whisper && (r.llm ? v.settings.llm && v.settings.llm_model === r.llm : !v.settings.llm);
+  }
+
+  /** Pick the models recommended for this computer, and download those missing. */
+  async function useRecommended() {
+    if (!voice) return;
+    const r = voice.recommendation;
+    await setVoice(r.llm ? { model: r.whisper, llm: true, llm_model: r.llm } : { model: r.whisper, llm: false });
+    for (const id of [r.whisper, r.llm]) {
+      if (id && voice && !voice.models.find((m) => m.id === id)?.installed) await download(id);
+    }
   }
 
   async function removeModel(id: string) {
@@ -484,6 +506,16 @@
               <span class="slabel">Answer out loud</span>
             </label>
             <label class="switch">
+              <input
+                type="checkbox"
+                checked={voice.settings.follow_up}
+                disabled={!voice.settings.speak}
+                onchange={(e) => setVoice({ follow_up: e.currentTarget.checked })}
+              />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Keep listening after an answer, without the wake word</span>
+            </label>
+            <label class="switch">
               <input type="checkbox" checked={voice.settings.llm} onchange={(e) => setVoice({ llm: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
               <span class="slabel">Understand with a language model</span>
@@ -541,6 +573,15 @@
                 {/each}
               </div>
             </div>
+            <div class="hwbox">
+              <span class="rlabel">This computer</span>
+              <p class="hint">{hardwareLine(voice.hardware)}. {voice.recommendation.why}</p>
+              {#if !usesRecommended(voice)}
+                <button class="btn small" onclick={useRecommended}>
+                  Use {voice.recommendation.whisper}{voice.recommendation.llm ? ` and ${voice.recommendation.llm}` : " without a language model"}
+                </button>
+              {/if}
+            </div>
             <label class="check">
               <input type="checkbox" checked={voice.settings.keep_recordings} onchange={(e) => setVoice({ keep_recordings: e.currentTarget.checked })} />
               <span>Keep recordings as WAV files, for debugging</span>
@@ -551,8 +592,8 @@
             <h3>Speech model</h3>
             {#if !voice.server}
               <p class="hint error">
-                whisper-server isn't installed. On macOS: <code>brew install whisper-cpp</code>; elsewhere, build it from
-                <code>github.com/ggml-org/whisper.cpp</code> and put it on the PATH.
+                whisper-server wasn't found. The app's installer comes with it; for a build of your own, run
+                <code>tools/build_sidecars.sh</code> or install whisper.cpp (<code>brew install whisper-cpp</code> on macOS).
               </p>
             {:else}
               <p class="hint">Downloaded from Hugging Face once and checked. whisper-server: <code>{voice.server}</code></p>
@@ -565,7 +606,7 @@
                     <input type="radio" name="model" checked={voice.settings.model === m.id} onchange={() => setVoice({ model: m.id })} />
                     <span class="radio"></span>
                     <span class="mtext">
-                      <span class="pname">{m.id}</span>
+                      <span class="pname">{m.id}{#if m.id === voice.recommendation.whisper || m.id === voice.recommendation.llm}<span class="rec" title="What this computer runs best">recommended</span>{/if}</span>
                       <span class="mnote">{m.note}</span>
                     </span>
                   </label>
@@ -594,8 +635,8 @@
             <h3>Language model</h3>
             {#if !voice.llm_server}
               <p class="hint error">
-                llama-server isn't installed. On macOS: <code>brew install llama.cpp</code>; elsewhere, get it from
-                <code>github.com/ggml-org/llama.cpp</code> and put it on the PATH.
+                llama-server wasn't found. The app's installer comes with it; for a build of your own, run
+                <code>tools/build_sidecars.sh</code> or install llama.cpp (<code>brew install llama.cpp</code> on macOS).
               </p>
             {:else}
               <p class="hint">
@@ -612,7 +653,7 @@
                     <input type="radio" name="llm" checked={chosen} onchange={() => setVoice({ llm_model: m.id })} />
                     <span class="radio"></span>
                     <span class="mtext">
-                      <span class="pname">{m.id}</span>
+                      <span class="pname">{m.id}{#if m.id === voice.recommendation.whisper || m.id === voice.recommendation.llm}<span class="rec" title="What this computer runs best">recommended</span>{/if}</span>
                       <span class="mnote">{m.note}</span>
                     </span>
                   </label>
@@ -714,6 +755,9 @@
                       {#each entry.reply.actions as action, i (i)}
                         <span class="taction">{action}</span>
                       {/each}
+                      {#if entry.spoken?.reason === "barge_in"}
+                        <span class="taction" title="The wake word was said over the answer">interrupted</span>
+                      {/if}
                     </span>
                     <span class="tmeta">{entry.spoken ? `${(entry.spoken.first_audio_ms / 1000).toFixed(1)} s` : ""}</span>
                   {/if}
@@ -1167,6 +1211,10 @@
     transform: translateX(14px);
     background: var(--accent);
   }
+  .switch:has(input:disabled) {
+    opacity: 0.45;
+    cursor: default;
+  }
   .switch:has(input:focus-visible) .track,
   .check:has(input:focus-visible) span {
     outline: 1.5px solid var(--accent);
@@ -1223,6 +1271,23 @@
     flex-direction: column;
     gap: 4px;
     min-width: 0;
+  }
+  .rec {
+    margin-left: 6px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font: 600 9.5px/1.4 var(--sans);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    vertical-align: 1px;
+  }
+  .hwbox {
+    margin: 4px 0 12px;
+  }
+  .hwbox .hint {
+    margin: 4px 0 8px;
   }
   .mnote {
     font: 450 11px/1.35 var(--sans);

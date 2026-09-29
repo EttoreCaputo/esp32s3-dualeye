@@ -1,6 +1,7 @@
 # On every push to main: build the firmware, then the desktop app for Linux,
 # macOS (Apple Silicon and Intel) and Windows with that firmware inside, and
-# publish them all on the GitHub release `v<app version>`.
+# with whisper.cpp's and llama.cpp's servers for voice (tools/build_sidecars.sh),
+# and publish them all on the GitHub release `v<app version>`.
 #
 # The release is named after `version` in host/dualeye-app/src-tauri/tauri.conf.json.
 # Bump it for a new release; until then each merge refreshes the assets of
@@ -109,6 +110,8 @@ jobs:
             echo "- **Linux**: the \`.AppImage\`, \`.deb\` or \`.rpm\`."
             echo "- \`dualeye-firmware-$FIRMWARE.bin\`: the merged image alone, to flash at 0x0 with esptool."
             echo
+            echo "Voice: the app ships whisper.cpp and llama.cpp (MIT); it downloads the models, and installs Piper (GPL-3.0) when you ask. See docs/licenses.md."
+            echo
             echo "Built from ${GITHUB_SHA::7}."
           } > notes.md
           if gh release view "$tag" > /dev/null 2>&1; then
@@ -173,6 +176,20 @@ jobs:
           workspaces: host -> target
           key: ${{ matrix.target }}
 
+      # whisper-server and llama-server, bundled next to the app. Their
+      # versions are pinned in the script, so its hash keys the cache.
+      - name: Cache the voice sidecars
+        id: sidecars
+        uses: actions/cache@v4
+        with:
+          path: host/dualeye-app/src-tauri/binaries
+          key: sidecars-${{ runner.os }}-${{ matrix.target || 'native' }}-${{ hashFiles('tools/build_sidecars.sh') }}
+
+      - name: Build the voice sidecars
+        if: steps.sidecars.outputs.cache-hit != 'true'
+        shell: bash
+        run: JOBS=4 tools/build_sidecars.sh ${{ matrix.target }}
+
       - name: Install frontend dependencies
         run: npm ci
         working-directory: host/dualeye-app
@@ -183,4 +200,4 @@ jobs:
         with:
           projectPath: host/dualeye-app
           releaseId: ${{ needs.release.outputs.id }}
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} --config src-tauri/tauri.sidecars.conf.json

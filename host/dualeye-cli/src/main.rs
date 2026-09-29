@@ -32,6 +32,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
 use dualeye_core::claude::statusline;
+use dualeye_core::hardware::{self, Hardware};
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::tts::{self, Tts, TtsConfig};
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage};
@@ -102,6 +103,10 @@ struct Args {
     /// default one (repeat for Italian and English)
     #[arg(long, value_name = "VOICE", requires = "tts")]
     tts_voice: Vec<String>,
+    /// After a spoken answer, don't listen for a few seconds more without
+    /// the wake word
+    #[arg(long, requires = "tts")]
+    no_follow_up: bool,
     #[command(flatten)]
     llm: LlmArgs,
 }
@@ -329,6 +334,7 @@ fn main() -> ExitCode {
             stt,
             tts,
             agent,
+            follow_up: !args.no_follow_up,
         })),
     };
     let stop = Arc::new(AtomicBool::new(false));
@@ -668,14 +674,23 @@ fn models_command(action: Option<ModelsAction>) -> ExitCode {
     let find = |id: &str| Model::by_id(id).ok_or_else(|| format!("unknown model {id:?}: {}", model_ids()));
     let result = match action {
         None => {
+            let hw = Hardware::detect();
+            let rec = hardware::recommend(&hw);
+            println!("This computer: {}\n  {}\n", hw.summary(), rec.why);
             let kinds = [(Kind::Whisper, "Speech-to-text (Whisper, --stt)"), (Kind::Voice, "Voices (Piper, --tts)"), (Kind::Llm, "Language models (llama.cpp, --llm)")];
             for (kind, title) in kinds {
                 println!("{title}");
                 for m in Model::of_kind(kind) {
                     let mark = if m.is_installed() { "installed" } else { "" };
                     let default = m.id == models::DEFAULT_MODEL || m.id == models::DEFAULT_LLM || m.language.and_then(models::default_voice) == Some(m.id);
-                    let default = if default { " (default)" } else { "" };
-                    println!("  {:<22} {:>5} MB  {:<9}  {}{default}", m.id, m.bytes() / 1_000_000, mark, m.note);
+                    let recommended = m.id == rec.whisper || Some(m.id) == rec.llm;
+                    let tag = match (default, recommended) {
+                        (true, true) => " (default, recommended here)",
+                        (false, true) => " (recommended here)",
+                        (true, false) => " (default)",
+                        (false, false) => "",
+                    };
+                    println!("  {:<22} {:>5} MB  {:<9}  {}{tag}", m.id, m.bytes() / 1_000_000, mark, m.note);
                     if kind != Kind::Whisper {
                         println!("  {:<22}                     license: {}", "", m.license);
                     }

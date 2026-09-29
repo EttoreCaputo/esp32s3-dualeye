@@ -81,14 +81,10 @@ pub fn models_dir() -> Option<PathBuf> {
     crate::claude::data_dir().map(|d| d.join("models"))
 }
 
-/// `whisper-server` from the PATH, or where Homebrew puts it.
+/// `whisper-server`: `DUALEYE_WHISPER_SERVER`, the one the app ships, or
+/// one on the PATH (see [`crate::sidecar::find_program`]).
 pub fn find_server() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "whisper-server.exe" } else { "whisper-server" };
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
-        .chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from))
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+    crate::sidecar::find_program("whisper-server", "DUALEYE_WHISPER_SERVER")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

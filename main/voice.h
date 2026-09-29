@@ -20,6 +20,9 @@ typedef enum {
     VOICE_LISTENING,
     VOICE_THINKING,
     VOICE_SPEAKING,
+    /* Something went wrong on the host (or it didn't catch the words): a red
+     * ring and the error sound, then idle. */
+    VOICE_ERROR,
     VOICE_STATE_COUNT,
 } voice_state_t;
 
@@ -41,14 +44,17 @@ bool voice_muted(void);
 void voice_pause(bool pause);
 
 /** Stream an utterance as if the wake word had been heard (push-to-talk).
- * False without voice or muted. */
-bool voice_listen(void);
+ * `follow_up`: the host asks right after its spoken reply, so what's said
+ * next needs no wake word; it gives up sooner without speech. False without
+ * voice or muted. */
+bool voice_listen(bool follow_up);
 /** End the utterance being streamed, if any. */
 void voice_stop_listening(void);
 
-/** The speaker is playing (playback.c): the wake word is ignored meanwhile
- * and for a moment after, so the board doesn't wake itself up. The AFE keeps
- * running, echo cancellation included. */
+/** The speaker is playing (playback.c). With barge-in
+ * (CONFIG_DUALEYE_VOICE_BARGE_IN) the wake word stops it and starts a new
+ * utterance, echo cancellation keeping the board from waking itself up;
+ * without, the wake word is ignored meanwhile and for a moment after. */
 void voice_set_speaking(bool speaking);
 
 voice_state_t voice_state(void);

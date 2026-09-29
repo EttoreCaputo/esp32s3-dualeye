@@ -16,7 +16,7 @@ A standalone Rust program on the host reads the sensors straight from the OS (no
 | Firmware (`main/`) | LVGL UI + metrics ingest |
 | `host/dualeye-core` | Library: sensors → snapshot → USB serial. Meant to be embedded in a [Tauri](https://v2.tauri.app/) app |
 | `host/dualeye-cli` | `dualeye` command-line bridge built on the library |
-| `host/dualeye-app` | Desktop app ([Tauri 2](https://v2.tauri.app/) + Svelte): live mirror of both screens, history, sensors, board console, firmware flashing |
+| `host/dualeye-app` | Desktop app ([Tauri 2](https://v2.tauri.app/) + Svelte): live mirror of both screens, history, sensors, board console, firmware flashing, [voice assistant](#voice-assistant) |
 
 End users only need the desktop app installer, from the [latest release](https://github.com/EttoreCaputo/esp32s3-dualeye-pcmonitor/releases/latest) (Windows, macOS, Linux; the firmware is inside); everything below the app section is for working on the source (see [Building from source](#building-from-source)).
 
@@ -139,47 +139,109 @@ Only one process can hold the serial port. While the app (or `dualeye` streaming
 
 The last list of board tools is kept in `board-tools.json` in the same folder, so they are listed even when the client starts while the board is unplugged; a call then says why it can't run. The server tells the client when the board's tools turn up later.
 
-## Voice (preview)
+## Voice assistant
 
-The board listens for a wake word with Espressif's [ESP-SR](https://github.com/espressif/esp-sr): the ES7210 mic and the speaker loopback go through its audio front end (echo cancellation, voice activity) into WakeNet, on core 1, with the UI on core 0. The word is **"Alexa"**, or **"Hi ESP"**: both are built-in WakeNet models, picked with the `set_wake_word` tool (`dualeye call set_wake_word --word hiesp`). When it hears it, a cyan ring lights round both screens (and in the app's mirror) for a few seconds, and the host gets a `wake` notification (`dualeye` prints it). Then the board streams what you say to the host over USB until you stop talking (a bright arc on the ring follows your voice), and the host can transcribe it in Italian or English with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), running locally:
+Say **"Alexa"** to the board, then a command in Italian or English: *"metti la faccia rings a sinistra"*, *"put classic on the right screen"*, *"abbassa la luminosità al 30 per cento"*, *"make your voice louder"*, *"gira gli schermi sottosopra"*, *"scrivi ciao a tutti"*, *"how hot is the GPU?"*, *"che ore sono?"*. The board does it and answers out loud, in the language you spoke. Everything runs on your computer and on the board; see [Privacy](#privacy).
 
-```bash
-brew install whisper-cpp        # or build whisper-server from source
-dualeye models download small   # about 490 MB, once
-dualeye --stt                   # prints each transcript
-```
+### Getting started
 
-In the desktop app it's Settings → **Voice**: turn it on, download a model (the app checks its SHA-256) and the transcripts show there. `dualeye models` lists the same models for the CLI (`dualeye models download small`). `--stt` takes one of them or a ggml model file, `--stt-language it|en` skips language detection, and `--voice-dump` keeps each utterance as a WAV file in `voice/` in DualEye's data folder. Nothing leaves your computer.
+In the desktop app, open Settings → **Voice**:
 
-What you say is understood by a small language model running locally in llama.cpp's `llama-server`, which calls the board's tools (the same ones MCP offers, plus the computer's sensors and the time) and answers in one short sentence, in the language you spoke: *"metti la faccia rings a sinistra"*, *"put classic on the right screen"*, *"abbassa la luminosità al 30 per cento"*, *"make your voice louder"*, *"gira gli schermi sottosopra"*, *"scrivi ciao a tutti"*, *"how hot is the GPU?"*, *"che ore sono?"*, and follow-ups like *"e anche a destra"* within a few minutes. The default model, Qwen3 4B Instruct 2507 (Apache-2.0, 2.5 GB), gets all 53 commands of the eval set right and acts about 0.9 s after the transcript on an M1 Pro. Without llama-server, or with the language model turned off, a few fixed phrases still work. The answer is spoken by [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`, GPL-3.0, run as a separate process) through the board's speaker, a sentence at a time, while a green ring shows the speaker's level; the board ignores its wake word while it talks.
+1. Turn on **Transcribe what the board hears**.
+2. Under **This computer** the app says what it found (processor, memory, GPU) and which models suit it; **Use …** picks them and downloads what's missing (about 3 GB for the default pair, once).
+3. Press **Install Piper**, the program that speaks the answers (about 100 MB, once), and download a voice for each language (the defaults are ticked).
+4. Say "Alexa", wait for the cyan ring, and talk.
 
-```bash
-dualeye piper install                            # a virtualenv in DualEye's data folder, about 100 MB (needs Python 3.9+)
-dualeye models download it_IT-paola-medium       # Italian voice, 64 MB
-dualeye models download en_GB-alba-medium        # English voice, 63 MB
-dualeye --stt --tts                              # voice commands with spoken replies (fixed phrases)
-brew install llama.cpp                           # or build llama-server from source
-dualeye models download qwen3-4b-2507            # the language model, 2.5 GB
-dualeye --stt --tts --llm                        # ...understood by the language model
-dualeye ask "metti rings a sinistra"             # type a command instead of saying it
-dualeye eval                                     # the eval set on a simulated board: accuracy and latency
-dualeye say "Ciao!"                              # speak through the running app or dualeye --tts
-```
+whisper.cpp and llama.cpp come with the app; the models are downloaded from Hugging Face and checked against a SHA-256.
 
-`--llm` takes a model from `dualeye models` or a GGUF file, and `--llm-gpu-layers 0` keeps it on the CPU. The model stays loaded while voice is on (about 3 GB of memory for the default). `dualeye eval` runs about 50 Italian and English commands ([eval/commands.json](host/dualeye-core/eval/commands.json)) against a simulated board and checks where the board ends up; `--set holdout` runs other phrasings, `--rules` the fixed phrases. On an M1 Pro:
+### Talking to it
+
+The ring round both screens (and round the app's mirror) shows what the board is doing:
+
+| Ring | Meaning |
+|------|---------|
+| Cyan, with an arc that follows your voice | Listening: after the wake word, and for 4 s after each answer |
+| Amber, turning | Thinking: your words are being transcribed and understood |
+| Green, with the speaker's level | Speaking |
+| Red, with two falling notes | Something failed, or no words were heard; say "Alexa" again |
+
+- **Follow-ups.** After an answer the board keeps listening for 4 s without the wake word, so *"e anche a destra"* or *"a bit more"* works straight away; the last exchanges are remembered for 3 minutes. Turn it off with **Keep listening after an answer** (CLI: `--no-follow-up`).
+- **Interrupting.** Say "Alexa" while the board talks: it stops and listens. Echo cancellation keeps its own voice from waking it.
+- **Wake word.** "Alexa" or "Hi ESP" (`dualeye call set_wake_word --word hiesp`). Mute the mic with `set_mic` (`dualeye call set_mic --muted true`); the board remembers both, and the speaker's volume (`set_volume`, or the slider in the Voice tab).
+- **Without a language model** (turned off, or not downloaded) a few fixed phrases still work: faces, screens, brightness, rotation, volume, temperatures and the time.
+
+How it works: the board runs Espressif's [ESP-SR](https://github.com/espressif/esp-sr) on core 1 (echo cancellation and voice activity on the mic and the speaker loopback, then WakeNet), with the UI on core 0. After the wake word it streams what it hears over USB until you stop talking; [whisper.cpp](https://github.com/ggml-org/whisper.cpp) transcribes it, a small language model in llama.cpp's `llama-server` calls the board's tools (the ones MCP offers, plus the computer's sensors and the time) and writes a one-sentence answer, and [Piper](https://github.com/OHF-Voice/piper1-gpl) speaks it through the board's speaker a sentence at a time. On an M1 Pro the answer starts about 1.5 s after you stop talking (2–3 s when something changes on the board). The protocol is in [docs/protocol.md](docs/protocol.md).
+
+### Models and hardware
+
+The app recommends models from the hardware it finds, and asks llama-server which GPU it can use:
+
+| Computer | Speech model | Language model | Answers |
+|----------|--------------|----------------|---------|
+| Apple silicon, 16 GB or more | `small` | `qwen3-4b-2507` | Fast |
+| Apple silicon, 8 GB | `small` | `qwen3.5-2b` | Fast |
+| NVIDIA card with 5 GB or more (CUDA build of llama.cpp) | `small` | `qwen3-4b-2507` | Fast |
+| No usable GPU, 8 GB and 4 cores or more | `base` | `qwen3.5-2b` | A few seconds |
+| Less | `base` | none (fixed phrases) | |
+
+The llama-server and whisper-server the app ships use Metal on Apple silicon and the processor elsewhere. To use an NVIDIA card, install a CUDA build of llama.cpp (and whisper.cpp) and point the app at it with the `DUALEYE_LLAMA_SERVER` (and `DUALEYE_WHISPER_SERVER`) environment variable; the app then sees the card and recommends accordingly.
+
+`dualeye eval` runs about 50 Italian and English commands ([eval/commands.json](host/dualeye-core/eval/commands.json)) against a simulated board and checks where the board ends up; `--set holdout` runs other phrasings, `--rules` the fixed phrases. On an M1 Pro:
 
 | Model | Right (of 53) | Other phrasings (of 27) | Time to action, median |
 |---|---|---|---|
-| `qwen3-4b-2507` (default) | 53 | 25 | 0.9 s |
+| `qwen3-4b-2507` | 53 | 25 | 0.9 s |
 | `qwen3.5-4b` | 52 | 27 | 1.4 s |
 | `qwen3.5-2b` | 49 | 24 | 0.65 s |
 | fixed phrases | 39 | 20 | — |
 
-The two Qwen3.5 models often answer an Italian question in English. Qwen3 1.7B (45) and Gemma 4 E2B (39) were tried and left out.
+The two Qwen3.5 models often answer an Italian question in English. Qwen3 1.7B (45) and Gemma 4 E2B (39) were tried and left out. The language model stays loaded while voice is on: about 3 GB of memory for `qwen3-4b-2507`, 1.5 GB for `qwen3.5-2b`.
 
-The app installs Piper by itself (Settings → **Voice** → **Install Piper**, with the same Python it uses for esptool) and lists the voices next to the Whisper models, with a Test button and the speaker's volume, which the board keeps (`set_volume` tool). `--tts-voice ID` picks another voice for its language. Several voices are fine-tuned from Piper's *lessac* voice, whose dataset comes with its own license: `dualeye models` shows each voice's (the app too, on hover), so check it before using a voice beyond your own desk.
+Several Piper voices are fine-tuned from Piper's *lessac* voice, whose dataset comes with its own license: the Voice tab shows each voice's on hover, and [docs/licenses.md](docs/licenses.md) lists every component and model.
 
-Mute the mic with the `set_mic` tool (`dualeye call set_mic --muted true`, or ask Claude through MCP); the board remembers both. The models sit in their own `model` partition ([partitions.csv](partitions.csv)), written by the app's flasher as part of the merged image.
+### Privacy
+
+Nothing you say leaves your computer. The board sends the audio after its wake word over USB to the app; whisper.cpp, the language model and Piper run as local processes listening on `127.0.0.1` only. There is no account, no cloud service and no telemetry.
+
+- **Audio** is kept in memory until it is transcribed, then dropped. It is written to disk only if you turn on **Keep recordings** (WAV files in `voice/` in DualEye's data folder, below), for debugging.
+- **Transcripts and answers** are shown in the Voice tab (the last 50, in memory) and forgotten when the app quits. The language model remembers the last few exchanges for 3 minutes, for follow-ups.
+- **The board** only listens for the wake word on its own; before it, nothing is sent. Mute the mic with `set_mic` to stop even that.
+- **The network** is used only to download what you ask for: models from Hugging Face, Piper from PyPI, and Python the first time (the app flashes the board with it too).
+
+DualEye's data folder is `~/Library/Application Support/dualeye` on macOS, `%APPDATA%\dualeye` on Windows and `~/.config/dualeye` on Linux; the models are in `models/` there, with the helper processes' logs.
+
+### Troubleshooting
+
+| Problem | What to do |
+|---------|------------|
+| The ring doesn't light when you say "Alexa" | Is the mic muted (`dualeye call get_state`, `voice.muted`)? Speak from 1–2 m, towards the board. The Voice tab's Board status shows `idle` when it's listening for the wake word |
+| The ring lights, then goes red | No words were heard (too far, too quiet), or a helper failed: the Voice tab shows the error under the status |
+| "Speech-to-text: Not working" | The Whisper model isn't downloaded, or whisper-server couldn't start: see `whisper-server.log` in `models/` in the data folder |
+| "Language model: Not working" | The model isn't downloaded, or doesn't fit in memory: pick the recommended one, or a smaller one. `llama-server.log` is next to the models. Meanwhile the fixed phrases answer |
+| "Text-to-speech: Not working" | Piper isn't installed, or no voice is downloaded for a language. Reinstall it from the Voice tab |
+| Answers are slow | The Voice tab shows the time of each step. Use the recommended models; on a computer without a GPU, `base` and `qwen3.5-2b` |
+| The board wakes up by itself | Try "Hi ESP" instead. If it wakes itself while it talks, build the firmware without barge-in (`CONFIG_DUALEYE_VOICE_BARGE_IN`) |
+| The wrong words come out | Set the language instead of Auto. Face names are often misheard ("rinza" for "rings"): the language model knows the usual ones |
+
+### From the command line
+
+```bash
+brew install whisper-cpp llama.cpp               # or tools/build_sidecars.sh, or DUALEYE_*_SERVER
+dualeye models                                   # the models, and which suit this computer
+dualeye models download small                    # speech-to-text, about 490 MB
+dualeye --stt                                    # print each transcript
+dualeye piper install                            # Piper, in a virtualenv in DualEye's data folder (needs Python 3.9+)
+dualeye models download it_IT-paola-medium       # Italian voice, 64 MB
+dualeye models download en_GB-alba-medium        # English voice, 63 MB
+dualeye --stt --tts                              # spoken answers, fixed phrases
+dualeye models download qwen3-4b-2507            # the language model, 2.5 GB
+dualeye --stt --tts --llm                        # ...understood by the language model
+dualeye ask "metti rings a sinistra"             # type a command instead of saying it
+dualeye eval                                     # the eval set on a simulated board
+dualeye say "Ciao!"                              # speak through the running app or dualeye --tts
+```
+
+`--stt` takes a model from `dualeye models` or a ggml file, `--stt-language it|en` skips language detection, `--voice-dump` keeps each utterance as a WAV file, `--llm` takes a model or a GGUF file, `--llm-gpu-layers 0` keeps it on the CPU, `--tts-voice ID` picks another voice for its language, and `--no-follow-up` turns off listening after an answer. The models sit in the board's own `model` partition ([partitions.csv](partitions.csv)), written by the app's flasher as part of the merged image.
 
 ## Desktop app
 

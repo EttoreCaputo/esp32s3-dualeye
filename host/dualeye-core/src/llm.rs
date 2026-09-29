@@ -40,14 +40,48 @@ pub struct LlmConfig {
     pub gpu_layers: Option<u32>,
 }
 
-/// `llama-server` from the PATH, or where Homebrew puts it.
+/// `llama-server`: `DUALEYE_LLAMA_SERVER`, the one the app ships, or one on
+/// the PATH (see [`crate::sidecar::find_program`]).
 pub fn find_server() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
-        .chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from))
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+    crate::sidecar::find_program("llama-server", "DUALEYE_LLAMA_SERVER")
+}
+
+/// The devices `server` can run a model on besides the processor, as it
+/// lists them (`--list-devices`): "MTL0: Apple M1 Pro (12124 MiB, …)",
+/// "CUDA0: NVIDIA GeForce RTX 4070 (…)". `None` when it couldn't be asked.
+pub fn devices(server: &std::path::Path) -> Option<Vec<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut cmd = Command::new(server);
+    cmd.arg("--list-devices").stdin(std::process::Stdio::null());
+    // The first run on a Mac compiles Metal's shaders: seconds. A hung one
+    // is left behind rather than waited for.
+    thread::spawn(move || {
+        let _ = tx.send(cmd.output());
+    });
+    let out = rx.recv_timeout(Duration::from_secs(60)).ok()?.ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    Some(parse_devices(&text))
+}
+
+fn parse_devices(text: &str) -> Vec<String> {
+    text.lines()
+        .skip_while(|l| !l.trim_start().starts_with("Available devices"))
+        .skip(1)
+        .map(str::trim)
+        .take_while(|l| l.contains(':'))
+        .filter(|l| !["BLAS", "CPU"].iter().any(|cpu| l.starts_with(cpu)))
+        .map(String::from)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn devices_without_the_processor() {
+        let out = "0.00.000.088 I srv  llama_server: initializing ...\nAvailable devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n  MTL0: Apple M1 Pro (12124 MiB, 12123 MiB free)\n";
+        assert_eq!(super::parse_devices(out), ["MTL0: Apple M1 Pro (12124 MiB, 12123 MiB free)"]);
+        assert!(super::parse_devices("Available devices:\n").is_empty());
+    }
 }
 
 #[derive(Debug)]

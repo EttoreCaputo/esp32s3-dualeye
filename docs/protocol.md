@@ -48,8 +48,8 @@ Receivers ignore channels they don't know.
 | `hello` | `{"protocol":2,"client":"dualeye-cli/0.1.0"}` | The board's [identity](#handshake) |
 | `tools/list` | none | `{"tools":[Tool, …]}` |
 | `tools/call` | `{"name":"set_face","arguments":{…}}` | `CallToolResult` |
-| `voice/state` | `{"state":"thinking"}`: `idle` · `listening` · `thinking` · `speaking` | `{}`; what the voice overlay shows. For the host's voice pipeline (M4 on), so not a tool. A state other than `idle` goes back to `idle` by itself after 30 s (`listening`: 6 s). `-32602` without voice |
-| `voice/listen` | none | `{}`; stream an utterance as if the wake word had been heard (push-to-talk). `-32602` without voice or muted |
+| `voice/state` | `{"state":"thinking"}`: `idle` · `listening` · `thinking` · `speaking` · `error` | `{}`; what the voice overlay shows. For the host's voice pipeline (M4 on), so not a tool. `error` (firmware 1.0) is a red ring with a short two-note sound, for 1.5 s: the host failed, or heard no words. A state other than `idle` goes back to `idle` by itself after 30 s (`listening`: 13 s, `error`: 1.5 s). `-32602` without voice |
+| `voice/listen` | none, or `{"follow_up":true}` | `{}`; stream an utterance as if the wake word had been heard (push-to-talk, `trigger` `host`). With `follow_up` (firmware 1.0; the host asks right after a spoken answer) the `trigger` is `follow_up`, it gives up after 4 s without speech, and speech in its first 0.8 s (the echo of the answer) doesn't count. `-32602` without voice or muted |
 | `voice/stop` | none | `{}`; end the utterance being streamed (`reason` `host`), if any |
 | `audio/stop` | none | `{}`; stop talking: what's buffered from `audio_down` is dropped and the stream ends (`reason` `stopped`) |
 | `debug/audio` | `{"cmd":"tone 440 500"}` | `{}`; the M0 audio self-test, its output comes as `log` lines (see `main/audio_selftest.h`) |
@@ -63,9 +63,9 @@ Notifications from the board:
 | `ready` | Same as the `hello` result | Once at boot, when the link is up. A host that sees it knows the board rebooted |
 | `wake` | `{"word":"Alexa","model":"wn9_alexa","volume_db":-45}` | The wake word was heard (`volume_db`: input level in dBFS). The board then shows `listening` |
 | `voice_state` | `{"state":"listening"}` | The voice overlay changed: on the wake word, after a timeout, or after `voice/state` |
-| `utterance_start` | `{"id":7,"trigger":"wake","rate":16000,"format":"s16le"}` | The board starts streaming what it hears on `audio_up`: after the wake word (`trigger` `wake`) or `voice/listen` (`host`). `id` counts up and wraps at 256 |
-| `playback_end` | `{"id":3,"reason":"done","ms":2426,"lost":0,"overflow":0,"underruns":0}` | An `audio_down` stream ended. `reason`: `done` (played to its last frame), `stopped` (`audio/stop`), `replaced` (a stream with another id started) or `starved` (no audio for 1.5 s without the last frame: the host went away). `ms` were played, `lost` frames never arrived, `overflow` samples found the buffer full, `underruns` times it ran dry mid-stream |
-| `utterance_end` | `{"id":7,"reason":"end_of_speech","ms":3200,"speech":true,"frames":100,"dropped":0}` | The stream ended. `reason`: `end_of_speech` (0.75 s of silence after speech), `no_speech` (none within 5 s), `max_length` (12 s), `host` (`voice/stop`, or the wake word changed) or `muted` (`set_mic`, or the self-test took the mic). `frames` were sent, `dropped` of them lost because the host didn't read in time. With `speech` the board shows `thinking` next, otherwise `idle` |
+| `utterance_start` | `{"id":7,"trigger":"wake","rate":16000,"format":"s16le"}` | The board starts streaming what it hears on `audio_up`: after the wake word (`trigger` `wake`) or `voice/listen` (`host`, or `follow_up`). `id` counts up and wraps at 256 |
+| `playback_end` | `{"id":3,"reason":"done","ms":2426,"lost":0,"overflow":0,"underruns":0}` | An `audio_down` stream ended. `reason`: `done` (played to its last frame), `stopped` (`audio/stop`), `replaced` (a stream with another id started), `starved` (no audio for 1.5 s without the last frame: the host went away) or `barge_in` (firmware 1.0: the wake word was said over it; an `utterance_start` follows). `ms` were played, `lost` frames never arrived, `overflow` samples found the buffer full, `underruns` times it ran dry mid-stream |
+| `utterance_end` | `{"id":7,"reason":"end_of_speech","ms":3200,"speech":true,"frames":100,"dropped":0}` | The stream ended. `reason`: `end_of_speech` (0.75 s of silence after speech), `no_speech` (none within 5 s, 4 s for a follow-up), `max_length` (12 s), `host` (`voice/stop`, or the wake word changed) or `muted` (`set_mic`, or the self-test took the mic). `frames` were sent, `dropped` of them lost because the host didn't read in time. With `speech` the board shows `thinking` next, otherwise `idle` |
 
 ### `metrics`
 
@@ -101,7 +101,7 @@ Speech for the speaker: 16 kHz mono PCM s16le, with the same 4-byte header as `a
 | 2 | u16 LE | Sequence number, from 0 in each stream |
 | 4 | … | PCM, up to 2046 samples (the host sends 1024, 64 ms) |
 
-The board buffers about 4 s in PSRAM and starts the speaker once 150 ms are buffered (or the last frame is in), so the host paces the stream: it sends in real time, about 0.5 s ahead of the speaker, since nothing on the link tells it to slow down. When the buffer runs dry before the last frame the board plays silence; after 1.5 s of it the stream ends (`starved`). While a stream plays the board shows `speaking` with the speaker's level on the ring, and goes back to `idle` at the end; the wake word is ignored meanwhile and for 0.3 s after, and echo cancellation keeps running. Frames of a stream that has ended are dropped. At the end the board says `playback_end`. Implementation: `main/playback.c`, `Speaker` in `host/dualeye-core/src/voice.rs`.
+The board buffers about 4 s in PSRAM and starts the speaker once 150 ms are buffered (or the last frame is in), so the host paces the stream: it sends in real time, about 0.5 s ahead of the speaker, since nothing on the link tells it to slow down. When the buffer runs dry before the last frame the board plays silence; after 1.5 s of it the stream ends (`starved`). While a stream plays the board shows `speaking` with the speaker's level on the ring, and goes back to `idle` at the end. Echo cancellation keeps running, so the board's own voice doesn't reach WakeNet: the wake word said over it stops the stream (`barge_in`) and starts a new utterance (firmware 1.0, `CONFIG_DUALEYE_VOICE_BARGE_IN`; without it, and on 0.6, the wake word is ignored while it plays and for 0.3 s after). The host stops sending once it sees the `playback_end`. Frames of a stream that has ended are dropped. At the end the board says `playback_end`. Implementation: `main/playback.c`, `Speaker` in `host/dualeye-core/src/voice.rs`.
 
 ### `log`
 
@@ -113,7 +113,7 @@ Every `ESP_LOG*` line after the link starts, one line per frame. The level lette
 2. The board answers:
 
    ```json
-   {"protocol":2,"firmware":"0.6.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log","audio_up","audio_down"],"capabilities":["tools","voice","speaker"]}
+   {"protocol":2,"firmware":"1.0.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log","audio_up","audio_down"],"capabilities":["tools","voice","speaker"]}
    ```
 
    `voice` (and `audio_up`) are there when the wake word runs (ESP-SR models found in the `model` partition), `speaker` (and `audio_down`) when the board can play speech.

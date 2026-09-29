@@ -4,7 +4,7 @@ Background and design choices: [voice-feasibility.md](voice-feasibility.md).
 
 Principles:
 - **Small sprints.** Each milestone is 1–3 sprints of about one week. Each sprint ends with something you can run and see.
-- **Every milestone is shippable.** Nothing half-done lands in a release; voice stays behind an opt-in toggle until M7.
+- **Every milestone is shippable.** Nothing half-done lands in a release; voice stays behind an opt-in toggle (it still is in 1.0: off until the person turns it on).
 - **De-risk first.** Hardware and transport come before AI.
 - **Backward compatible.** ~~The app keeps working with firmware 0.3 boards (legacy mode).~~ Dropped for M1: the app recognises a 0.3 board and offers the update instead.
 
@@ -24,7 +24,7 @@ M0 Audio bring-up ─► M1 Protocol v2 ─► M2 MCP server ──────�
 | M3 | Wake word ("Alexa") + "listening" UI | 0.5.0 (shipped in 0.6.0) | Say "Alexa" and the eyes react |
 | M4 | Mic streaming + STT | 0.5.x (shipped in 0.6.0) | Transcript (IT/EN) shown in the app |
 | M5 | TTS → speaker | 0.6.0 | The board speaks a reply |
-| M6 | Local LLM agent (llama.cpp) | 0.6.x | "Metti la faccia rings a sinistra" / "Put rings on the left" works end to end |
+| M6 | Local LLM agent (llama.cpp) | 0.6.x (no firmware change) | "Metti la faccia rings a sinistra" / "Put rings on the left" works end to end |
 | M7 | Polish & release | 1.0.0 | Voice assistant in a public release |
 
 ---
@@ -114,22 +114,24 @@ Tried from the Mac speaker (macOS voices, "Alexa" then a command), with the CLI 
 
 Done when: a spoken command gets a spoken confirmation plus the screen action, in IT and EN.
 
-## M6 — Local LLM agent
+## M6 — Local LLM agent ✅
 
 Goal: natural conversation with a small local model using the MCP tools.
 
-- [ ] `llama-server` sidecar (`--jinja`, tool calling); model manager adds GGUF models
-- [ ] Agent loop in `dualeye-core`: transcript → LLM with MCP tools → tool calls → reply → TTS; short conversation memory
-- [ ] System prompt: reply in the user's language, concise, spoken style
-- [ ] Eval set: about 50 IT/EN commands with expected tool calls; benchmark Qwen3 1.7B and 4B (and newer candidates) for accuracy and latency on Mac, NVIDIA and CPU-only hosts
-- [ ] Replace the M5 rule-based intents (keep them as an offline fallback if useful)
+- [x] `llama-server` sidecar (`--jinja`, tool calling); model manager adds GGUF models
+- [x] Agent loop in `dualeye-core`: transcript → LLM with MCP tools → tool calls → reply → TTS; short conversation memory
+- [x] System prompt: reply in the user's language, concise, spoken style
+- [x] Eval set: about 50 IT/EN commands with expected tool calls; benchmark Qwen3 1.7B and 4B (and newer candidates) for accuracy and latency on Mac, NVIDIA and CPU-only hosts
+- [x] Replace the M5 rule-based intents (keep them as an offline fallback if useful)
 
 Done when: at least 90 % of the eval set is correct with the default model, with the median time to first sound or action under 3 s on the reference hosts.
 
 ## M7 — Polish & release
 
-- [ ] Barge-in (if AEC is available), follow-up without the wake word for a few seconds, error sounds and states
-- [ ] Hardware capability check and model recommendation in the app
-- [ ] Packaging of the sidecar binaries per OS in the Tauri bundle; license table
-- [ ] Docs: README voice section, troubleshooting, privacy note (everything stays local)
-- [ ] Release 1.0.0 and firmware changelog
+- [x] Barge-in (if AEC is available), follow-up without the wake word for a few seconds, error sounds and states. Barge-in: the wake word over the board's speech stops it (`playback_end` reason `barge_in`) and starts a new utterance; the host stops sending the rest as soon as it sees the end (`CONFIG_DUALEYE_VOICE_BARGE_IN`, on by default). Follow-up: after an answer played to the end the host asks `voice/listen {"follow_up":true}`: trigger `follow_up`, 4 s without speech and it gives up, and VAD speech in the first 0.8 s doesn't count (with 0.3 s the answer's echo, still inside the VAD's hangover, ended the stream after 0.7 s). The app's switch "Keep listening after an answer", CLI `--no-follow-up`. Errors: a `voice/state` `error` (red ring, 1.5 s) plays two falling notes made on the board (`playback_earcon`, not reported to the host); the host sets it when Whisper fails or hears no words (not after a follow-up), or speaking fails. Tried from the Mac speaker: "metti rings a sinistra" then "e anche a destra" without the wake word, and the chain closes after 4 s of silence; "Alexa" 4 s into a long `dualeye say` stopped it at 5.6 s and "che ore sono" was answered; a non-speech sound after "Alexa" gave the red ring and the notes
+- [x] Hardware capability check and model recommendation in the app. `hardware.rs`: processor, cores, memory, the GPU (Apple silicon, or NVIDIA through NVML), and the devices llama-server itself lists (`--list-devices`: 0.13 s, 24 s the first time on a Mac while Metal compiles, so the app asks in the background). Apple silicon 16 GB: `small` + `qwen3-4b-2507`; 8 GB: `qwen3.5-2b`; NVIDIA with 5 GB+ (and a CUDA llama-server): the 4B; without a usable GPU `base` + `qwen3.5-2b`, slow; less, no language model. New settings start with the recommendation; the Voice tab shows "This computer", a "recommended" tag on the models and a button to switch and download them; `dualeye models` says the same
+- [x] Packaging of the sidecar binaries per OS in the Tauri bundle; license table. `tools/build_sidecars.sh` builds whisper-server (v1.9.4) and llama-server (b11146) statically, without OpenMP or OpenSSL (it checks nothing outside the OS is linked): Metal on Apple silicon, CPU (AVX2) elsewhere. CI builds them in each app job (cached by the script's hash) and adds them with `tauri.sidecars.conf.json` (`externalBin`, licenses in the resources), so local builds need neither. The host looks for `DUALEYE_WHISPER_SERVER` / `DUALEYE_LLAMA_SERVER`, then next to itself, then the PATH. On macOS: 18 MB + 5 MB, and the bundled pair answered a real voice command. Piper stays an on-demand install (GPL-3.0, separate process). [licenses.md](licenses.md)
+- [x] Docs: README voice section, troubleshooting, privacy note (everything stays local)
+- [x] Release 1.0.0 and firmware changelog: firmware, app, CLI and core at 1.0.0, `FIRMWARE_CHANGELOG.md` has its section
+- [ ] Merge into `main`: CI builds and publishes v1.0.0. The Windows, Linux and Intel Mac sidecar builds have only run there
+- [ ] Try it by hand with a real voice at 1–2 m (barge-in and follow-up above were tried with the Mac's speaker)

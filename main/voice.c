@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "lvgl_port.h"
 #include "model_path.h"
+#include "playback.h"
 #include "rpc.h"
 #include "ui_voice.h"
 
@@ -35,6 +36,11 @@ static const char *TAG = "voice";
  * doesn't outlast it isn't the command. */
 #define WAKE_TAIL_MS (VAD_HANGOVER_MS + 200)
 #define NO_SPEECH_MS 5000
+/* After a spoken reply the board listens without the wake word, for less
+ * long. The VAD still reports the room's echo of the last words for its
+ * hangover: speech that doesn't outlast it isn't the next command. */
+#define FOLLOW_UP_NO_SPEECH_MS 4000
+#define FOLLOW_UP_TAIL_MS (VAD_HANGOVER_MS + SPEAKER_TAIL_MS)
 #define MAX_UTTERANCE_MS 12000
 /* Frame header: utterance id, flags (none yet), sequence number (u16 LE). */
 #define AUDIO_HEADER 4
@@ -47,9 +53,16 @@ static const char *TAG = "voice";
 #define LISTEN_TIMEOUT_MS (MAX_UTTERANCE_MS + 1000)
 /* A host that set thinking or speaking and went away doesn't leave it on. */
 #define HOST_STATE_TIMEOUT_MS 30000
+/* The red ring after an error, long enough for the error sound. */
+#define ERROR_STATE_MS 1500
 /* The room's echo of the last words, after the speaker stops. */
 #define SPEAKER_TAIL_MS 300
 #define FETCH_WAIT_MS 100
+#ifdef CONFIG_DUALEYE_VOICE_BARGE_IN
+#define BARGE_IN true
+#else
+#define BARGE_IN false
+#endif
 #define TASK_CORE 1
 #define TASK_PRIORITY 5
 
@@ -57,6 +70,8 @@ static const char *TAG = "voice";
 /* Host requests, for the fetch task, which owns the stream. */
 #define LISTEN_BIT BIT1
 #define STOP_BIT BIT2
+/* With LISTEN_BIT: a follow-up (voice_listen()). */
+#define FOLLOW_UP_BIT BIT3
 
 typedef enum {
     END_SPEECH,
@@ -79,6 +94,7 @@ typedef struct {
     int64_t start_us;
     int64_t ignore_until_us; /* VAD speech before this is the wake word's */
     int64_t speech_us; /* last frame with speech; 0 before any */
+    int no_speech_ms;  /* given up after this without speech */
     uint32_t samples;
     uint32_t dropped;
     int64_t level_us;
@@ -92,6 +108,7 @@ static const char *const STATE_NAMES[VOICE_STATE_COUNT] = {
     [VOICE_LISTENING] = "listening",
     [VOICE_THINKING] = "thinking",
     [VOICE_SPEAKING] = "speaking",
+    [VOICE_ERROR] = "error",
 };
 
 /* Wake words people can pick, by the WakeNet model names that carry them.
@@ -276,7 +293,9 @@ void voice_set_state(voice_state_t state)
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
     bool changed = s_state != state;
     s_state = state;
-    int timeout_ms = state == VOICE_LISTENING ? LISTEN_TIMEOUT_MS : HOST_STATE_TIMEOUT_MS;
+    int timeout_ms = state == VOICE_LISTENING ? LISTEN_TIMEOUT_MS
+                     : state == VOICE_ERROR   ? ERROR_STATE_MS
+                                              : HOST_STATE_TIMEOUT_MS;
     s_state_until_us = esp_timer_get_time() + (int64_t) timeout_ms * 1000;
     if (changed) {
         lvgl_port_lock();
@@ -287,16 +306,22 @@ void voice_set_state(voice_state_t state)
     if (changed) {
         notify_state(state);
     }
+    if (state == VOICE_ERROR) {
+        playback_earcon(PLAYBACK_EARCON_ERROR);
+    }
 }
 
-static void stream_start(const char *trigger, bool after_wake)
+/** `ignore_ms`: VAD speech this early isn't the command (the wake word's
+ * tail, the speaker's echo). */
+static void stream_start(const char *trigger, int ignore_ms, int no_speech_ms)
 {
     stream_t *st = &s_stream;
     st->active = true;
     st->id++;
     st->seq = 0;
     st->start_us = esp_timer_get_time();
-    st->ignore_until_us = after_wake ? st->start_us + WAKE_TAIL_MS * 1000 : 0;
+    st->ignore_until_us = st->start_us + (int64_t) ignore_ms * 1000;
+    st->no_speech_ms = no_speech_ms;
     st->speech_us = 0;
     st->samples = 0;
     st->dropped = 0;
@@ -372,7 +397,7 @@ static void stream_frame(const afe_fetch_result_t *res)
     int64_t elapsed_ms = (now - st->start_us) / 1000;
     if (st->speech_us != 0 && (now - st->speech_us) / 1000 >= END_SILENCE_MS) {
         stream_end(END_SPEECH);
-    } else if (st->speech_us == 0 && elapsed_ms >= NO_SPEECH_MS) {
+    } else if (st->speech_us == 0 && elapsed_ms >= st->no_speech_ms) {
         stream_end(END_NO_SPEECH);
     } else if (elapsed_ms >= MAX_UTTERANCE_MS) {
         stream_end(END_MAX_LENGTH);
@@ -387,7 +412,7 @@ static void on_wake(const afe_fetch_result_t *res)
     cJSON_AddStringToObject(params, "model", s_model);
     cJSON_AddNumberToObject(params, "volume_db", (int) res->data_volume);
     rpc_notify("wake", params);
-    stream_start("wake", true);
+    stream_start("wake", WAKE_TAIL_MS, NO_SPEECH_MS);
 }
 
 static void feed_task(void *arg)
@@ -420,7 +445,7 @@ static void fetch_task(void *arg)
         // Muted or paused nothing is fed, and fetching would only get the AFE
         // to warn about its empty buffer every time.
         EventBits_t run = xEventGroupWaitBits(s_run, RUN_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(FETCH_WAIT_MS));
-        EventBits_t req = xEventGroupClearBits(s_req, LISTEN_BIT | STOP_BIT);
+        EventBits_t req = xEventGroupClearBits(s_req, LISTEN_BIT | STOP_BIT | FOLLOW_UP_BIT);
         // s_stream is only touched with s_fetch held.
         xSemaphoreTake(s_fetch, portMAX_DELAY);
         if (!(run & RUN_BIT)) {
@@ -430,7 +455,11 @@ static void fetch_task(void *arg)
                 stream_end(END_HOST);
             }
             if ((req & LISTEN_BIT) && !s_stream.active) {
-                stream_start("host", false);
+                if (req & FOLLOW_UP_BIT) {
+                    stream_start("follow_up", FOLLOW_UP_TAIL_MS, FOLLOW_UP_NO_SPEECH_MS);
+                } else {
+                    stream_start("host", 0, NO_SPEECH_MS);
+                }
             }
             afe_fetch_result_t *res = s_afe->fetch_with_delay(s_afe_data, pdMS_TO_TICKS(FETCH_WAIT_MS));
             if (res != NULL && res->ret_value != ESP_FAIL) {
@@ -438,6 +467,12 @@ static void fetch_task(void *arg)
                     stream_frame(res);
                 } else if (res->wakeup_state == WAKENET_DETECTED) {
                     if (esp_timer_get_time() >= s_speaker_until_us) {
+                        on_wake(res);
+                    } else if (BARGE_IN) {
+                        // Echo cancellation keeps the board's own voice out of
+                        // WakeNet: this is the person, talking over it.
+                        ESP_LOGI(TAG, "barge-in: speaker stopped");
+                        playback_barge_in();
                         on_wake(res);
                     } else {
                         ESP_LOGI(TAG, "wake word ignored: the speaker is on");
@@ -453,12 +488,12 @@ static void fetch_task(void *arg)
     }
 }
 
-bool voice_listen(void)
+bool voice_listen(bool follow_up)
 {
     if (!s_available || s_muted) {
         return false;
     }
-    xEventGroupSetBits(s_req, LISTEN_BIT);
+    xEventGroupSetBits(s_req, LISTEN_BIT | (follow_up ? FOLLOW_UP_BIT : 0));
     return true;
 }
 

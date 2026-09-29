@@ -8,7 +8,11 @@
 //! [`Stt`] when there's speech, acts on the words with the local language
 //! model ([`Agent`]), or the rules of [`intents`] without one or when it
 //! fails, and answers with [`Tts`] through the board's speaker
-//! ([`Speaker`]), or puts the eyes back to idle.
+//! ([`Speaker`]), or puts the eyes back to idle. When something fails, or
+//! Whisper heard no words, the board shows `error` (a red ring and a short
+//! sound). After a spoken answer the board listens again for a few seconds
+//! without the wake word ([`VoiceConfig::follow_up`]); the wake word said
+//! over the answer stops it (barge-in, on the board).
 //!
 //! Speech goes to the board on `audio_down`, paced in real time a little
 //! ahead of the speaker, a sentence at a time: the first plays while the
@@ -193,6 +197,9 @@ pub struct VoiceConfig {
     /// Understand what was said with a local language model; without it,
     /// with the rules of [`intents`].
     pub agent: Option<Arc<Agent>>,
+    /// After a spoken answer, listen for a few seconds more without the
+    /// wake word.
+    pub follow_up: bool,
 }
 
 /// Whisper's output for silence or noise rather than words.
@@ -207,6 +214,14 @@ pub fn default_dump_dir() -> Option<PathBuf> {
 }
 
 const STATE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// What the eyes show next. `error` needs firmware 1.0; an older board
+/// just goes back to idle.
+fn set_state(link: &Link, state: &str) {
+    if link.call("voice/state", json!({"state": state}), STATE_TIMEOUT).is_err() && state != "idle" {
+        let _ = link.call("voice/state", json!({"state": "idle"}), STATE_TIMEOUT);
+    }
+}
 const TOOL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What the voice thread shares with the bridge's session.
@@ -264,33 +279,53 @@ pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSi
         }
         let Some(link) = session.link.upgrade() else { return };
         // The board shows thinking meanwhile.
+        let follow_up = utterance.trigger == "follow_up";
         let transcript = match &config.stt {
-            None => None,
+            None => Err("idle"),
             Some(stt) => match stt.transcribe(&utterance.samples) {
                 Ok(t) if is_non_speech(&t.text) => {
                     sink(BridgeEvent::Transcript { id: utterance.id, transcript: None });
-                    None
+                    // Nothing said after an answer is no mistake.
+                    Err(if follow_up { "idle" } else { "error" })
                 }
                 Ok(t) => {
                     sink(BridgeEvent::Transcript { id: utterance.id, transcript: Some(t.clone()) });
-                    Some(t)
+                    Ok(t)
                 }
                 Err(e) => {
                     sink(BridgeEvent::VoiceError { message: e.to_string() });
-                    None
+                    Err("error")
                 }
             },
         };
-        let spoken = transcript.is_some_and(|t| respond(&link, session, &config, sink, utterance.id, &t.text, &t.language));
-        if !spoken {
-            let _ = link.call("voice/state", json!({"state": "idle"}), STATE_TIMEOUT);
+        let next = match transcript {
+            Ok(t) => respond(&link, session, &config, sink, utterance.id, &t.text, &t.language),
+            Err(state) => Next::State(state),
+        };
+        match next {
+            Next::State(state) => set_state(&link, state),
+            Next::Spoken if config.follow_up => {
+                if let Err(e) = link.call("voice/listen", json!({"follow_up": true}), STATE_TIMEOUT) {
+                    sink(BridgeEvent::BoardLog { line: format!("host: no follow-up: {e}") });
+                }
+            }
+            Next::Spoken | Next::Interrupted => {}
         }
     }
 }
 
-/// Act on the words and answer. True when the answer was spoken (the board
-/// then goes back to idle by itself).
-fn respond(link: &Link, session: &Session, config: &VoiceConfig, sink: &EventSink, id: u8, text: &str, language: &str) -> bool {
+/// What the board does once the host has answered.
+enum Next {
+    /// Show this state (`idle`, `error`): nothing was said.
+    State(&'static str),
+    /// The answer was played to the end, and the board went back to idle.
+    Spoken,
+    /// The wake word stopped it: the board is listening already.
+    Interrupted,
+}
+
+/// Act on the words and answer.
+fn respond(link: &Link, session: &Session, config: &VoiceConfig, sink: &EventSink, id: u8, text: &str, language: &str) -> Next {
     let started = Instant::now();
     let answer = config.agent.as_ref().and_then(|agent| match agent.respond(text, language, &BoardToolbox { link, session }) {
         Ok(turn) => Some((turn.reply, turn.actions.iter().map(action_line).collect(), true, "llm")),
@@ -305,15 +340,21 @@ fn respond(link: &Link, session: &Session, config: &VoiceConfig, sink: &EventSin
     });
     let elapsed_ms = started.elapsed().as_millis() as u64;
     sink(BridgeEvent::Reply { id, text: reply.clone(), language: language.to_string(), actions, understood, by: by.into(), elapsed_ms });
-    let Some(tts) = config.tts.as_deref() else { return false };
+    let Some(tts) = config.tts.as_deref() else { return Next::State("idle") };
     match session.speaker.speak(link, tts, &reply, language) {
         Ok(spoken) => {
+            let next = match spoken.reason.as_str() {
+                "done" => Next::Spoken,
+                "barge_in" => Next::Interrupted,
+                // Stopped or replaced by someone else: they say what's next.
+                _ => Next::State("idle"),
+            };
             sink(BridgeEvent::Spoken { id, spoken });
-            true
+            next
         }
         Err(e) => {
             sink(BridgeEvent::VoiceError { message: e });
-            false
+            Next::State("error")
         }
     }
 }
@@ -421,7 +462,8 @@ pub struct Spoken {
     pub first_audio_ms: u64,
     /// What the board played, from its `playback_end`.
     pub played_ms: u64,
-    /// Why it ended: `done`, `stopped`, `replaced` or `starved`.
+    /// Why it ended: `done`, `stopped`, `replaced`, `starved` or `barge_in`
+    /// (the wake word was said over it).
     pub reason: String,
     /// Times the board ran out of audio mid-stream.
     pub underruns: u32,
@@ -445,6 +487,12 @@ impl Speaker {
     pub fn playback_end(&self, params: Value) {
         *self.ended.lock().unwrap() = Some(params);
         self.ended_cv.notify_all();
+    }
+
+    /// The board said stream `id` ended (it may do so before the last frame:
+    /// stopped, barge-in).
+    fn has_ended(&self, id: u8) -> bool {
+        self.ended.lock().unwrap().as_ref().is_some_and(|p| p["id"].as_u64() == Some(id as u64))
     }
 
     /// Synthesize `text` in `language` and play it, a sentence at a time.
@@ -506,7 +554,12 @@ impl Speaker {
             *sent += samples.len() as u64;
             link.send(Channel::AudioDown, &frame)
         };
+        let mut cut_short = false;
         for chunk in audio {
+            if self.has_ended(id) {
+                cut_short = true;
+                break;
+            }
             match chunk {
                 Ok(samples) => pending.extend(samples),
                 Err(e) => {
@@ -514,13 +567,19 @@ impl Speaker {
                     break;
                 }
             }
-            while pending.len() > PLAY_FRAME {
+            while pending.len() > PLAY_FRAME && !cut_short {
                 let rest = pending.split_off(PLAY_FRAME);
                 send(&pending, false, &mut clock, &mut sent).map_err(|e| e.to_string())?;
                 pending = rest;
+                cut_short = self.has_ended(id);
+            }
+            if cut_short {
+                break;
             }
         }
-        send(&pending, true, &mut clock, &mut sent).map_err(|e| e.to_string())?;
+        if !cut_short {
+            send(&pending, true, &mut clock, &mut sent).map_err(|e| e.to_string())?;
+        }
         let deadline = clock.unwrap_or_else(Instant::now) + Duration::from_micros(sent * 1_000_000 / SAMPLE_RATE as u64) + PLAY_GRACE;
         let mut ended = self.ended.lock().unwrap();
         loop {

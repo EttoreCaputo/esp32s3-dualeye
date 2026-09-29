@@ -25,6 +25,19 @@ void playback_receive(uint8_t *payload, size_t len);
 /** Drop what's buffered and end the stream being played, if any. */
 void playback_stop(void);
 
+/** The same, because the wake word was heard over it: the host's stream
+ * ends with `barge_in`. */
+void playback_barge_in(void);
+
+typedef enum {
+    /* Two falling notes: the host failed, or didn't catch the words. */
+    PLAYBACK_EARCON_ERROR,
+} playback_earcon_t;
+
+/** Play a short sound made on the board, unless the host's speech is
+ * playing. It doesn't show `speaking` and isn't reported to the host. */
+void playback_earcon(playback_earcon_t earcon);
+
 /** A stream is playing (or buffering to start). */
 bool playback_active(void);
 

@@ -2,6 +2,9 @@
 //! `whisper-server` ([`crate::stt`]), Piper's `http_server` ([`crate::tts`])
 //! and llama.cpp's `llama-server` ([`crate::llm`]).
 //!
+//! [`find_program`] finds the binaries: the desktop app ships
+//! `whisper-server` and `llama-server` next to itself.
+//!
 //! A [`Process`] is started on a free port and waited for until it accepts
 //! connections; dropping it stops it. Its pid is kept in a file, so one left
 //! running by a host that was killed is stopped by the next. Requests are
@@ -14,6 +17,22 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Where `name` (without `.exe`) is: the path in the environment variable
+/// `env`, if set; else next to this program, where the desktop app's bundle
+/// puts it; else on the PATH, or where Homebrew puts it.
+pub(crate) fn find_program(name: &str, env: &str) -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(env).map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.join(&file)));
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    beside
+        .into_iter()
+        .chain(std::env::split_paths(&path).chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from)).map(|dir| dir.join(&file)))
+        .find(|p| p.is_file())
+}
 
 pub(crate) struct Process {
     child: Child,

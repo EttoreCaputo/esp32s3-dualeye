@@ -7,6 +7,13 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.0.0
+
+- Voice, finished: with voice on in the app, a small language model on your computer understands what you say, in Italian or English, and the board answers out loud.
+- Follow-ups: after an answer the board keeps listening for a few seconds, so you can go on without saying "Alexa" again.
+- Say "Alexa" while the board is talking to interrupt it: it stops and listens.
+- When something goes wrong, or it didn't catch your words, the ring turns red and the board plays two short notes.
+
 ## 0.6.0
 
 - Voice: say "Alexa" (or "Hi ESP", with the `set_wake_word` tool) and a ring lights round the screens. With voice on in the app, the board then sends what you say to your computer, which carries out simple commands and answers out loud through the board's speaker. Everything stays on your computer.

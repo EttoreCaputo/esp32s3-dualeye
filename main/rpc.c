@@ -160,7 +160,7 @@ void rpc_handle(uint8_t *payload, size_t len)
         voice_state_t s;
         if (!cJSON_IsString(state) || !voice_state_from_name(state->valuestring, &s)) {
             code = RPC_INVALID_PARAMS;
-            message = "expected {\"state\": \"idle\" | \"listening\" | \"thinking\" | \"speaking\"}";
+            message = "expected {\"state\": \"idle\" | \"listening\" | \"thinking\" | \"speaking\" | \"error\"}";
         } else if (!voice_available()) {
             code = RPC_INVALID_PARAMS;
             message = "voice not available";
@@ -169,8 +169,10 @@ void rpc_handle(uint8_t *payload, size_t len)
             result = cJSON_CreateObject();
         }
     } else if (strcmp(name, "voice/listen") == 0) {
-        // Push-to-talk: stream an utterance without the wake word.
-        if (!voice_listen()) {
+        // Push-to-talk, or the follow-up after a reply: stream an utterance
+        // without the wake word.
+        const cJSON *follow_up = cJSON_GetObjectItemCaseSensitive(params, "follow_up");
+        if (!voice_listen(cJSON_IsTrue(follow_up))) {
             code = RPC_INVALID_PARAMS;
             message = voice_available() ? "microphone muted" : "voice not available";
         } else {

@@ -74,7 +74,7 @@ type BridgeEvent =
   | { kind: "disconnected"; port: string; reason: string; permission_denied: boolean };
 
 /** What the board's "eyes" overlay shows. */
-export type VoiceState = "idle" | "listening" | "thinking" | "speaking";
+export type VoiceState = "idle" | "listening" | "thinking" | "speaking" | "error";
 export type Utterance = { id: number; trigger: string; reason: string; speech: boolean; lost_frames: number };
 export type Transcript = { text: string; language: string; logprob: number | null; elapsed_ms: number };
 /** How a reply went out through the board's speaker. */
@@ -92,6 +92,8 @@ export type VoiceSettings = {
   keep_recordings: boolean;
   /** Answer out loud through the board's speaker. */
   speak: boolean;
+  /** After a spoken answer, listen a few seconds more without the wake word. */
+  follow_up: boolean;
   /** Voice by language: `it`, `en`. */
   voices: Record<string, string>;
   /** Understand with a local language model (else fixed phrases). */
@@ -125,7 +127,17 @@ export type VoiceInfo = {
   llm: SttStatus;
   llm_error: string | null;
   download: [string, number] | null;
+  hardware: Hardware;
+  recommendation: Recommendation;
 };
+export type Hardware = {
+  cpu: string;
+  cores: number;
+  memory_mb: number;
+  gpu: { kind: "apple" } | { kind: "nvidia"; name: string; memory_mb: number } | { kind: "none" };
+};
+/** The models for this computer: `llm` null means better without one. */
+export type Recommendation = { whisper: string; llm: string | null; speed: "fast" | "slow" | "limited"; why: string };
 const TRANSCRIPTS = 50;
 
 type Status = {
@@ -516,6 +528,7 @@ const previewVoice: VoiceInfo = {
     language: "auto",
     keep_recordings: false,
     speak: true,
+    follow_up: true,
     voices: { it: "it_IT-paola-medium", en: "en_GB-alba-medium" },
     llm: true,
     llm_model: "qwen3-4b-2507",
@@ -529,7 +542,7 @@ const previewVoice: VoiceInfo = {
     { id: "it_IT-riccardo-x_low", kind: "voice", language: "it", bytes: 28_134_952, note: "Italian, man's voice, smaller and flatter", license: "Dataset M-AILABS (BSD-style); trained from scratch", installed: false },
     { id: "en_GB-alba-medium", kind: "voice", language: "en", bytes: 63_206_182, note: "British English, woman's voice", license: "Dataset CC BY 4.0 (Edinburgh DataShare 10283/3270); fine-tuned from lessac", installed: false },
     { id: "en_US-ljspeech-medium", kind: "voice", language: "en", bytes: 63_536_351, note: "American English, woman's voice", license: "Dataset public domain (LJ Speech)", installed: false },
-    { id: "qwen3-4b-2507", kind: "llm", language: null, bytes: 2_497_281_120, note: "Recommended: all 53 test commands right, about 0.9 s each on an M1 Pro", license: "Apache-2.0", installed: true },
+    { id: "qwen3-4b-2507", kind: "llm", language: null, bytes: 2_497_281_120, note: "Most accurate: all 53 test commands right, about 0.9 s each on an M1 Pro", license: "Apache-2.0", installed: true },
     { id: "qwen3.5-2b", kind: "llm", language: null, bytes: 1_280_835_840, note: "Lighter and faster (0.65 s); more mistakes, often answers in English", license: "Apache-2.0", installed: false },
   ],
   stt: "off",
@@ -542,6 +555,8 @@ const previewVoice: VoiceInfo = {
   llm: "off",
   llm_error: null,
   download: null,
+  hardware: { cpu: "Apple M1 Pro", cores: 8, memory_mb: 16_384, gpu: { kind: "apple" } },
+  recommendation: { whisper: "small", llm: "qwen3-4b-2507", speed: "fast", why: "Apple silicon with enough memory runs the recommended models on its GPU." },
 };
 
 function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, rotation: () => Rotations) {

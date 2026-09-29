@@ -6,4 +6,13 @@ menu "DualEye"
         help
             Audio bring-up aid: play a short two-note chime once the codecs are up.
 
+    config DUALEYE_VOICE_BARGE_IN
+        bool "Wake word interrupts the board's speech (barge-in)"
+        default y
+        help
+            Saying the wake word while the board talks stops it and listens.
+            Echo cancellation keeps the board's own voice from waking it; turn
+            this off if it wakes itself up anyway (the wake word is then
+            ignored while the speaker plays).
+
 endmenu

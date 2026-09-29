@@ -306,6 +306,9 @@
   .voice.speaking {
     background: #40e080;
   }
+  .voice.error {
+    background: #ff4040;
+  }
   .voice.thinking {
     background: conic-gradient(#ffb020 0deg 70deg, transparent 70deg);
     animation: voice-spin 1.2s linear infinite;

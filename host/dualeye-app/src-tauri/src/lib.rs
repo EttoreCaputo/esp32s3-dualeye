@@ -33,13 +33,14 @@ mod instances;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
+use dualeye_core::hardware::{self, Hardware, Recommendation};
 use dualeye_core::llm::{self, Llm, LlmConfig};
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage, Transcript};
@@ -84,6 +85,8 @@ struct VoiceSettings {
     keep_recordings: bool,
     /// Answer out loud through the board's speaker.
     speak: bool,
+    /// After a spoken answer, listen a few seconds more without the wake word.
+    follow_up: bool,
     /// Voice by language (`it`, `en`): `models::MODELS` ids.
     voices: BTreeMap<String, String>,
     /// Understand commands with a local language model; without it, a few
@@ -93,18 +96,38 @@ struct VoiceSettings {
     llm_model: String,
 }
 
+/// This computer and the models for it, with what llama-server says it can
+/// run on once [`check_hardware`] has asked it; until then without.
+fn hardware() -> (Hardware, Recommendation) {
+    let hw = CHECKED.get().cloned().unwrap_or_else(Hardware::detect_quick);
+    let rec = hardware::recommend(&hw);
+    (hw, rec)
+}
+
+static CHECKED: OnceLock<Hardware> = OnceLock::new();
+
+/// Ask llama-server for its devices in the background: the first time on a
+/// Mac it takes seconds.
+fn check_hardware() {
+    let _ = thread::Builder::new().name("dualeye-hardware".into()).spawn(|| {
+        let _ = CHECKED.set(Hardware::detect());
+    });
+}
+
 impl Default for VoiceSettings {
     fn default() -> Self {
+        let (_, rec) = hardware();
         let voices = ["it", "en"].into_iter().filter_map(|l| models::default_voice(l).map(|v| (l.to_string(), v.to_string()))).collect();
         Self {
             enabled: false,
-            model: models::DEFAULT_MODEL.into(),
+            model: rec.whisper.into(),
             language: SttLanguage::Auto,
             keep_recordings: false,
             speak: true,
+            follow_up: true,
             voices,
-            llm: true,
-            llm_model: models::DEFAULT_LLM.into(),
+            llm: rec.llm.is_some(),
+            llm_model: rec.llm.unwrap_or(models::DEFAULT_LLM).into(),
         }
     }
 }
@@ -282,7 +305,7 @@ fn apply_voice(state: &AppState) {
         |agent: &Arc<Agent>| agent.llm().warm_up().map_err(|e| e.to_string()),
     );
     let dump_dir = settings.keep_recordings.then(voice::default_dump_dir).flatten();
-    *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt, tts, agent };
+    *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt, tts, agent, follow_up: settings.follow_up };
 }
 
 /// One sidecar for [`apply_voice`]: off (`wanted` is `None`), not possible
@@ -335,7 +358,7 @@ fn tts_config(settings: &VoiceSettings) -> Result<TtsConfig, String> {
 }
 
 fn llm_config(settings: &VoiceSettings) -> Result<LlmConfig, String> {
-    let server = llm::find_server().ok_or("llama-server not found: install llama.cpp (brew install llama.cpp on macOS)")?;
+    let server = llm::find_server().ok_or("llama-server not found: reinstall the app, or install llama.cpp (brew install llama.cpp on macOS)")?;
     let model = Model::by_id(&settings.llm_model).filter(|m| m.kind == Kind::Llm).ok_or_else(|| format!("unknown language model {}", settings.llm_model))?;
     if !model.is_installed() {
         return Err(format!("the {} model isn't downloaded yet", model.id));
@@ -344,7 +367,7 @@ fn llm_config(settings: &VoiceSettings) -> Result<LlmConfig, String> {
 }
 
 fn stt_config(settings: &VoiceSettings) -> Result<SttConfig, String> {
-    let server = stt::find_server().ok_or("whisper-server not found: install whisper.cpp (brew install whisper-cpp on macOS)")?;
+    let server = stt::find_server().ok_or("whisper-server not found: reinstall the app, or install whisper.cpp (brew install whisper-cpp on macOS)")?;
     let model = Model::by_id(&settings.model).ok_or_else(|| format!("unknown model {}", settings.model))?;
     if !model.is_installed() {
         return Err(format!("the {} model isn't downloaded yet", model.id));
@@ -382,9 +405,12 @@ struct VoiceInfo {
     llm: &'static str,
     llm_error: Option<String>,
     download: Option<(String, f32)>,
+    hardware: Hardware,
+    recommendation: Recommendation,
 }
 
 fn voice_info_of(state: &AppState) -> VoiceInfo {
+    let (hardware, recommendation) = hardware();
     let (stt, stt_error) = state.stt_state.lock().unwrap().clone();
     let (tts, tts_error) = state.tts_state.lock().unwrap().clone();
     let (llm, llm_error) = state.llm_state.lock().unwrap().clone();
@@ -405,6 +431,8 @@ fn voice_info_of(state: &AppState) -> VoiceInfo {
         llm,
         llm_error,
         download: state.download.lock().unwrap().clone(),
+        hardware,
+        recommendation,
     }
 }
 
@@ -830,6 +858,7 @@ pub fn run() {
         .setup(|app| {
             // We hold the single instance now; older copies must let go of the port.
             instances::stop_strays();
+            check_hardware();
             if let Some(me) = instances::SelfBinary::capture(app.handle()) {
                 app.manage(me);
             }

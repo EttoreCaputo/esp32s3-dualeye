@@ -7,6 +7,7 @@
 #define LISTENING_COLOR 0x30D5F0
 #define THINKING_COLOR 0xFFB020
 #define SPEAKING_COLOR 0x40E080
+#define ERROR_COLOR 0xFF4040
 #define LEVEL_COLOR 0xE0FAFF
 /* The level arc: centred at the top (LVGL: 0 deg is 3 o'clock, clockwise),
  * up to this span (kept small: LVGL redraws the bounding box of what
@@ -16,7 +17,7 @@
 #define LEVEL_STEPS 10
 
 typedef struct {
-    /* Full ring: listening and speaking. Drawn once, so it costs one redraw. */
+    /* Full ring: listening, speaking and error. Drawn once, so it costs one redraw. */
     lv_obj_t *ring;
     /* Turning arc: thinking. LVGL redraws only the arc's old and new sectors. */
     lv_obj_t *spinner;
@@ -66,9 +67,11 @@ void ui_voice_show(voice_state_t state)
 {
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
         ui_voice_t *v = &s_voice[i];
-        bool ring = state == VOICE_LISTENING || state == VOICE_SPEAKING;
+        bool ring = state == VOICE_LISTENING || state == VOICE_SPEAKING || state == VOICE_ERROR;
         if (ring) {
-            uint32_t color = state == VOICE_LISTENING ? LISTENING_COLOR : SPEAKING_COLOR;
+            uint32_t color = state == VOICE_LISTENING  ? LISTENING_COLOR
+                             : state == VOICE_SPEAKING ? SPEAKING_COLOR
+                                                       : ERROR_COLOR;
             lv_obj_set_style_arc_color(v->ring, lv_color_hex(color), LV_PART_INDICATOR);
             lv_obj_remove_flag(v->ring, LV_OBJ_FLAG_HIDDEN);
         } else {
