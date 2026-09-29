@@ -48,6 +48,7 @@ Receivers ignore channels they don't know.
 | `hello` | `{"protocol":2,"client":"dualeye-cli/0.1.0"}` | The board's [identity](#handshake) |
 | `tools/list` | none | `{"tools":[Tool, …]}` |
 | `tools/call` | `{"name":"set_face","arguments":{…}}` | `CallToolResult` |
+| `voice/state` | `{"state":"thinking"}`: `idle` · `listening` · `thinking` · `speaking` | `{}`; what the voice overlay shows. For the host's voice pipeline (M4 on), so not a tool. A state other than `idle` goes back to `idle` by itself after 30 s (`listening`: 6 s). `-32602` without voice |
 | `debug/audio` | `{"cmd":"tone 440 500"}` | `{}`; the M0 audio self-test, its output comes as `log` lines (see `main/audio_selftest.h`) |
 
 `Tool` and `CallToolResult` have the shapes of the [MCP](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) `tools/list` and `tools/call` results (`name`, `description`, `inputSchema`; `content`, `structuredContent`, `isError`), so the host's MCP server (M2) can pass them through unchanged. A tool that runs but fails (bad argument, out of range) returns `isError: true` with the reason as text. Protocol errors use the standard JSON-RPC codes: `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params (including an unknown tool).
@@ -57,6 +58,8 @@ Notifications from the board:
 | Method | Params | When |
 |--------|--------|------|
 | `ready` | Same as the `hello` result | Once at boot, when the link is up. A host that sees it knows the board rebooted |
+| `wake` | `{"word":"Hi ESP","model":"wn9_hiesp","volume_db":-45}` | The wake word was heard (`volume_db`: input level in dBFS). The board then shows `listening` |
+| `voice_state` | `{"state":"listening"}` | The voice overlay changed: on the wake word, after a timeout, or after `voice/state` |
 
 ### `metrics`
 
@@ -78,8 +81,10 @@ Every `ESP_LOG*` line after the link starts, one line per frame. The level lette
 2. The board answers:
 
    ```json
-   {"protocol":2,"firmware":"0.4.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log"],"capabilities":["tools"]}
+   {"protocol":2,"firmware":"0.4.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log"],"capabilities":["tools","voice"]}
    ```
+
+   `voice` is there when the wake word runs (ESP-SR models found in the `model` partition).
 
 3. The host reads faces and rotation with `get_state` and adopts them (the CLI pushes its own with `set_face` / `set_rotation` when given on the command line), then streams `metrics`. Later changes on the host are pushed with `tools/call`.
 
@@ -87,7 +92,7 @@ When the host sees `ready` it repeats step 3. A board that never answers `hello`
 
 ## Board tools
 
-Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` is the default where a tool takes `screen`. Faces, rotation and brightness are kept in NVS and survive a reboot.
+Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` is the default where a tool takes `screen`. Faces, rotation, brightness and the mic mute are kept in NVS and survive a reboot.
 
 | Tool | Arguments | Effect |
 |------|-----------|--------|
@@ -95,7 +100,8 @@ Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` i
 | `set_rotation` | `degrees`: 0 · 90 · 180 · 270; `screen` | Turn the screen clockwise on top of the DualEye mounting |
 | `set_brightness` | `percent`: 0–100; `screen` | Backlight level (0 turns it off) |
 | `show_text` | `text` (up to 120 characters, ASCII); `screen`; `seconds`: 1–30, default 4 | Show a message over the face, then hide it |
-| `get_state` | none | Firmware, uptime, metrics state, each screen's face, rotation and brightness, free memory, link counters (as `structuredContent`) |
+| `set_mic` | `muted`: boolean | Stop or restart listening for the wake word. Muted, the mic isn't read at all |
+| `get_state` | none | Firmware, uptime, metrics state, each screen's face, rotation and brightness, voice (`available`, `wake_word`, `model`, `muted`, `state`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (as `structuredContent`) |
 
 Example:
 

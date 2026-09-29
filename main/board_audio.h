@@ -24,9 +24,11 @@ extern "C" {
 
 /** ESP-SR wants 16 kHz, so everything runs at it. */
 #define BOARD_AUDIO_SAMPLE_RATE 16000
-/** ES7210 TDM slots, read interleaved. Which one carries the mic and which
- * the speaker loopback (AEC reference) is what the M0 self-test finds out. */
+/** ES7210 TDM slots, read interleaved: the mic, the speaker loopback (AEC
+ * reference), two unconnected (found by the M0 self-test). */
 #define BOARD_AUDIO_IN_CHANNELS 4
+#define BOARD_AUDIO_MIC_SLOT 0
+#define BOARD_AUDIO_REF_SLOT 1
 
 /** Bring up I2C, I2S and both codecs. Output starts muted. */
 esp_err_t board_audio_init(void);
@@ -40,7 +42,8 @@ esp_err_t board_audio_read(int16_t *frames_out, size_t frames);
 /** 0..100. */
 esp_err_t board_audio_set_volume(int volume);
 esp_err_t board_audio_set_mute(bool mute);
-/** Analog gain for every input channel, in dB (ES7210: 0..37.5). */
+/** Analog gain for every input channel, in dB (ES7210: 0..37.5). At init
+ * the mic gets the maximum and the loopback less, so it can't clip. */
 esp_err_t board_audio_set_in_gain(float db);
 
 #ifdef __cplusplus

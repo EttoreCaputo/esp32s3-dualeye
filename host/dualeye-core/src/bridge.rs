@@ -78,6 +78,10 @@ pub enum BridgeEvent {
     BoardLog { line: String },
     /// What the board runs; raised once per connection, and again if it reboots into another version.
     Firmware { firmware: BoardFirmware },
+    /// The board heard its wake word. `volume_db` is the input level (dBFS).
+    Wake { word: String, volume_db: Option<f64> },
+    /// What the board's "eyes" overlay shows: `idle`, `listening`, `thinking` or `speaking`.
+    VoiceState { state: String },
     /// Faces or rotation came from the board: at the handshake, or because a
     /// hub client changed them. `faces` and `rotation` in the config hold the
     /// new values already.
@@ -200,6 +204,15 @@ fn session(
                 sink(BridgeEvent::BoardLog { line });
             }
             LinkEvent::Notification { method, .. } if method == "ready" => heard.rebooted.store(true, Ordering::Relaxed),
+            LinkEvent::Notification { method, params } if method == "wake" => sink(BridgeEvent::Wake {
+                word: params["word"].as_str().unwrap_or_default().to_string(),
+                volume_db: params["volume_db"].as_f64(),
+            }),
+            LinkEvent::Notification { method, params } if method == "voice_state" => {
+                if let Some(state) = params["state"].as_str() {
+                    sink(BridgeEvent::VoiceState { state: state.to_string() });
+                }
+            }
             LinkEvent::Notification { .. } | LinkEvent::Closed(_) => {}
         })?
     });

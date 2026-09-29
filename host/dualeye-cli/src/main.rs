@@ -177,6 +177,12 @@ fn main() -> ExitCode {
             }
             BridgeEvent::Snapshot { .. } => {}
             BridgeEvent::BoardLog { line } => eprintln!("board: {line}"),
+            BridgeEvent::Wake { word, volume_db } => match volume_db {
+                Some(db) => println!("wake word \"{word}\" ({db:.0} dBFS)"),
+                None => println!("wake word \"{word}\""),
+            },
+            BridgeEvent::VoiceState { state } if !quiet => println!("voice: {state}"),
+            BridgeEvent::VoiceState { .. } => {}
             BridgeEvent::Settings { faces, rotation } => println!(
                 "board settings: faces {}/{}, rotation {}/{}",
                 faces.cpu.name(),

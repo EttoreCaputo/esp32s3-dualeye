@@ -15,6 +15,8 @@ static const char *const ROT_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "rot_cpu
 static const char *const FACE_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "face_cpu", [UI_SCREEN_GPU] = "face_gpu"};
 static const char *const BL_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "bl_cpu", [UI_SCREEN_GPU] = "bl_gpu"};
 
+#define MIC_MUTED_KEY "mic_muted"
+
 static SemaphoreHandle_t s_lock;
 static board_settings_t s_settings;
 
@@ -42,6 +44,10 @@ static void load(void)
         if (nvs_get_u8(nvs, BL_KEYS[i], &bl) == ESP_OK && bl <= 100) {
             s_settings.brightness[i] = bl;
         }
+    }
+    uint8_t muted = 0;
+    if (nvs_get_u8(nvs, MIC_MUTED_KEY, &muted) == ESP_OK) {
+        s_settings.mic_muted = muted != 0;
     }
     nvs_close(nvs);
 }
@@ -132,6 +138,18 @@ esp_err_t board_settings_set_brightness(int screen, uint8_t percent)
     xSemaphoreGive(s_lock);
     if (changed) {
         save(BL_KEYS[screen], percent, false);
+    }
+    return ESP_OK;
+}
+
+esp_err_t board_settings_set_mic_muted(bool muted)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool changed = s_settings.mic_muted != muted;
+    s_settings.mic_muted = muted;
+    xSemaphoreGive(s_lock);
+    if (changed) {
+        save(MIC_MUTED_KEY, muted, false);
     }
     return ESP_OK;
 }

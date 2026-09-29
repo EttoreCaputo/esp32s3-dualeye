@@ -1,0 +1,7 @@
+# LVGL's heap (CONFIG_LV_MEM_SIZE_KILOBYTES) and state in PSRAM: with the
+# ESP-SR front end and the larger caches, internal RAM can't hold 128 KB.
+# Draw buffers stay in internal DMA memory (lvgl_port.c).
+[mapping:lvgl_extram]
+archive: liblvgl__lvgl.a
+entries:
+    * (extram_bss)

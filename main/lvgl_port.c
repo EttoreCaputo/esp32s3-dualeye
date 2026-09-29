@@ -17,6 +17,39 @@
 static const char *TAG = "lvgl_port";
 static _lock_t s_lvgl_lock;
 
+/* Filled by the LVGL task: the window being measured, and the last full one. */
+static int64_t s_window_start_us;
+static int64_t s_window_busy_us;
+static uint32_t s_window_max_us;
+static lvgl_port_stats_t s_stats;
+static portMUX_TYPE s_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void account(int64_t start_us, int64_t end_us)
+{
+    uint32_t took = (uint32_t) (end_us - start_us);
+    s_window_busy_us += took;
+    if (took > s_window_max_us) {
+        s_window_max_us = took;
+    }
+    int64_t span = end_us - s_window_start_us;
+    if (span >= LVGL_PORT_STATS_WINDOW_MS * 1000) {
+        portENTER_CRITICAL(&s_stats_mux);
+        s_stats.busy_pct = 100.0f * (float) s_window_busy_us / (float) span;
+        s_stats.max_us = s_window_max_us;
+        portEXIT_CRITICAL(&s_stats_mux);
+        s_window_start_us = end_us;
+        s_window_busy_us = 0;
+        s_window_max_us = 0;
+    }
+}
+
+void lvgl_port_get_stats(lvgl_port_stats_t *out)
+{
+    portENTER_CRITICAL(&s_stats_mux);
+    *out = s_stats;
+    portEXIT_CRITICAL(&s_stats_mux);
+}
+
 static bool notify_flush_ready(esp_lcd_panel_io_handle_t panel_io,
                                esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
@@ -49,9 +82,12 @@ static void lvgl_task(void *arg)
 {
     ESP_LOGI(TAG, "LVGL task started");
     const uint32_t min_delay_ms = 1000 / configTICK_RATE_HZ;
+    s_window_start_us = esp_timer_get_time();
     while (true) {
         _lock_acquire(&s_lvgl_lock);
+        int64_t start = esp_timer_get_time();
         uint32_t delay_ms = lv_timer_handler();
+        account(start, esp_timer_get_time());
         _lock_release(&s_lvgl_lock);
         if (delay_ms < min_delay_ms) {
             delay_ms = min_delay_ms;
@@ -109,8 +145,9 @@ esp_err_t lvgl_port_init(const board_lcd_t lcds[BOARD_LCD_COUNT],
     ESP_ERROR_CHECK(esp_timer_create(&tick_args, &tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(tick_timer, LVGL_TICK_PERIOD_MS * 1000));
 
-    BaseType_t ok = xTaskCreate(lvgl_task, "lvgl", LVGL_TASK_STACK_SIZE, NULL,
-                                LVGL_TASK_PRIORITY, NULL);
+    // Core 0: core 1 runs the audio front end and the wake word.
+    BaseType_t ok = xTaskCreatePinnedToCore(lvgl_task, "lvgl", LVGL_TASK_STACK_SIZE, NULL,
+                                            LVGL_TASK_PRIORITY, NULL, 0);
     ESP_RETURN_ON_ERROR(ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM, TAG, "task create failed");
 
     ESP_LOGI(TAG, "Dual LVGL displays registered");

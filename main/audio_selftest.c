@@ -12,6 +12,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "link.h"
+#include "voice.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "audio_selftest";
@@ -184,6 +185,8 @@ static void cmd_rec(const char *args)
         }
     }
     memset(s_rec, 0, bytes);
+    // The wake word reads the same mic; it gets it back when we're done.
+    voice_pause(true);
 
     if (tone) {
         board_audio_set_mute(false);
@@ -202,6 +205,7 @@ static void cmd_rec(const char *args)
             err = board_audio_read(s_rec + done * BOARD_AUDIO_IN_CHANNELS, n);
         }
     }
+    voice_pause(false);
     if (tone) {
         flush_and_mute();
     }
@@ -350,10 +354,6 @@ bool audio_selftest_command(const char *cmd)
 
 void audio_selftest_start(void)
 {
-    if (board_audio_init() != ESP_OK) {
-        ESP_LOGE(TAG, "audio init failed, continuing without audio");
-        return;
-    }
     s_queue = xQueueCreate(4, CMD_MAX);
     // Core 1, above LVGL (5): I2S must be fed on time or the speaker glitches.
     if (s_queue == NULL

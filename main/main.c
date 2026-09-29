@@ -11,8 +11,11 @@
 #include "metrics_io.h"
 #include "metrics_model.h"
 #include "rpc.h"
+#include "board_audio.h"
 #include "ui_toast.h"
+#include "ui_voice.h"
 #include "ui_watch.h"
+#include "voice.h"
 
 static const char *TAG = "dualeye";
 
@@ -88,6 +91,7 @@ void app_main(void)
 
     lvgl_port_lock();
     ui_watch_create(s_displays[UI_SCREEN_CPU], s_displays[UI_SCREEN_GPU]);
+    ui_voice_create(s_displays);
     ui_toast_create(s_displays);
 
     metrics_snapshot_t snap;
@@ -99,9 +103,15 @@ void app_main(void)
         board_display_set_brightness(i, settings.brightness[i]);
     }
 
-    BaseType_t ui_ok = xTaskCreate(ui_refresh_task, "ui_refresh", 4096, NULL, 4, NULL);
+    // UI on core 0, audio (self-test, wake word) on core 1.
+    BaseType_t ui_ok = xTaskCreatePinnedToCore(ui_refresh_task, "ui_refresh", 4096, NULL, 4, NULL, 0);
     ESP_ERROR_CHECK(ui_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
-    audio_selftest_start();
+    if (board_audio_init() == ESP_OK) {
+        audio_selftest_start();
+        voice_start(settings.mic_muted);
+    } else {
+        ESP_LOGE(TAG, "audio init failed, continuing without audio");
+    }
 
     rpc_init();
     link_on_receive(LINK_CHAN_CTRL, rpc_handle);

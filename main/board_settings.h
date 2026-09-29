@@ -2,6 +2,7 @@
 
 /* What each screen shows and how: set by the host's tools, kept in NVS. */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "board_display.h"
@@ -19,6 +20,8 @@ typedef struct {
     /* Extra clockwise turn on top of the DualEye mounting: 0, 90, 180, 270. */
     uint16_t rot[BOARD_LCD_COUNT];
     uint8_t brightness[BOARD_LCD_COUNT];
+    /* The wake word isn't listened for. */
+    bool mic_muted;
 } board_settings_t;
 
 /** Open NVS and load the saved settings (defaults where none). */
@@ -31,6 +34,7 @@ esp_err_t board_settings_set_face(int screen, metrics_face_t face);
 esp_err_t board_settings_set_rotation(int screen, uint16_t degrees);
 /** Also sets the backlight right away. */
 esp_err_t board_settings_set_brightness(int screen, uint8_t percent);
+esp_err_t board_settings_set_mic_muted(bool muted);
 
 #ifdef __cplusplus
 }

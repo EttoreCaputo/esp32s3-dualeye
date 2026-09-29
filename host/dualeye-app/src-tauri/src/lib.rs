@@ -64,6 +64,8 @@ struct Link {
     /// What the board said it runs, since it connected.
     firmware: Option<BoardFirmware>,
     logs: VecDeque<String>,
+    /// What the board's voice overlay shows (`idle` until it says otherwise).
+    voice: Option<String>,
 }
 
 impl Link {
@@ -79,6 +81,7 @@ impl Link {
                 self.message = None;
                 self.sent = None;
                 self.firmware = None;
+                self.voice = None;
                 self.connected_at = Some(Instant::now());
             }
             BridgeEvent::Snapshot { snapshot, sent } => {
@@ -96,7 +99,8 @@ impl Link {
             }
             BridgeEvent::Firmware { firmware } => self.firmware = Some(firmware.clone()),
             // `AppState` keeps faces and rotation.
-            BridgeEvent::Settings { .. } => {}
+            BridgeEvent::Settings { .. } | BridgeEvent::Wake { .. } => {}
+            BridgeEvent::VoiceState { state } => self.voice = Some(state.clone()),
             BridgeEvent::Disconnected { reason, .. } => {
                 self.kind = "offline";
                 self.message = Some(reason.clone());
@@ -149,6 +153,7 @@ struct Status {
     connected_age_ms: Option<u64>,
     firmware: Option<BoardFirmware>,
     logs: Vec<String>,
+    voice: Option<String>,
     port_setting: Option<String>,
     faces: Faces,
     rotation: Rotations,
@@ -168,6 +173,7 @@ fn status(state: State<AppState>) -> Status {
         connected_age_ms: age(link.connected_at),
         firmware: link.firmware.clone(),
         logs: link.logs.iter().cloned().collect(),
+        voice: link.voice.clone(),
         port_setting: state.settings.lock().unwrap().port.clone(),
         faces: *state.faces.lock().unwrap(),
         rotation: *state.rotation.lock().unwrap(),

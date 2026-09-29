@@ -63,7 +63,12 @@ type BridgeEvent =
   | { kind: "board_log"; line: string }
   | { kind: "firmware"; firmware: BoardFirmware }
   | { kind: "settings"; faces: Faces; rotation: Rotations }
+  | { kind: "wake"; word: string; volume_db: number | null }
+  | { kind: "voice_state"; state: VoiceState }
   | { kind: "disconnected"; port: string; reason: string; permission_denied: boolean };
+
+/** What the board's "eyes" overlay shows. */
+export type VoiceState = "idle" | "listening" | "thinking" | "speaking";
 
 type Status = {
   link: Link;
@@ -75,6 +80,7 @@ type Status = {
   connected_age_ms: number | null;
   firmware: BoardFirmware | null;
   logs: string[];
+  voice: VoiceState | null;
   port_setting: string | null;
   faces: Faces;
   rotation: Rotations;
@@ -113,6 +119,8 @@ class Monitor {
   faces = $state<Faces>({ ...DEFAULT_FACES });
   /** How each screen is turned; also applies from the next line. */
   rotation = $state<Rotations>({ ...DEFAULT_ROTATIONS });
+  /** The board's voice overlay, mirrored. */
+  voice = $state<VoiceState>("idle");
 
   job = $state<DeviceJob>("idle");
   /** Output of the last esptool run. */
@@ -165,6 +173,7 @@ class Monitor {
     if (s.connected_age_ms != null) this.connectedAt = now - s.connected_age_ms;
     this.boardFirmware = s.firmware;
     this.logs = s.logs;
+    this.voice = s.voice ?? "idle";
   }
 
   #apply(e: BridgeEvent) {
@@ -182,6 +191,7 @@ class Monitor {
         this.connectedAt = now;
         this.shown = null;
         this.boardFirmware = null;
+        this.voice = "idle";
         break;
       case "snapshot":
         this.last = e.snapshot;
@@ -203,8 +213,14 @@ class Monitor {
         this.faces = e.faces;
         this.rotation = e.rotation;
         break;
+      case "wake":
+        break;
+      case "voice_state":
+        this.voice = e.state;
+        break;
       case "disconnected":
         this.link = "offline";
+        this.voice = "idle";
         this.message = e.reason;
         this.permissionDenied = e.permission_denied;
         break;
@@ -345,6 +361,13 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
   boot.forEach((line, i) => setTimeout(() => emit({ kind: "board_log", line }), 900 + i * 90));
   // Firmware from before versioning, so the update offer shows up.
   setTimeout(() => emit({ kind: "firmware", firmware: { state: "legacy" } }), 8000);
+  // Now and then someone says the wake word: listening, then thinking, then back to idle.
+  const voice = (state: VoiceState, at: number) => setTimeout(() => emit({ kind: "voice_state", state }), at);
+  setInterval(() => {
+    voice("listening", 0);
+    voice("thinking", 2500);
+    voice("idle", 4500);
+  }, 30000);
 
   const t0 = performance.now();
   const wave = (t: number, period: number, phase = 0) => Math.sin((t / period) * Math.PI * 2 + phase);

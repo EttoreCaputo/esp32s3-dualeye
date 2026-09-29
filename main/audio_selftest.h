@@ -6,8 +6,7 @@
 extern "C" {
 #endif
 
-/** Bring up the codecs and the self-test task. Failing here leaves the rest of
- * the firmware running without audio. */
+/** Start the self-test task. Call after board_audio_init() succeeded. */
 void audio_selftest_start(void);
 
 /** Queue one self-test command, from the `debug/audio` JSON-RPC method (M0

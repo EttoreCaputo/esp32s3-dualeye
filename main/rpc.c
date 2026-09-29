@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "link.h"
+#include "voice.h"
 
 #define RPC_PROTOCOL 2
 
@@ -77,8 +78,8 @@ static cJSON *identity(void)
     cJSON_AddNumberToObject(id, "max_payload", LINK_MAX_PAYLOAD);
     const char *channels[] = {"ctrl", "metrics", "log"};
     cJSON_AddItemToObject(id, "channels", cJSON_CreateStringArray(channels, 3));
-    const char *caps[] = {"tools"};
-    cJSON_AddItemToObject(id, "capabilities", cJSON_CreateStringArray(caps, 1));
+    const char *caps[] = {"tools", "voice"};
+    cJSON_AddItemToObject(id, "capabilities", cJSON_CreateStringArray(caps, voice_available() ? 2 : 1));
     return id;
 }
 
@@ -89,13 +90,20 @@ void rpc_init(void)
     cJSON_InitHooks(&hooks);
 }
 
-void rpc_announce(void)
+void rpc_notify(const char *method, cJSON *params)
 {
     cJSON *msg = cJSON_CreateObject();
     cJSON_AddStringToObject(msg, "jsonrpc", "2.0");
-    cJSON_AddStringToObject(msg, "method", "ready");
-    cJSON_AddItemToObject(msg, "params", identity());
+    cJSON_AddStringToObject(msg, "method", method);
+    if (params != NULL) {
+        cJSON_AddItemToObject(msg, "params", params);
+    }
     send_message(msg);
+}
+
+void rpc_announce(void)
+{
+    rpc_notify("ready", identity());
 }
 
 void rpc_handle(uint8_t *payload, size_t len)
@@ -133,6 +141,20 @@ void rpc_handle(uint8_t *payload, size_t len)
         } else if ((result = board_tools_call(tool->valuestring, args)) == NULL) {
             code = RPC_INVALID_PARAMS;
             message = "unknown tool";
+        }
+    } else if (strcmp(name, "voice/state") == 0) {
+        // The host's voice pipeline says what the eyes show (thinking, speaking, ...).
+        const cJSON *state = cJSON_GetObjectItemCaseSensitive(params, "state");
+        voice_state_t s;
+        if (!cJSON_IsString(state) || !voice_state_from_name(state->valuestring, &s)) {
+            code = RPC_INVALID_PARAMS;
+            message = "expected {\"state\": \"idle\" | \"listening\" | \"thinking\" | \"speaking\"}";
+        } else if (!voice_available()) {
+            code = RPC_INVALID_PARAMS;
+            message = "voice not available";
+        } else {
+            voice_set_state(s);
+            result = cJSON_CreateObject();
         }
     } else if (strcmp(name, "debug/audio") == 0) {
         const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(params, "cmd");

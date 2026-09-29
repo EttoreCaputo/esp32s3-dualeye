@@ -75,12 +75,14 @@ Done when: Claude Code changes faces and shows text on the board.
 
 Goal: always-on wake-word detection without hurting the UI.
 
-- [ ] Custom partition table with a `model` partition; update the flasher and the merged image in `firmware.rs`
-- [ ] ESP-SR: AFE (NS, AGC, AEC if available) + WakeNet with a built-in word ("Hi ESP") as a bootstrap; audio task pinned to core 1
+- [x] Custom partition table with a `model` partition (`partitions.csv`, right after a 3 MB app; NVS where it was). `idf.py merge-bin` puts `srmodels.bin` in the merged image, so the flasher (one image at 0x0) and `firmware.rs` (first app partition) needed no change; the image grows to 3.5 MB
+- [x] ESP-SR 2.5.5 on IDF 6.1: AFE (`MRNN`: mic, speaker loopback) with AEC and VAD + WakeNet9 "Hi ESP" as a bootstrap (`main/voice.c`); feed and fetch tasks on core 1, LVGL and UI refresh pinned to core 0; CPU at 240 MHz, caches 32 KB I / 64 KB D. NS is not in the SR pipeline by design and AGC is left for the M4 stream. LVGL's 128 KB heap moved to PSRAM (`main/linker.lf`) to make room in internal RAM
+- [x] Mic at 37.5 dB (maximum), loopback kept at 30 dB
 - [ ] Spike: train a **"Hey Duo"** model with microWakeWord (Piper-generated IT/EN samples plus negatives); run it on the board after the AFE
 - [ ] Switch the default wake word to "Hey Duo" once it meets the targets below; keep "Hi ESP" as a fallback option
-- [ ] "Eyes" states: idle → listening → thinking → speaking (LVGL overlay on both screens)
-- [ ] Wake event sent to the host (`ctrl` notification); mute and unmute tool
+- [x] "Eyes" states: idle → listening → thinking → speaking: a ring round both screens (`main/ui_voice.c`), mirrored in the app; the host sets thinking and speaking with `voice/state`
+- [x] Wake event sent to the host (`wake` and `voice_state` notifications, `BridgeEvent::Wake` / `VoiceState`); `set_mic` tool, mute kept in NVS
+- [x] UI load in `get_state` (`ui.busy_pct`, `ui.max_frame_ms`)
 - [ ] Measurements: wake-word hit rate and false triggers per hour, frame-time impact on LVGL
 
 Done when: at least 90 % detection at 1–2 m in a quiet room, fewer than 1 false trigger per hour, and no visible UI stutter.

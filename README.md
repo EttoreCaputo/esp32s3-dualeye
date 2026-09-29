@@ -112,7 +112,7 @@ The board's tools, plus two that read this computer, are available to any [MCP](
 
 | Tool | From | Does |
 |------|------|------|
-| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `get_state` | Board | Passed through as the firmware describes them in `tools/list` ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
+| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `set_mic`, `get_state` | Board | Passed through as the firmware describes them in `tools/list` ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
 | `get_metrics` | Host | CPU and GPU temperature, load, clock, power, memory, fans |
 | `get_claude_usage` | Host | Claude Code tokens in the 5-hour window and today, plan limits used, time to reset, working or idle |
 
@@ -137,6 +137,12 @@ For Claude Desktop, add the same command to `claude_desktop_config.json` (Settin
 Only one process can hold the serial port. While the app (or `dualeye` streaming) runs, the MCP server goes through it over a local socket: the bridge listens on `127.0.0.1` and leaves the port and a random token in `hub.json` in DualEye's data folder (`~/Library/Application Support/dualeye` on macOS, `%APPDATA%\dualeye` on Windows, `~/.config/dualeye` on Linux), readable by you only. A face or rotation changed this way shows up in the app and is saved in its settings. When nothing streams, the MCP server opens the port for each call and closes it right after, so the app can still start. Any number of MCP clients can run at once.
 
 The last list of board tools is kept in `board-tools.json` in the same folder, so they are listed even when the client starts while the board is unplugged; a call then says why it can't run. The server tells the client when the board's tools turn up later.
+
+## Wake word (preview)
+
+The board listens for a wake word with Espressif's [ESP-SR](https://github.com/espressif/esp-sr): the ES7210 mic and the speaker loopback go through its audio front end (echo cancellation, voice activity) into WakeNet, on core 1, with the UI on core 0. For now the word is **"Hi ESP"**, a built-in WakeNet model; a custom "Hey Duo" comes later ([docs/ROADMAP.md](docs/ROADMAP.md)). When it hears it, a cyan ring lights round both screens (and in the app's mirror) for a few seconds, and the host gets a `wake` notification (`dualeye` prints it). Speech-to-text and replies are the next milestones: nothing is recorded or leaves the board yet.
+
+Mute the mic with the `set_mic` tool (`dualeye call set_mic --muted true`, or ask Claude through MCP); the board remembers it. The models sit in their own `model` partition ([partitions.csv](partitions.csv)), written by the app's flasher as part of the merged image.
 
 ## Desktop app
 
@@ -174,12 +180,13 @@ The app talks to the bridge through `dualeye_core::Bridge`; its events (`waiting
 ### Repository layout
 
 ```
-main/                     firmware (ESP-IDF component: display, LVGL UI, metrics parser)
+main/                     firmware (ESP-IDF component: display, LVGL UI, metrics parser, audio, wake word)
 build/merged-binary.bin   firmware image the desktop app flashes (the only tracked file in build/)
 version.txt               firmware version, built into the image
 FIRMWARE_CHANGELOG.md     what each firmware version changes, shown by the app's update offer
 .github/workflows/        release pipeline
 sdkconfig.defaults        firmware config (target esp32s3, 16 MB flash, USB Serial/JTAG console)
+partitions.csv            flash layout: app, then the ESP-SR `model` partition
 .devcontainer/            ESP-IDF container for VS Code
 host/                     Cargo workspace
   dualeye-core/           sensors, Claude Code usage, snapshot, serial bridge, esptool setup/flash (library)

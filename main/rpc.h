@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "cJSON.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -16,6 +18,9 @@ void rpc_handle(uint8_t *payload, size_t len);
 
 /** Send the `ready` notification: the board is up (again). */
 void rpc_announce(void);
+
+/** Send notification `method` with `params` (taken over; NULL for none). Any task. */
+void rpc_notify(const char *method, cJSON *params);
 
 #ifdef __cplusplus
 }

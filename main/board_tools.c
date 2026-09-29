@@ -11,6 +11,7 @@
 #include "lvgl_port.h"
 #include "metrics_model.h"
 #include "ui_toast.h"
+#include "voice.h"
 
 #define TEXT_MAX 160
 
@@ -154,6 +155,25 @@ static bool tool_show_text(const cJSON *args, char *text, cJSON **structured)
     return true;
 }
 
+static bool tool_set_mic(const cJSON *args, char *text, cJSON **structured)
+{
+    const cJSON *muted = cJSON_GetObjectItemCaseSensitive(args, "muted");
+    if (!cJSON_IsBool(muted)) {
+        snprintf(text, TEXT_MAX, "muted must be true or false");
+        return false;
+    }
+    if (!voice_available()) {
+        snprintf(text, TEXT_MAX, "voice is not available on this board");
+        return false;
+    }
+    bool on = cJSON_IsTrue(muted);
+    board_settings_set_mic_muted(on);
+    voice_set_muted(on);
+    snprintf(text, TEXT_MAX, on ? "microphone muted: not listening for \"%s\"" : "listening for \"%s\"",
+             voice_wake_word());
+    return true;
+}
+
 static const char *metrics_state_name(metrics_ui_state_t state)
 {
     switch (state) {
@@ -188,6 +208,19 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
         cJSON_AddNumberToObject(s, "rotation", settings.rot[i]);
         cJSON_AddNumberToObject(s, "brightness", settings.brightness[i]);
     }
+    cJSON *voice = cJSON_AddObjectToObject(st, "voice");
+    cJSON_AddBoolToObject(voice, "available", voice_available());
+    if (voice_available()) {
+        cJSON_AddStringToObject(voice, "wake_word", voice_wake_word());
+        cJSON_AddStringToObject(voice, "model", voice_wake_model());
+        cJSON_AddBoolToObject(voice, "muted", voice_muted());
+        cJSON_AddStringToObject(voice, "state", voice_state_name(voice_state()));
+    }
+    lvgl_port_stats_t ui;
+    lvgl_port_get_stats(&ui);
+    cJSON *u = cJSON_AddObjectToObject(st, "ui");
+    cJSON_AddNumberToObject(u, "busy_pct", (int) (ui.busy_pct * 10.0f + 0.5f) / 10.0);
+    cJSON_AddNumberToObject(u, "max_frame_ms", (int) (ui.max_us / 100) / 10.0);
     cJSON *mem = cJSON_AddObjectToObject(st, "memory");
     cJSON_AddNumberToObject(mem, "internal_free", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(mem, "internal_min", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
@@ -242,9 +275,15 @@ static const tool_t TOOLS[] = {
         .fn = tool_show_text,
     },
     {
+        .name = "set_mic",
+        .description = "Mute or unmute the microphone. Muted, the board doesn't listen for its wake word.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"muted\":{\"type\":\"boolean\"}},\"required\":[\"muted\"]}",
+        .fn = tool_set_mic,
+    },
+    {
         .name = "get_state",
-        .description = "Read the board's state: firmware, uptime, whether metrics are live, and each screen's face, "
-                       "rotation and brightness.",
+        .description = "Read the board's state: firmware, uptime, whether metrics are live, each screen's face, "
+                       "rotation and brightness, the voice state (wake word, muted, listening) and how busy the UI is.",
         .schema = "{\"type\":\"object\",\"properties\":{}}",
         .fn = tool_get_state,
     },

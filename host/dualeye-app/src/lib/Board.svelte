@@ -5,9 +5,9 @@
 <script lang="ts">
   import Eye from "./Eye.svelte";
   import type { Rotations, Screen } from "./firmware";
-  import type { BoardState } from "./monitor.svelte";
+  import type { BoardState, VoiceState } from "./monitor.svelte";
 
-  let { cpu, gpu, board, size, cpuGlow, gpuGlow, pixels = false, rotation = { cpu: 0, gpu: 0 } }: {
+  let { cpu, gpu, board, size, cpuGlow, gpuGlow, pixels = false, rotation = { cpu: 0, gpu: 0 }, voice = "idle" }: {
     cpu: Screen;
     gpu: Screen;
     /** How the board has turned each screen: shown as a badge, the mirror stays upright to stay readable. */
@@ -17,6 +17,8 @@
     cpuGlow: { color: string; level: number };
     gpuGlow: { color: string; level: number };
     pixels?: boolean;
+    /** The board's voice overlay: a ring round both screens, as the firmware draws it (ui_voice.c). */
+    voice?: VoiceState;
   } = $props();
 
   let tiltX = $state(0);
@@ -81,6 +83,7 @@
       <div class="bezel">
         <div class="well" class:inspect={pixels} role="presentation" onpointermove={(e) => inspect("cpu", e)} onpointerleave={() => (loupe = null)}>
           <Eye id="cpu" screen={cpu} {board} size={lcd} />
+          {#if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
           <div class="glass"></div>
           {#if pixels && loupe?.id === "cpu"}
             <div class="loupe" style:left="{loupe.x}px" style:top="{loupe.y}px" style:--l="{LOUPE}px">
@@ -140,6 +143,7 @@
       <div class="bezel">
         <div class="well" class:inspect={pixels} role="presentation" onpointermove={(e) => inspect("gpu", e)} onpointerleave={() => (loupe = null)}>
           <Eye id="gpu" screen={gpu} {board} size={lcd} />
+          {#if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
           <div class="glass"></div>
           {#if pixels && loupe?.id === "gpu"}
             <div class="loupe" style:left="{loupe.x}px" style:top="{loupe.y}px" style:--l="{LOUPE}px">
@@ -287,6 +291,31 @@
   }
 
   /* Cover glass: a specular highlight that drifts against the tilt, plus a soft streak. */
+  /* 8 px of the 240 px panel, colours from main/ui_voice.c. */
+  .voice {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    pointer-events: none;
+    --w: calc(var(--d) * 0.915 * 8 / 240);
+    mask: radial-gradient(closest-side, transparent calc(100% - var(--w)), #000 calc(100% - var(--w) + 0.5px));
+  }
+  .voice.listening {
+    background: #30d5f0;
+  }
+  .voice.speaking {
+    background: #40e080;
+  }
+  .voice.thinking {
+    background: conic-gradient(#ffb020 0deg 70deg, transparent 70deg);
+    animation: voice-spin 1.2s linear infinite;
+  }
+  @keyframes voice-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   .glass {
     position: absolute;
     inset: 0;

@@ -15,7 +15,9 @@ static const char *TAG = "board_audio";
 #define AUDIO_DMA_DESC_NUM 6
 #define AUDIO_DMA_FRAME_NUM 240
 #define AUDIO_DEFAULT_VOLUME 60
-#define AUDIO_DEFAULT_IN_GAIN_DB 30.0f
+/* M0: speech at 30 dB was ~25 dB below ideal; the AFE's AGC does the rest. */
+#define AUDIO_MIC_GAIN_DB 37.5f
+#define AUDIO_REF_GAIN_DB 30.0f
 
 static i2c_master_bus_handle_t s_i2c;
 static i2s_chan_handle_t s_tx;
@@ -175,7 +177,11 @@ esp_err_t board_audio_init(void)
     ESP_RETURN_ON_ERROR(i2s_start(), TAG, "i2s");
     ESP_RETURN_ON_ERROR(codecs_start(), TAG, "codecs");
     ESP_RETURN_ON_ERROR(board_audio_set_volume(AUDIO_DEFAULT_VOLUME), TAG, "volume");
-    ESP_RETURN_ON_ERROR(board_audio_set_in_gain(AUDIO_DEFAULT_IN_GAIN_DB), TAG, "gain");
+    ESP_RETURN_ON_ERROR(board_audio_set_in_gain(AUDIO_REF_GAIN_DB), TAG, "gain");
+    ESP_RETURN_ON_FALSE(esp_codec_dev_set_in_channel_gain(s_in, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(BOARD_AUDIO_MIC_SLOT),
+                                                          AUDIO_MIC_GAIN_DB)
+                            == ESP_CODEC_DEV_OK,
+                        ESP_FAIL, TAG, "mic gain");
     ESP_RETURN_ON_ERROR(board_audio_set_mute(true), TAG, "mute");
     ESP_LOGI(TAG, "ES8311 + ES7210 ready, %d Hz", BOARD_AUDIO_SAMPLE_RATE);
     return ESP_OK;
