@@ -284,6 +284,44 @@
     if (open && e.key === "Escape") open = false;
   }
 
+  // Drag the left edge to widen the drawer; the width is kept across launches.
+  const MIN_W = 380;
+  const MAX_W = 720;
+  const WIDTH_KEY = "dualeye.drawerWidth";
+  let width = $state(460);
+  let resizing = $state(false);
+  try {
+    const saved = Number(localStorage.getItem(WIDTH_KEY));
+    if (saved) width = Math.min(MAX_W, Math.max(MIN_W, saved));
+  } catch {}
+
+  function startResize(e: PointerEvent) {
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+    resizing = true;
+    const [x0, w0] = [e.clientX, width];
+    const move = (ev: PointerEvent) => (width = Math.min(MAX_W, Math.max(MIN_W, w0 + x0 - ev.clientX)));
+    const end = () => {
+      resizing = false;
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", end);
+      try {
+        localStorage.setItem(WIDTH_KEY, String(Math.round(width)));
+      } catch {}
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+  }
+
+  function resetWidth() {
+    width = 460;
+    try {
+      localStorage.removeItem(WIDTH_KEY);
+    } catch {}
+  }
+
   function scrolled() {
     if (!consoleEl) return;
     follow = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 24;
@@ -307,7 +345,15 @@
 
 {#if open}
   <button class="scrim" transition:fade={{ duration: 200 }} onclick={() => (open = false)} aria-label="Close settings"></button>
-  <aside class="drawer" transition:fly={{ x: 40, duration: 320, easing: cubicOut, opacity: 0 }} aria-label="Settings">
+  <aside
+    class="drawer"
+    class:resizing
+    style:--w="{width}px"
+    transition:fly={{ x: 40, duration: 320, easing: cubicOut, opacity: 0 }}
+    aria-label="Settings"
+  >
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="grip" onpointerdown={startResize} ondblclick={resetWidth} title="Drag to resize, double-click to reset"></div>
     <nav>
       {#each TABS as [key, label] (key)}
         <button class:active={tab === key} onclick={() => (tab = key)}>{label}</button>
@@ -926,7 +972,7 @@
     top: 10px;
     right: 10px;
     bottom: 10px;
-    width: min(400px, calc(100vw - 20px));
+    width: min(var(--w, 460px), calc(100vw - 20px));
     display: flex;
     flex-direction: column;
     border-radius: 20px;
@@ -937,6 +983,38 @@
       0 40px 80px -20px rgba(0, 0, 0, 0.8),
       inset 0 1px 0 rgba(255, 255, 255, 0.06);
     overflow: hidden;
+  }
+
+  .drawer.resizing {
+    user-select: none;
+    cursor: ew-resize;
+  }
+  .grip {
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 8px;
+    cursor: ew-resize;
+    touch-action: none;
+  }
+  .grip::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 3px;
+    width: 3px;
+    height: 36px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.18);
+    transform: translateY(-50%);
+    opacity: 0;
+    transition: opacity 160ms;
+  }
+  .grip:hover::after,
+  .resizing .grip::after {
+    opacity: 1;
   }
 
   nav {

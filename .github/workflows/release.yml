@@ -105,9 +105,11 @@ jobs:
             awk -v v="$FIRMWARE" '/^## /{p = ($2 == v || $2 == "v" v); next} p' FIRMWARE_CHANGELOG.md
             echo
             echo "### Downloads"
-            echo "- **Windows**: the \`.msi\` or \`-setup.exe\` installer."
-            echo "- **macOS**: the \`.dmg\` (\`aarch64\` for Apple Silicon, \`x64\` for Intel). The app isn't signed: the first time, right-click it and choose Open, or run \`xattr -cr /Applications/DualEye.app\`."
-            echo "- **Linux**: the \`.AppImage\`, \`.deb\` or \`.rpm\`."
+            echo "- **Windows**: \`DualEye_${app}_windows-x64-setup.exe\` or \`.msi\`."
+            echo "- **macOS Apple Silicon** (M1 and later): \`DualEye_${app}_macos-apple-silicon.dmg\`."
+            echo "- **macOS Intel**: \`DualEye_${app}_macos-intel.dmg\`."
+            echo "  The app isn't signed: the first time, right-click it and choose Open, or run \`xattr -cr /Applications/DualEye.app\`."
+            echo "- **Linux**: \`DualEye_${app}_linux-x64\` as \`.AppImage\`, \`.deb\` or \`.rpm\`."
             echo "- \`dualeye-firmware-$FIRMWARE.bin\`: the merged image alone, to flash at 0x0 with esptool."
             echo
             echo "Voice: the app ships whisper.cpp and llama.cpp (MIT); it downloads the models, and installs Piper (GPL-3.0) when you ask. See docs/licenses.md."
@@ -133,16 +135,20 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-22.04
+            platform: linux-x64
             args: ""
           - name: Windows
             os: windows-latest
+            platform: windows-x64
             args: ""
           - name: macOS Apple Silicon
             os: macos-latest
+            platform: macos-apple-silicon
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
           - name: macOS Intel
             os: macos-latest
+            platform: macos-intel
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
@@ -200,4 +206,6 @@ jobs:
         with:
           projectPath: host/dualeye-app
           releaseId: ${{ needs.release.outputs.id }}
+          # e.g. DualEye_1.0.0_macos-apple-silicon.dmg, DualEye_1.0.0_windows-x64-setup.exe
+          assetNamePattern: "[name]_[version]_${{ matrix.platform }}[setup][ext]"
           args: ${{ matrix.args }} --config src-tauri/tauri.sidecars.conf.json

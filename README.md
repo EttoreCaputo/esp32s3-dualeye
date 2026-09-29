@@ -390,7 +390,7 @@ Where things live in the app:
 
 ### Releases
 
-Every push to `main` runs [`.github/workflows/release.yml`](.github/workflows/release.yml): it builds the firmware with ESP-IDF v6.1 (`idf.py build merge-bin`), checks that the image carries `version.txt` and that the changelog has a section for it, then builds the app on Linux (AppImage, deb, rpm), Windows (msi, NSIS) and macOS (dmg, Apple Silicon and Intel) with that fresh image embedded, and uploads everything, plus the bare firmware image, to the GitHub release `v<version>` from `src-tauri/tauri.conf.json`. Bump that version to cut a new release; until then each merge replaces the assets of the current one. The builds aren't code-signed, so macOS and Windows warn on first launch.
+Every push to `main` runs [`.github/workflows/release.yml`](.github/workflows/release.yml): it builds the firmware with ESP-IDF v6.1 (`idf.py build merge-bin`), checks that the image carries `version.txt` and that the changelog has a section for it, then builds the app on Linux (AppImage, deb, rpm), Windows (msi, NSIS) and macOS (dmg, Apple Silicon and Intel) with that fresh image embedded, and uploads everything, plus the bare firmware image, to the GitHub release `v<version>` from `src-tauri/tauri.conf.json`, as `DualEye_<version>_<platform>` with `linux-x64`, `windows-x64`, `macos-apple-silicon` or `macos-intel`. Bump that version to cut a new release; until then each merge replaces the assets of the current one. The builds aren't code-signed, so macOS and Windows warn on first launch.
 
 ### Checks
 
