@@ -1,11 +1,13 @@
 #pragma once
 
-/* Always-on wake word: I2S mic + speaker loopback -> ESP-SR AFE (AEC, NS,
- * AGC) -> WakeNet, on core 1. Drives the voice state the "eyes" overlay
+/* Always-on wake word: I2S mic + speaker loopback -> ESP-SR AFE (AEC,
+ * VAD) -> WakeNet, on core 1. Drives the voice state the "eyes" overlay
  * shows and tells the host with `wake` and `voice_state` notifications
  * (docs/protocol.md). */
 
 #include <stdbool.h>
+
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,9 +22,10 @@ typedef enum {
 } voice_state_t;
 
 /** Load the models from the `model` partition and start the tasks. Call
- * after board_audio_init(). Failing leaves the rest of the firmware running
- * without voice. */
-void voice_start(bool muted);
+ * after board_audio_init(). `wake_word` is an id from voice_wake_words();
+ * NULL, empty or unknown picks "alexa" (or the first WakeNet there is).
+ * Failing leaves the rest of the firmware running without voice. */
+void voice_start(bool muted, const char *wake_word);
 
 /** True once the wake word runs (models found, tasks started). */
 bool voice_available(void);
@@ -43,10 +46,21 @@ void voice_set_state(voice_state_t state);
 const char *voice_state_name(voice_state_t state);
 bool voice_state_from_name(const char *name, voice_state_t *out);
 
-/** The WakeNet model in use, e.g. "wn9_hiesp", or NULL without voice. */
+/** The WakeNet model in use, e.g. "wn9_alexa", or NULL without voice. */
 const char *voice_wake_model(void);
-/** Its wake word as people say it, e.g. "Hi ESP". */
+/** Its wake word as people say it, e.g. "Alexa". */
 const char *voice_wake_word(void);
+/** And as voice_set_wake_word() takes it, e.g. "alexa". */
+const char *voice_wake_word_id(void);
+
+/** The wake-word ids the `model` partition has models for ("alexa",
+ * "hiesp"), at most `max`; returns how many. */
+int voice_wake_words(const char **ids, int max);
+
+/** Listen for another wake word from now on: rebuilds the AFE, which takes
+ * a moment (and waits for a self-test `rec` to finish). ESP_ERR_NOT_FOUND
+ * when there's no model for `id`. */
+esp_err_t voice_set_wake_word(const char *id);
 
 #ifdef __cplusplus
 }

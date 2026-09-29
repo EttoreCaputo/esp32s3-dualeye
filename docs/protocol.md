@@ -58,7 +58,7 @@ Notifications from the board:
 | Method | Params | When |
 |--------|--------|------|
 | `ready` | Same as the `hello` result | Once at boot, when the link is up. A host that sees it knows the board rebooted |
-| `wake` | `{"word":"Hi ESP","model":"wn9_hiesp","volume_db":-45}` | The wake word was heard (`volume_db`: input level in dBFS). The board then shows `listening` |
+| `wake` | `{"word":"Alexa","model":"wn9_alexa","volume_db":-45}` | The wake word was heard (`volume_db`: input level in dBFS). The board then shows `listening` |
 | `voice_state` | `{"state":"listening"}` | The voice overlay changed: on the wake word, after a timeout, or after `voice/state` |
 
 ### `metrics`
@@ -92,7 +92,7 @@ When the host sees `ready` it repeats step 3. A board that never answers `hello`
 
 ## Board tools
 
-Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` is the default where a tool takes `screen`. Faces, rotation, brightness and the mic mute are kept in NVS and survive a reboot.
+Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` is the default where a tool takes `screen`. Faces, rotation, brightness, the mic mute and the wake word are kept in NVS and survive a reboot.
 
 | Tool | Arguments | Effect |
 |------|-----------|--------|
@@ -101,7 +101,8 @@ Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` i
 | `set_brightness` | `percent`: 0–100; `screen` | Backlight level (0 turns it off) |
 | `show_text` | `text` (up to 120 characters, ASCII); `screen`; `seconds`: 1–30, default 4 | Show a message over the face, then hide it |
 | `set_mic` | `muted`: boolean | Stop or restart listening for the wake word. Muted, the mic isn't read at all |
-| `get_state` | none | Firmware, uptime, metrics state, each screen's face, rotation and brightness, voice (`available`, `wake_word`, `model`, `muted`, `state`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (as `structuredContent`) |
+| `set_wake_word` | `word`: `alexa` (default) · `hiesp` | Listen for "Alexa" or "Hi ESP" from now on. Refused when the `model` partition has no model for it |
+| `get_state` | none | Firmware, uptime, metrics state, each screen's face, rotation and brightness, voice (`available`, `wake_word`, `wake_word_id`, `model`, `wake_words` the board has models for, `muted`, `state`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (as `structuredContent`) |
 
 Example:
 

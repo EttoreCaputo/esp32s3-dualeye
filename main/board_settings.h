@@ -22,6 +22,8 @@ typedef struct {
     uint8_t brightness[BOARD_LCD_COUNT];
     /* The wake word isn't listened for. */
     bool mic_muted;
+    /* voice_wake_words() id; empty for the default. */
+    char wake_word[16];
 } board_settings_t;
 
 /** Open NVS and load the saved settings (defaults where none). */
@@ -35,6 +37,7 @@ esp_err_t board_settings_set_rotation(int screen, uint16_t degrees);
 /** Also sets the backlight right away. */
 esp_err_t board_settings_set_brightness(int screen, uint8_t percent);
 esp_err_t board_settings_set_mic_muted(bool muted);
+esp_err_t board_settings_set_wake_word(const char *id);
 
 #ifdef __cplusplus
 }

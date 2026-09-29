@@ -174,6 +174,31 @@ static bool tool_set_mic(const cJSON *args, char *text, cJSON **structured)
     return true;
 }
 
+static bool tool_set_wake_word(const cJSON *args, char *text, cJSON **structured)
+{
+    const cJSON *word = cJSON_GetObjectItemCaseSensitive(args, "word");
+    if (!cJSON_IsString(word)) {
+        snprintf(text, TEXT_MAX, "word must be a string");
+        return false;
+    }
+    if (!voice_available()) {
+        snprintf(text, TEXT_MAX, "voice is not available on this board");
+        return false;
+    }
+    esp_err_t err = voice_set_wake_word(word->valuestring);
+    if (err == ESP_ERR_NOT_FOUND) {
+        snprintf(text, TEXT_MAX, "no model for \"%s\" on this board", word->valuestring);
+        return false;
+    }
+    if (err != ESP_OK) {
+        snprintf(text, TEXT_MAX, "switching failed, still listening for \"%s\"", voice_wake_word());
+        return false;
+    }
+    board_settings_set_wake_word(voice_wake_word_id());
+    snprintf(text, TEXT_MAX, "wake word is now \"%s\"", voice_wake_word());
+    return true;
+}
+
 static const char *metrics_state_name(metrics_ui_state_t state)
 {
     switch (state) {
@@ -212,7 +237,11 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
     cJSON_AddBoolToObject(voice, "available", voice_available());
     if (voice_available()) {
         cJSON_AddStringToObject(voice, "wake_word", voice_wake_word());
+        cJSON_AddStringToObject(voice, "wake_word_id", voice_wake_word_id());
         cJSON_AddStringToObject(voice, "model", voice_wake_model());
+        const char *ids[8];
+        int n = voice_wake_words(ids, 8);
+        cJSON_AddItemToObject(voice, "wake_words", cJSON_CreateStringArray(ids, n));
         cJSON_AddBoolToObject(voice, "muted", voice_muted());
         cJSON_AddStringToObject(voice, "state", voice_state_name(voice_state()));
     }
@@ -279,6 +308,14 @@ static const tool_t TOOLS[] = {
         .description = "Mute or unmute the microphone. Muted, the board doesn't listen for its wake word.",
         .schema = "{\"type\":\"object\",\"properties\":{\"muted\":{\"type\":\"boolean\"}},\"required\":[\"muted\"]}",
         .fn = tool_set_mic,
+    },
+    {
+        .name = "set_wake_word",
+        .description = "Choose the word the board listens for before a voice command. The board remembers it.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"word\":{\"type\":\"string\","
+                  "\"enum\":[\"alexa\",\"hiesp\"],\"description\":\"alexa: say Alexa (default); hiesp: say Hi ESP\"}},"
+                  "\"required\":[\"word\"]}",
+        .fn = tool_set_wake_word,
     },
     {
         .name = "get_state",

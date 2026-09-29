@@ -1,5 +1,7 @@
 #include "board_settings.h"
 
+#include <string.h>
+
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -16,6 +18,7 @@ static const char *const FACE_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "face_c
 static const char *const BL_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "bl_cpu", [UI_SCREEN_GPU] = "bl_gpu"};
 
 #define MIC_MUTED_KEY "mic_muted"
+#define WAKE_WORD_KEY "wake_word"
 
 static SemaphoreHandle_t s_lock;
 static board_settings_t s_settings;
@@ -48,6 +51,10 @@ static void load(void)
     uint8_t muted = 0;
     if (nvs_get_u8(nvs, MIC_MUTED_KEY, &muted) == ESP_OK) {
         s_settings.mic_muted = muted != 0;
+    }
+    size_t len = sizeof(s_settings.wake_word);
+    if (nvs_get_str(nvs, WAKE_WORD_KEY, s_settings.wake_word, &len) != ESP_OK) {
+        s_settings.wake_word[0] = '\0';
     }
     nvs_close(nvs);
 }
@@ -150,6 +157,33 @@ esp_err_t board_settings_set_mic_muted(bool muted)
     xSemaphoreGive(s_lock);
     if (changed) {
         save(MIC_MUTED_KEY, muted, false);
+    }
+    return ESP_OK;
+}
+
+esp_err_t board_settings_set_wake_word(const char *id)
+{
+    if (strlen(id) >= sizeof(s_settings.wake_word)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool changed = strcmp(s_settings.wake_word, id) != 0;
+    strlcpy(s_settings.wake_word, id, sizeof(s_settings.wake_word));
+    xSemaphoreGive(s_lock);
+    if (!changed) {
+        return ESP_OK;
+    }
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, WAKE_WORD_KEY, id);
+        if (err == ESP_OK) {
+            err = nvs_commit(nvs);
+        }
+        nvs_close(nvs);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "saving %s failed: %s", WAKE_WORD_KEY, esp_err_to_name(err));
     }
     return ESP_OK;
 }

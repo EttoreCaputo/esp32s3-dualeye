@@ -88,7 +88,7 @@ Audio is raw PCM on USB; Opus is unnecessary without Wi-Fi.
 ### 3. Wake word on the board, the rest on the host
 
 - ESP-SR **AFE** (noise suppression, AEC if a reference exists, AGC) → **WakeNet** → **VAD** end-of-utterance.
-- Wake word: **"Hey Duo"**. It is not one of WakeNet's built-in words ("Hi ESP", "Alexa", "Jarvis", "Computer", …), so it has to be trained:
+- Wake word: ~~**"Hey Duo"**~~ **"Alexa"**, a built-in WakeNet9 model, with "Hi ESP" as the other choice (decided in M3: training a custom word is put off). "Hey Duo" is not one of WakeNet's built-in words ("Hi ESP", "Alexa", "Jarvis", "Computer", …), so it has to be trained:
   - **Preferred: [microWakeWord](https://github.com/kahrendt/microWakeWord)** (TensorFlow Lite Micro, used by ESPHome on ESP32-S3). It is trained on synthetic samples generated with Piper, so it is free and reproducible, and the model is about 50 KB. It runs after ESP-SR's AFE (or directly on the mic stream).
   - Alternative: Espressif's paid WakeNet customization service (needs a recorded dataset and has a turnaround time).
   - Bootstrap: develop M3 with a built-in WakeNet word ("Hi ESP") so the pipeline doesn't wait on training; swap in "Hey Duo" once its model meets the M3 targets.
@@ -145,10 +145,10 @@ Wi-Fi or standalone mode, on-board LLM, cloud STT/LLM/TTS, multiple boards on on
 
 ## Decisions
 
-- Wake word: **"Hey Duo"**, trained with microWakeWord (fallback: Espressif customization service).
+- Wake word: **"Alexa"** (WakeNet9, built in); "Hi ESP" selectable. ~~"Hey Duo", trained with microWakeWord~~: put off in M3.
 - The MCP server also exposes **host tools** (metrics, Claude Code usage), so the assistant can answer "how hot is the GPU?".
 - Voice is an **opt-in** toggle in the app until M7.
 
 ## Open questions
 
-1. Is microWakeWord accuracy on "Hey Duo" good enough with the board's mic and AFE? (M3 spike)
+1. ~~Is microWakeWord accuracy on "Hey Duo" good enough with the board's mic and AFE? (M3 spike)~~ Put off: M3 ships a built-in word

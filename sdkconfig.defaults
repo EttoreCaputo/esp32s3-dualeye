@@ -36,7 +36,9 @@ CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# Wake word: "Hi ESP" (WakeNet9) until "Hey Duo" is trained
+# Wake words (WakeNet9): "Alexa" by default, "Hi ESP" with set_wake_word.
+# The first one is what afe_config_init() picks; voice.c chooses by name.
+CONFIG_SR_WN_WN9_ALEXA=y
 CONFIG_SR_WN_WN9_HIESP=y
 CONFIG_SR_MN_CN_NONE=y
 CONFIG_SR_MN_EN_NONE=y

@@ -21,7 +21,7 @@ M0 Audio bring-up ─► M1 Protocol v2 ─► M2 MCP server ──────�
 | M0 | Audio bring-up | 0.4.0-dev | Tone from the speaker; a mic recording saved as WAV on the host |
 | M1 | Protocol v2 (framed JSON-RPC over USB) | 0.4.0 | `dualeye call set_face --screen left --face rings` works; logs and metrics unaffected |
 | M2 | MCP server | 0.4.x | Claude Code controls the screens |
-| M3 | Wake word ("Hey Duo") + "listening" UI | 0.5.0 | Say "Hey Duo" and the eyes react |
+| M3 | Wake word ("Alexa") + "listening" UI | 0.5.0 | Say "Alexa" and the eyes react |
 | M4 | Mic streaming + STT | 0.5.x | Transcript (IT/EN) shown in the app |
 | M5 | TTS → speaker | 0.6.0 | The board speaks a reply |
 | M6 | Local LLM agent (llama.cpp) | 0.6.x | "Metti la faccia rings a sinistra" / "Put rings on the left" works end to end |
@@ -71,19 +71,19 @@ Goal: board tools available to any MCP client. This is a useful milestone on its
 
 Done when: Claude Code changes faces and shows text on the board.
 
-## M3 — Wake word ("Hey Duo") + listening UI
+## M3 — Wake word ("Alexa") + listening UI
 
 Goal: always-on wake-word detection without hurting the UI.
 
-- [x] Custom partition table with a `model` partition (`partitions.csv`, right after a 3 MB app; NVS where it was). `idf.py merge-bin` puts `srmodels.bin` in the merged image, so the flasher (one image at 0x0) and `firmware.rs` (first app partition) needed no change; the image grows to 3.5 MB
-- [x] ESP-SR 2.5.5 on IDF 6.1: AFE (`MRNN`: mic, speaker loopback) with AEC and VAD + WakeNet9 "Hi ESP" as a bootstrap (`main/voice.c`); feed and fetch tasks on core 1, LVGL and UI refresh pinned to core 0; CPU at 240 MHz, caches 32 KB I / 64 KB D. NS is not in the SR pipeline by design and AGC is left for the M4 stream. LVGL's 128 KB heap moved to PSRAM (`main/linker.lf`) to make room in internal RAM
+- [x] Custom partition table with a `model` partition (`partitions.csv`, right after a 3 MB app; NVS where it was). `idf.py merge-bin` puts `srmodels.bin` in the merged image, so the flasher (one image at 0x0) and `firmware.rs` (first app partition) needed no change; the image grows to 3.8 MB with two WakeNet models
+- [x] ESP-SR 2.5.5 on IDF 6.1: AFE (`MRNN`: mic, speaker loopback) with AEC and VAD + WakeNet9 (`main/voice.c`); feed and fetch tasks on core 1, LVGL and UI refresh pinned to core 0; CPU at 240 MHz, caches 32 KB I / 64 KB D. NS is not in the SR pipeline by design and AGC is left for the M4 stream. LVGL's 128 KB heap moved to PSRAM (`main/linker.lf`) to make room in internal RAM
 - [x] Mic at 37.5 dB (maximum), loopback kept at 30 dB
-- [ ] Spike: train a **"Hey Duo"** model with microWakeWord (Piper-generated IT/EN samples plus negatives); run it on the board after the AFE
-- [ ] Switch the default wake word to "Hey Duo" once it meets the targets below; keep "Hi ESP" as a fallback option
+- [x] Wake word: built-in WakeNet9 **"Alexa"** (`wn9_alexa`) by default, **"Hi ESP"** (`wn9_hiesp`) as the other choice; `set_wake_word` switches at runtime (rebuilds the AFE, about 110 ms) and keeps it in NVS. One WakeNet runs at a time: `afe_config_init()` would load the first two in the partition
+- ~~Spike: train a "Hey Duo" model with microWakeWord~~: put off (datasets of several GB and hours of training); a custom word can come back after M7
 - [x] "Eyes" states: idle → listening → thinking → speaking: a ring round both screens (`main/ui_voice.c`), mirrored in the app; the host sets thinking and speaking with `voice/state`
 - [x] Wake event sent to the host (`wake` and `voice_state` notifications, `BridgeEvent::Wake` / `VoiceState`); `set_mic` tool, mute kept in NVS
 - [x] UI load in `get_state` (`ui.busy_pct`, `ui.max_frame_ms`)
-- [ ] Measurements: wake-word hit rate and false triggers per hour, frame-time impact on LVGL
+- [ ] Measurements: wake-word hit rate and false triggers per hour, frame-time impact on LVGL. So far (Mac speaker at about 1 m, `say`): "Alexa" 8/8, "Hi ESP" 1/3; voice tasks 20 % of core 1; UI `max_frame_ms` about 58 with voice, 51 muted, `busy_pct` 6–12 against 5.5
 
 Done when: at least 90 % detection at 1–2 m in a quiet room, fewer than 1 false trigger per hour, and no visible UI stutter.
 

@@ -112,7 +112,7 @@ The board's tools, plus two that read this computer, are available to any [MCP](
 
 | Tool | From | Does |
 |------|------|------|
-| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `set_mic`, `get_state` | Board | Passed through as the firmware describes them in `tools/list` ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
+| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `set_mic`, `set_wake_word`, `get_state` | Board | Passed through as the firmware describes them in `tools/list` ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
 | `get_metrics` | Host | CPU and GPU temperature, load, clock, power, memory, fans |
 | `get_claude_usage` | Host | Claude Code tokens in the 5-hour window and today, plan limits used, time to reset, working or idle |
 
@@ -140,9 +140,9 @@ The last list of board tools is kept in `board-tools.json` in the same folder, s
 
 ## Wake word (preview)
 
-The board listens for a wake word with Espressif's [ESP-SR](https://github.com/espressif/esp-sr): the ES7210 mic and the speaker loopback go through its audio front end (echo cancellation, voice activity) into WakeNet, on core 1, with the UI on core 0. For now the word is **"Hi ESP"**, a built-in WakeNet model; a custom "Hey Duo" comes later ([docs/ROADMAP.md](docs/ROADMAP.md)). When it hears it, a cyan ring lights round both screens (and in the app's mirror) for a few seconds, and the host gets a `wake` notification (`dualeye` prints it). Speech-to-text and replies are the next milestones: nothing is recorded or leaves the board yet.
+The board listens for a wake word with Espressif's [ESP-SR](https://github.com/espressif/esp-sr): the ES7210 mic and the speaker loopback go through its audio front end (echo cancellation, voice activity) into WakeNet, on core 1, with the UI on core 0. The word is **"Alexa"**, or **"Hi ESP"**: both are built-in WakeNet models, picked with the `set_wake_word` tool (`dualeye call set_wake_word --word hiesp`). When it hears it, a cyan ring lights round both screens (and in the app's mirror) for a few seconds, and the host gets a `wake` notification (`dualeye` prints it). Speech-to-text and replies are the next milestones: nothing is recorded or leaves the board yet.
 
-Mute the mic with the `set_mic` tool (`dualeye call set_mic --muted true`, or ask Claude through MCP); the board remembers it. The models sit in their own `model` partition ([partitions.csv](partitions.csv)), written by the app's flasher as part of the merged image.
+Mute the mic with the `set_mic` tool (`dualeye call set_mic --muted true`, or ask Claude through MCP); the board remembers both. The models sit in their own `model` partition ([partitions.csv](partitions.csv)), written by the app's flasher as part of the merged image.
 
 ## Desktop app
 

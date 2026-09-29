@@ -42,13 +42,30 @@ static const char *const STATE_NAMES[VOICE_STATE_COUNT] = {
     [VOICE_SPEAKING] = "speaking",
 };
 
+/* Wake words people can pick, by the WakeNet model names that carry them.
+ * Those in the `model` partition are set in sdkconfig.defaults. */
+static const struct {
+    const char *id;
+    const char *word;
+} WORDS[] = {
+    {"alexa", "Alexa"}, {"hiesp", "Hi ESP"}, {"jarvis", "Jarvis"}, {"computer", "Computer"},
+};
+#define WORD_COUNT (sizeof(WORDS) / sizeof(WORDS[0]))
+#define DEFAULT_WORD "alexa"
+
+static srmodel_list_t *s_models;
 static const esp_afe_sr_iface_t *s_afe;
 static esp_afe_sr_data_t *s_afe_data;
+static int s_chunk;
 static char s_model[32];
 static bool s_available;
 
-/* The feed task holds it for each chunk it reads, a pause for as long as it lasts. */
+/* The feed task holds it for each chunk it reads and feeds, a pause for as
+ * long as it lasts. */
 static SemaphoreHandle_t s_mic;
+/* The fetch task holds it while it waits on the AFE. With both, the AFE can
+ * be swapped for one with another wake word. */
+static SemaphoreHandle_t s_fetch;
 /* RUN_BIT: the feed task may read the mic (not muted, not paused). */
 static EventGroupHandle_t s_run;
 static SemaphoreHandle_t s_ctl;
@@ -85,23 +102,49 @@ const char *voice_wake_model(void)
     return s_available ? s_model : NULL;
 }
 
+static int word_of_model(const char *model)
+{
+    for (int i = 0; i < (int) WORD_COUNT; i++) {
+        if (strstr(model, WORDS[i].id) != NULL) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 const char *voice_wake_word(void)
 {
-    static const struct {
-        const char *key;
-        const char *word;
-    } WORDS[] = {
-        {"hiesp", "Hi ESP"}, {"alexa", "Alexa"}, {"jarvis", "Jarvis"}, {"computer", "Computer"},
-    };
     if (!s_available) {
         return NULL;
     }
-    for (size_t i = 0; i < sizeof(WORDS) / sizeof(WORDS[0]); i++) {
-        if (strstr(s_model, WORDS[i].key) != NULL) {
-            return WORDS[i].word;
+    int w = word_of_model(s_model);
+    return w >= 0 ? WORDS[w].word : s_model;
+}
+
+const char *voice_wake_word_id(void)
+{
+    if (!s_available) {
+        return NULL;
+    }
+    int w = word_of_model(s_model);
+    return w >= 0 ? WORDS[w].id : s_model;
+}
+
+/** The WakeNet model for a word id in the partition, or NULL. */
+static char *model_for(const char *id)
+{
+    return id != NULL && id[0] != '\0' ? esp_srmodel_filter(s_models, ESP_WN_PREFIX, id) : NULL;
+}
+
+int voice_wake_words(const char **ids, int max)
+{
+    int n = 0;
+    for (int i = 0; i < (int) WORD_COUNT && n < max && s_models != NULL; i++) {
+        if (model_for(WORDS[i].id) != NULL) {
+            ids[n++] = WORDS[i].id;
         }
     }
-    return s_model;
+    return n;
 }
 
 static void update_run(void)
@@ -198,7 +241,8 @@ static void on_wake(const afe_fetch_result_t *res)
 
 static void feed_task(void *arg)
 {
-    const int chunk = s_afe->get_feed_chunksize(s_afe_data);
+    // Every AFE voice_set_wake_word() builds has this chunk size.
+    const int chunk = s_chunk;
     int16_t *buf = heap_caps_malloc((size_t) chunk * BOARD_AUDIO_IN_CHANNELS * sizeof(int16_t),
                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (buf == NULL) {
@@ -209,10 +253,11 @@ static void feed_task(void *arg)
         xEventGroupWaitBits(s_run, RUN_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
         xSemaphoreTake(s_mic, portMAX_DELAY);
         esp_err_t err = board_audio_read(buf, (size_t) chunk);
-        xSemaphoreGive(s_mic);
         if (err == ESP_OK) {
             s_afe->feed(s_afe_data, buf);
-        } else {
+        }
+        xSemaphoreGive(s_mic);
+        if (err != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
@@ -224,12 +269,13 @@ static void fetch_task(void *arg)
         // Muted or paused nothing is fed, and fetching would only get the AFE
         // to warn about its empty buffer every time.
         EventBits_t run = xEventGroupWaitBits(s_run, RUN_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(FETCH_WAIT_MS));
-        afe_fetch_result_t *res = NULL;
         if (run & RUN_BIT) {
-            res = s_afe->fetch_with_delay(s_afe_data, pdMS_TO_TICKS(FETCH_WAIT_MS));
-        }
-        if (res != NULL && res->ret_value != ESP_FAIL && res->wakeup_state == WAKENET_DETECTED) {
-            on_wake(res);
+            xSemaphoreTake(s_fetch, portMAX_DELAY);
+            afe_fetch_result_t *res = s_afe->fetch_with_delay(s_afe_data, pdMS_TO_TICKS(FETCH_WAIT_MS));
+            if (res != NULL && res->ret_value != ESP_FAIL && res->wakeup_state == WAKENET_DETECTED) {
+                on_wake(res);
+            }
+            xSemaphoreGive(s_fetch);
         }
         if (s_state != VOICE_IDLE && esp_timer_get_time() >= s_state_until_us) {
             voice_set_state(VOICE_IDLE);
@@ -237,30 +283,103 @@ static void fetch_task(void *arg)
     }
 }
 
-void voice_start(bool muted)
+/** Build the AFE with the WakeNet `model`. */
+static esp_afe_sr_data_t *create_afe(const char *model)
 {
-    s_muted = muted;
-    s_state_lock = xSemaphoreCreateMutex();
-
-    srmodel_list_t *models = esp_srmodel_init(VOICE_MODEL_PARTITION);
-    if (models == NULL || models->num == 0) {
-        ESP_LOGE(TAG, "no ESP-SR models in the \"%s\" partition, continuing without voice", VOICE_MODEL_PARTITION);
-        return;
+    afe_config_t *cfg = afe_config_init(VOICE_INPUT_FORMAT, s_models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    if (cfg == NULL) {
+        return NULL;
     }
-    afe_config_t *cfg = afe_config_init(VOICE_INPUT_FORMAT, models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
-    if (cfg == NULL || cfg->wakenet_model_name == NULL) {
-        ESP_LOGE(TAG, "no WakeNet model, continuing without voice");
-        afe_config_free(cfg);
-        return;
-    }
+    // afe_config_init() runs the first two WakeNets in the partition; one is
+    // enough, and half the CPU. Its strings go back before afe_config_free(),
+    // which owns them.
+    char *first = cfg->wakenet_model_name;
+    char *second = cfg->wakenet_model_name_2;
+    cfg->wakenet_model_name = (char *) model;
+    cfg->wakenet_model_name_2 = NULL;
     // Internal RAM is short (M0: 36 KB largest block); PSRAM has 8 MB.
     cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     cfg->afe_perferred_core = TASK_CORE;
     cfg->afe_perferred_priority = TASK_PRIORITY;
-    strlcpy(s_model, cfg->wakenet_model_name, sizeof(s_model));
     s_afe = esp_afe_handle_from_config(cfg);
-    s_afe_data = s_afe != NULL ? s_afe->create_from_config(cfg) : NULL;
+    esp_afe_sr_data_t *data = s_afe != NULL ? s_afe->create_from_config(cfg) : NULL;
+    cfg->wakenet_model_name = first;
+    cfg->wakenet_model_name_2 = second;
     afe_config_free(cfg);
+    return data;
+}
+
+esp_err_t voice_set_wake_word(const char *id)
+{
+    if (!s_available) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    char *model = model_for(id);
+    if (model == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (strcmp(model, s_model) == 0) {
+        return ESP_OK;
+    }
+    // Neither task is in the AFE while we hold both. A self-test `rec` holds
+    // the mic, so this waits for it.
+    xSemaphoreTake(s_mic, portMAX_DELAY);
+    xSemaphoreTake(s_fetch, portMAX_DELAY);
+    s_afe->destroy(s_afe_data);
+    esp_err_t err = ESP_OK;
+    s_afe_data = create_afe(model);
+    if (s_afe_data == NULL || s_afe->get_feed_chunksize(s_afe_data) != s_chunk) {
+        ESP_LOGE(TAG, "AFE with %s failed, back to %s", model, s_model);
+        if (s_afe_data != NULL) {
+            s_afe->destroy(s_afe_data);
+        }
+        s_afe_data = create_afe(s_model);
+        err = ESP_FAIL;
+    } else {
+        strlcpy(s_model, model, sizeof(s_model));
+    }
+    xSemaphoreGive(s_fetch);
+    xSemaphoreGive(s_mic);
+    if (s_afe_data == NULL) {
+        // Nothing to feed or fetch from: stop both tasks for good. Without
+        // s_available, nothing sets RUN_BIT again.
+        ESP_LOGE(TAG, "AFE lost, voice off until a reboot");
+        xSemaphoreTake(s_ctl, portMAX_DELAY);
+        s_available = false;
+        s_paused = true;
+        update_run();
+        xSemaphoreGive(s_ctl);
+        voice_set_state(VOICE_IDLE);
+        return ESP_FAIL;
+    }
+    voice_set_state(VOICE_IDLE);
+    ESP_LOGI(TAG, "wake word \"%s\" (%s)", voice_wake_word(), s_model);
+    return err;
+}
+
+void voice_start(bool muted, const char *wake_word)
+{
+    s_muted = muted;
+    s_state_lock = xSemaphoreCreateMutex();
+
+    s_models = esp_srmodel_init(VOICE_MODEL_PARTITION);
+    if (s_models == NULL || s_models->num == 0) {
+        ESP_LOGE(TAG, "no ESP-SR models in the \"%s\" partition, continuing without voice", VOICE_MODEL_PARTITION);
+        return;
+    }
+    char *model = model_for(wake_word);
+    if (model == NULL) {
+        model = model_for(DEFAULT_WORD);
+    }
+    if (model == NULL) {
+        model = esp_srmodel_filter(s_models, ESP_WN_PREFIX, NULL);
+    }
+    if (model == NULL) {
+        ESP_LOGE(TAG, "no WakeNet model, continuing without voice");
+        return;
+    }
+    strlcpy(s_model, model, sizeof(s_model));
+    s_afe_data = create_afe(model);
     if (s_afe_data == NULL) {
         ESP_LOGE(TAG, "AFE create failed, continuing without voice");
         return;
@@ -270,11 +389,13 @@ void voice_start(bool muted)
                  BOARD_AUDIO_IN_CHANNELS);
         return;
     }
+    s_chunk = s_afe->get_feed_chunksize(s_afe_data);
 
     s_mic = xSemaphoreCreateMutex();
+    s_fetch = xSemaphoreCreateMutex();
     s_run = xEventGroupCreate();
     s_ctl = xSemaphoreCreateMutex();
-    if (s_mic == NULL || s_run == NULL || s_ctl == NULL) {
+    if (s_mic == NULL || s_fetch == NULL || s_run == NULL || s_ctl == NULL) {
         ESP_LOGE(TAG, "out of memory, continuing without voice");
         return;
     }
@@ -286,6 +407,6 @@ void voice_start(bool muted)
         return;
     }
     s_available = true;
-    ESP_LOGI(TAG, "wake word \"%s\" (%s), feed %d samples x %d ch%s", voice_wake_word(), s_model,
-             s_afe->get_feed_chunksize(s_afe_data), BOARD_AUDIO_IN_CHANNELS, muted ? ", muted" : "");
+    ESP_LOGI(TAG, "wake word \"%s\" (%s), feed %d samples x %d ch%s", voice_wake_word(), s_model, s_chunk,
+             BOARD_AUDIO_IN_CHANNELS, muted ? ", muted" : "");
 }

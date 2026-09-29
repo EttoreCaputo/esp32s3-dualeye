@@ -108,7 +108,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ui_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     if (board_audio_init() == ESP_OK) {
         audio_selftest_start();
-        voice_start(settings.mic_muted);
+        voice_start(settings.mic_muted, settings.wake_word);
     } else {
         ESP_LOGE(TAG, "audio init failed, continuing without audio");
     }
