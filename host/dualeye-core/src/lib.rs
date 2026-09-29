@@ -12,16 +12,21 @@
 
 pub mod bridge;
 pub mod claude;
+#[cfg(feature = "download")]
+pub mod download;
 pub mod firmware;
 pub mod flasher;
 pub mod hub;
 pub mod link;
+pub mod models;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod protocol;
 pub mod sensors;
 pub mod serial;
 pub mod snapshot;
+pub mod stt;
+pub mod voice;
 
 pub use bridge::{Bridge, BridgeConfig, BridgeEvent};
 pub use claude::{ClaudeMetrics, ClaudeState, ClaudeUsage};
@@ -31,4 +36,6 @@ pub use hub::{Board, Hub, HubStatus, Route};
 pub use link::{CallError, Hello, Link, LinkEvent, Tool, ToolResult};
 pub use sensors::{Collector, Reading};
 pub use serial::PortInfo;
+pub use stt::{Stt, SttConfig, SttLanguage, Transcript};
+pub use voice::{Utterance, VoiceConfig};
 pub use snapshot::{DeviceMetrics, Face, Faces, Fan, Memory, Rotation, Rotations, Snapshot};

@@ -3,12 +3,24 @@
   import { cubicOut } from "svelte/easing";
   import Eye from "./Eye.svelte";
   import { DEVICES, FACES, ROTATIONS, formatTokens, isClaudeFace, screenFor, type DeviceId, type Face, type Rotation } from "./firmware";
-  import { fanRpm, monitor, type ClaudeLink, type FirmwareInfo, type McpInfo, type PortInfo, type Reading } from "./monitor.svelte";
+  import {
+    fanRpm,
+    monitor,
+    type ClaudeLink,
+    type FirmwareInfo,
+    type McpInfo,
+    type PortInfo,
+    type Reading,
+    type SttLanguage,
+    type VoiceInfo,
+    type VoiceSettings,
+  } from "./monitor.svelte";
 
-  type Tab = "connection" | "display" | "device" | "sensors" | "console";
+  type Tab = "connection" | "display" | "voice" | "device" | "sensors" | "console";
   const TABS: [Tab, string][] = [
     ["connection", "Connection"],
     ["display", "Display"],
+    ["voice", "Voice"],
     ["device", "Device"],
     ["sensors", "Sensors"],
     ["console", "Console"],
@@ -75,6 +87,57 @@
       clearInterval(id);
     };
   });
+
+  let voice = $state<VoiceInfo | null>(null);
+  let voiceError = $state("");
+
+  $effect(() => {
+    if (!open || tab !== "voice") return;
+    let alive = true;
+    const load = () => monitor.voiceInfo().then((v) => alive && (voice = v));
+    load();
+    // Faster while a model downloads, for its progress bar.
+    const id = setInterval(load, 700);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  });
+
+  async function setVoice(change: Partial<VoiceSettings>) {
+    if (!voice) return;
+    voiceError = "";
+    voice = await monitor.setVoice({ ...voice.settings, ...change });
+  }
+
+  async function download(id: string) {
+    voiceError = "";
+    try {
+      await monitor.downloadModel(id);
+    } catch (e) {
+      if (!/cancel/i.test(String(e))) voiceError = String(e);
+    }
+    voice = await monitor.voiceInfo();
+  }
+
+  async function removeModel(id: string) {
+    voiceError = "";
+    try {
+      voice = await monitor.deleteModel(id);
+    } catch (e) {
+      voiceError = String(e);
+    }
+  }
+
+  const LANGUAGES: [SttLanguage, string][] = [
+    ["auto", "Auto"],
+    ["it", "Italiano"],
+    ["en", "English"],
+  ];
+  const STT_STATUS = { off: "Off", starting: "Loading the model…", ready: "Ready", error: "Not working" };
+  const mb = (n: number) => `${Math.round(n / 1_000_000)} MB`;
+  const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const newestFirst = $derived([...monitor.transcripts].reverse());
 
   async function linkClaude(connect: boolean) {
     claudeBusy = true;
@@ -345,6 +408,113 @@
             </div>
           {/if}
         </section>
+      {:else if tab === "voice"}
+        <p class="hint">
+          After its wake word, <b>“Alexa”</b>, the board sends what you say to this computer. With voice on, whisper.cpp transcribes it
+          here, in Italian or English. Nothing leaves the computer. Acting on what you say comes later.
+        </p>
+        {#if !voice}
+          <p class="empty">Loading…</p>
+        {:else}
+          <section class="voice">
+            <h3>Voice</h3>
+            <label class="switch">
+              <input type="checkbox" checked={voice.settings.enabled} onchange={(e) => setVoice({ enabled: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Transcribe what the board hears</span>
+            </label>
+            <dl class="facts">
+              <div>
+                <dt>Speech-to-text</dt>
+                <dd class:good={voice.stt === "ready"} class:bad={voice.stt === "error"}>{STT_STATUS[voice.stt]}</dd>
+              </div>
+              <div><dt>Board</dt><dd>{monitor.link === "connected" ? monitor.voice : "offline"}</dd></div>
+            </dl>
+            {#if voice.stt === "error" && voice.stt_error}
+              <p class="hint error">{voice.stt_error}</p>
+            {/if}
+            <div class="rotation">
+              <span class="rlabel">Language</span>
+              <div class="rots langs" role="radiogroup" aria-label="Language">
+                {#each LANGUAGES as [id, label] (id)}
+                  <button
+                    class="rot"
+                    class:checked={voice.settings.language === id}
+                    role="radio"
+                    aria-checked={voice.settings.language === id}
+                    title={id === "auto" ? "Whisper tells Italian from English" : `Always ${label}`}
+                    onclick={() => setVoice({ language: id })}>{label}</button
+                  >
+                {/each}
+              </div>
+            </div>
+            <label class="check">
+              <input type="checkbox" checked={voice.settings.keep_recordings} onchange={(e) => setVoice({ keep_recordings: e.currentTarget.checked })} />
+              <span>Keep recordings as WAV files, for debugging</span>
+            </label>
+          </section>
+
+          <section>
+            <h3>Model</h3>
+            {#if !voice.server}
+              <p class="hint error">
+                whisper-server isn't installed. On macOS: <code>brew install whisper-cpp</code>; elsewhere, build it from
+                <code>github.com/ggml-org/whisper.cpp</code> and put it on the PATH.
+              </p>
+            {:else}
+              <p class="hint">Downloaded from Hugging Face once and checked. whisper-server: <code>{voice.server}</code></p>
+            {/if}
+            <div class="ports">
+              {#each voice.models as m (m.id)}
+                {@const downloading = voice.download?.[0] === m.id}
+                <div class="port model" class:checked={voice.settings.model === m.id}>
+                  <label class="mpick">
+                    <input type="radio" name="model" checked={voice.settings.model === m.id} onchange={() => setVoice({ model: m.id })} />
+                    <span class="radio"></span>
+                    <span class="mtext">
+                      <span class="pname">{m.id}</span>
+                      <span class="mnote">{m.note}</span>
+                    </span>
+                  </label>
+                  <span class="mside">
+                    <span class="pmeta">{mb(m.bytes)}</span>
+                    {#if downloading}
+                      <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
+                    {:else if m.installed}
+                      <button class="btn small" disabled={voice.settings.model === m.id && voice.settings.enabled} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
+                    {:else}
+                      <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
+                    {/if}
+                  </span>
+                  {#if downloading}
+                    <div class="progress mprogress"><span style:width="{voice.download?.[1] ?? 0}%"></span></div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+            {#if voiceError}
+              <p class="hint error">{voiceError}</p>
+            {/if}
+          </section>
+
+          <section>
+            <h3>Transcripts</h3>
+            {#each newestFirst as entry (entry.at + "-" + entry.id)}
+              <div class="transcript">
+                <span class="tmeta">{clock(entry.at)}</span>
+                {#if entry.transcript}
+                  <span class="tlang">{entry.transcript.language}</span>
+                  <span class="ttext">{entry.transcript.text}</span>
+                  <span class="tmeta">{(entry.transcript.elapsed_ms / 1000).toFixed(1)} s</span>
+                {:else}
+                  <span class="ttext muted">No words heard</span>
+                {/if}
+              </div>
+            {:else}
+              <p class="empty">{voice.settings.enabled ? "Say “Alexa”, then a command." : "Turn voice on to see what the board hears."}</p>
+            {/each}
+          </section>
+        {/if}
       {:else if tab === "device"}
         <section>
           <h3>Board</h3>
@@ -517,7 +687,7 @@
   nav {
     position: relative;
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     margin: 14px;
     padding: 3px;
     border-radius: 12px;
@@ -543,7 +713,7 @@
     top: 3px;
     bottom: 3px;
     left: 3px;
-    width: calc((100% - 6px) / 5);
+    width: calc((100% - 6px) / 6);
     border-radius: 9px;
     background: rgba(255, 255, 255, 0.08);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
@@ -741,6 +911,155 @@
   }
   .rot:focus-visible {
     outline: 1.5px solid var(--accent);
+  }
+
+  .voice {
+    --accent: #30d5f0;
+  }
+  .switch {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    cursor: pointer;
+  }
+  .switch input,
+  .check input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .track {
+    position: relative;
+    width: 32px;
+    height: 18px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.1);
+    transition: background 200ms;
+  }
+  .knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--dim);
+    transition:
+      transform 200ms,
+      background 200ms;
+  }
+  .switch input:checked + .track {
+    background: color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+  .switch input:checked + .track .knob {
+    transform: translateX(14px);
+    background: var(--accent);
+  }
+  .switch:has(input:focus-visible) .track,
+  .check:has(input:focus-visible) span {
+    outline: 1.5px solid var(--accent);
+  }
+  .slabel {
+    font: 550 13px/1.2 var(--sans);
+  }
+  .facts dd.good {
+    color: #5ee38a;
+  }
+  .facts dd.bad {
+    color: var(--hot);
+  }
+  .langs {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    font: 450 12px/1.4 var(--sans);
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .check span::before {
+    content: "";
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 8px;
+    vertical-align: -2px;
+    border-radius: 3px;
+    border: 1.5px solid var(--faint);
+    transition: all 200ms;
+  }
+  .check input:checked + span::before {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+  .model {
+    grid-template-columns: 1fr auto;
+    cursor: default;
+  }
+  .mpick {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    cursor: pointer;
+  }
+  .mtext {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .mnote {
+    font: 450 11px/1.35 var(--sans);
+    color: var(--faint);
+  }
+  .mside {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .btn.small {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 11.5px;
+  }
+  .mprogress {
+    grid-column: 1 / -1;
+    margin: 2px 0 0;
+  }
+  .transcript {
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    align-items: baseline;
+    gap: 8px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .transcript:last-child {
+    border-bottom: 0;
+  }
+  .tmeta {
+    font: 500 10.5px/1 var(--mono);
+    color: var(--faint);
+  }
+  .tlang {
+    padding: 2px 5px;
+    border-radius: 5px;
+    background: color-mix(in srgb, #30d5f0 14%, transparent);
+    color: #30d5f0;
+    font: 600 10px/1 var(--mono);
+    text-transform: uppercase;
+  }
+  .ttext {
+    font: 450 13px/1.4 var(--sans);
+  }
+  .ttext.muted {
+    grid-column: span 3;
+    color: var(--faint);
   }
 
   .claude.dimmed {

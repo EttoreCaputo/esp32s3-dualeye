@@ -91,11 +91,12 @@ Done when: at least 90 % detection at 1–2 m in a quiet room, fewer than 1 fals
 
 Goal: from wake word to transcript on the host.
 
-- [ ] Firmware: after the wake word, stream PCM on `audio_up` until VAD end of speech or a timeout; the listening UI shows the level
-- [ ] Host: voice pipeline skeleton (state machine, audio buffer, WAV debug dump)
-- [ ] Host: whisper.cpp sidecar (`whisper-server`); language auto-detect IT/EN
-- [ ] Model manager: download, verify and store models (Whisper first); settings for model size
-- [ ] App: "Voice" tab with an enable toggle, transcript log and model status
+- [x] Firmware: after the wake word, stream PCM on `audio_up` until VAD end of speech or a timeout; the listening UI shows the level. `utterance_start` / `utterance_end` around each stream, 4-byte header (id, sequence) on each frame; ends 0.75 s after the last word (VAD hangover cut to 500 ms), after 5 s without speech (the wake word's own VAD tail doesn't count) or at 12 s; WakeNet off meanwhile. `voice/listen` and `voice/stop` for push-to-talk. The level is a short bright arc at the top of the ring (UI `busy_pct` about 19 % while listening; hiding the ring costs one ~80 ms frame)
+- [x] Host: voice pipeline skeleton (`voice.rs`: reassembly with lost frames filled with silence, a pipeline thread per connection, WAV debug dump with `dualeye --voice-dump`; `BridgeEvent::Listening` / `Utterance`). Tried with "Alexa" + an IT and an EN sentence from the Mac speaker: no frames lost, speech at about −33 dBFS RMS over a −65 dBFS floor
+- [x] Host: whisper.cpp sidecar (`whisper-server`); language auto-detect IT/EN. `stt.rs`: started in the background with the model loaded, restarted if it dies, stopped on exit (and a leftover one from a killed host is stopped through a pid file); plain HTTP on 127.0.0.1. Whisper's detection, falling back to the likelier of IT/EN when it picks another language; a vocabulary prompt (face names) in the language decoded. `dualeye --stt [SIZE|FILE] [--stt-language auto|it|en]`, `BridgeEvent::Transcript` / `VoiceError`. With `ggml-small` on an M1 Pro: 10/10 languages right on 5 IT + 5 EN commands (macOS voices from the speaker), 0.6–0.7 s per transcript, so about 1.4 s from the last word; a few words wrong ("rinusa" for "rings a")
+- [x] Model manager: download, verify and store models (Whisper first); settings for model size. `models.rs`: base, small (default) and large-v3-turbo-q5_0, pinned by size and SHA-256, downloaded to `.part` and renamed once checked (`download.rs`, shared with esptool's setup); `dualeye models [download|remove ID]`
+- [x] App: "Voice" tab with an enable toggle, transcript log and model status. Off by default; language (auto, it, en), WAV recordings for debugging, model list with download progress, stop and delete; turning it on or switching model swaps the bridge's voice config without a reconnect. SIGTERM and SIGINT quit the app (and the CLI) cleanly, so the sidecar stops too
+- [ ] Try the Voice tab by hand with a real voice at 1–2 m; `whisper-server` still has to be installed by hand (bundling is M7)
 
 Done when: IT and EN phrases are transcribed within 1.5 s (CPU) of the end of speech.
 

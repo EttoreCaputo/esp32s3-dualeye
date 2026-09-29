@@ -27,6 +27,8 @@ pub enum LinkEvent {
     Text(String),
     /// A JSON-RPC notification, such as `ready` after a reboot.
     Notification { method: String, params: Value },
+    /// An `audio_up` frame: header and PCM, see [`crate::voice`].
+    Audio(Vec<u8>),
     /// Reading the port failed; the link is dead.
     Closed(String),
 }
@@ -279,6 +281,7 @@ fn on_frame(frame: protocol::Frame, shared: &Shared, on_event: &dyn Fn(LinkEvent
             let line = String::from_utf8_lossy(&frame.payload).trim_end().to_string();
             on_event(LinkEvent::Log(line));
         }
+        c if c == Channel::AudioUp as u8 => on_event(LinkEvent::Audio(frame.payload)),
         c if c == Channel::Ctrl as u8 => {
             let Ok(msg) = serde_json::from_slice::<Value>(&frame.payload) else {
                 return;

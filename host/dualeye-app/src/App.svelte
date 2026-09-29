@@ -10,7 +10,7 @@
   monitor.start();
 
   let settings = $state(false);
-  let drawerTab = $state<"connection" | "display" | "device" | "sensors" | "console">("connection");
+  let drawerTab = $state<"connection" | "display" | "voice" | "device" | "sensors" | "console">("connection");
   let pixels = $state(false);
   let heroW = $state(0);
   let winH = $state(0);

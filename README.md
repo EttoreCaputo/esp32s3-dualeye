@@ -140,7 +140,15 @@ The last list of board tools is kept in `board-tools.json` in the same folder, s
 
 ## Wake word (preview)
 
-The board listens for a wake word with Espressif's [ESP-SR](https://github.com/espressif/esp-sr): the ES7210 mic and the speaker loopback go through its audio front end (echo cancellation, voice activity) into WakeNet, on core 1, with the UI on core 0. The word is **"Alexa"**, or **"Hi ESP"**: both are built-in WakeNet models, picked with the `set_wake_word` tool (`dualeye call set_wake_word --word hiesp`). When it hears it, a cyan ring lights round both screens (and in the app's mirror) for a few seconds, and the host gets a `wake` notification (`dualeye` prints it). Speech-to-text and replies are the next milestones: nothing is recorded or leaves the board yet.
+The board listens for a wake word with Espressif's [ESP-SR](https://github.com/espressif/esp-sr): the ES7210 mic and the speaker loopback go through its audio front end (echo cancellation, voice activity) into WakeNet, on core 1, with the UI on core 0. The word is **"Alexa"**, or **"Hi ESP"**: both are built-in WakeNet models, picked with the `set_wake_word` tool (`dualeye call set_wake_word --word hiesp`). When it hears it, a cyan ring lights round both screens (and in the app's mirror) for a few seconds, and the host gets a `wake` notification (`dualeye` prints it). Then the board streams what you say to the host over USB until you stop talking (a bright arc on the ring follows your voice), and the host can transcribe it in Italian or English with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), running locally:
+
+```bash
+brew install whisper-cpp        # or build whisper-server from source
+dualeye models download small   # about 490 MB, once
+dualeye --stt                   # prints each transcript
+```
+
+In the desktop app it's Settings → **Voice**: turn it on, download a model (the app checks its SHA-256) and the transcripts show there. `dualeye models` lists the same models for the CLI (`dualeye models download small`). `--stt` takes one of them or a ggml model file, `--stt-language it|en` skips language detection, and `--voice-dump` keeps each utterance as a WAV file in `voice/` in DualEye's data folder. Acting on what you say comes in the next milestones. Nothing leaves your computer.
 
 Mute the mic with the `set_mic` tool (`dualeye call set_mic --muted true`, or ask Claude through MCP); the board remembers both. The models sit in their own `model` partition ([partitions.csv](partitions.csv)), written by the app's flasher as part of the merged image.
 

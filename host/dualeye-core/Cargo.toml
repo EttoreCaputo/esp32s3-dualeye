@@ -38,6 +38,8 @@ tempfile = "3.27.0"
 [features]
 # Download a private Python and install esptool into a virtualenv on first use,
 # so the desktop app needs nothing preinstalled. Off for the CLI.
-provision = ["dep:ureq", "dep:flate2", "dep:tar", "dep:sha2"]
+provision = ["download", "dep:flate2", "dep:tar"]
+# HTTPS downloads checked against a SHA-256 (`download`, `models::download`).
+download = ["dep:ureq", "dep:sha2"]
 # The MCP server (`mcp::serve_stdio`), for `dualeye mcp` and `dualeye-app --mcp`.
 mcp = ["dep:rmcp", "dep:tokio"]

@@ -34,7 +34,7 @@ There is none. The board drops input it has no room for (the USB Serial/JTAG dri
 | 0 | `ctrl` | both | One JSON-RPC 2.0 message (UTF-8 JSON) |
 | 1 | `metrics` | host → board | One sensor snapshot (JSON, below) |
 | 2 | `log` | board → host | One log line, UTF-8, no trailing newline |
-| 3 | `audio_up` | board → host | Reserved (M4): PCM s16le, 16 kHz, mono |
+| 3 | `audio_up` | board → host | An utterance's audio, see [below](#audio_up) |
 | 4 | `audio_down` | host → board | Reserved (M5): PCM s16le, 16 kHz, mono |
 
 Receivers ignore channels they don't know.
@@ -49,6 +49,8 @@ Receivers ignore channels they don't know.
 | `tools/list` | none | `{"tools":[Tool, …]}` |
 | `tools/call` | `{"name":"set_face","arguments":{…}}` | `CallToolResult` |
 | `voice/state` | `{"state":"thinking"}`: `idle` · `listening` · `thinking` · `speaking` | `{}`; what the voice overlay shows. For the host's voice pipeline (M4 on), so not a tool. A state other than `idle` goes back to `idle` by itself after 30 s (`listening`: 6 s). `-32602` without voice |
+| `voice/listen` | none | `{}`; stream an utterance as if the wake word had been heard (push-to-talk). `-32602` without voice or muted |
+| `voice/stop` | none | `{}`; end the utterance being streamed (`reason` `host`), if any |
 | `debug/audio` | `{"cmd":"tone 440 500"}` | `{}`; the M0 audio self-test, its output comes as `log` lines (see `main/audio_selftest.h`) |
 
 `Tool` and `CallToolResult` have the shapes of the [MCP](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) `tools/list` and `tools/call` results (`name`, `description`, `inputSchema`; `content`, `structuredContent`, `isError`), so the host's MCP server (M2) can pass them through unchanged. A tool that runs but fails (bad argument, out of range) returns `isError: true` with the reason as text. Protocol errors use the standard JSON-RPC codes: `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params (including an unknown tool).
@@ -60,6 +62,8 @@ Notifications from the board:
 | `ready` | Same as the `hello` result | Once at boot, when the link is up. A host that sees it knows the board rebooted |
 | `wake` | `{"word":"Alexa","model":"wn9_alexa","volume_db":-45}` | The wake word was heard (`volume_db`: input level in dBFS). The board then shows `listening` |
 | `voice_state` | `{"state":"listening"}` | The voice overlay changed: on the wake word, after a timeout, or after `voice/state` |
+| `utterance_start` | `{"id":7,"trigger":"wake","rate":16000,"format":"s16le"}` | The board starts streaming what it hears on `audio_up`: after the wake word (`trigger` `wake`) or `voice/listen` (`host`). `id` counts up and wraps at 256 |
+| `utterance_end` | `{"id":7,"reason":"end_of_speech","ms":3200,"speech":true,"frames":100,"dropped":0}` | The stream ended. `reason`: `end_of_speech` (0.75 s of silence after speech), `no_speech` (none within 5 s), `max_length` (12 s), `host` (`voice/stop`, or the wake word changed) or `muted` (`set_mic`, or the self-test took the mic). `frames` were sent, `dropped` of them lost because the host didn't read in time. With `speech` the board shows `thinking` next, otherwise `idle` |
 
 ### `metrics`
 
@@ -71,6 +75,19 @@ The snapshot the host sends about once a second. Its shape is protocol 1's line 
 
 The board ignores a snapshot with neither temperature, and marks its data stale 3 s after the last one.
 
+### `audio_up`
+
+The audio of one utterance, between its `utterance_start` and `utterance_end` notifications: the output of ESP-SR's front end (echo-cancelled mic), 16 kHz mono PCM s16le, 512 samples (32 ms) a frame, about 32 KB/s.
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | u8 | Utterance `id` |
+| 1 | u8 | Flags, 0 for now |
+| 2 | u16 LE | Sequence number, from 0 in each utterance |
+| 4 | … | PCM |
+
+The board doesn't wait for a host that doesn't read (it drops the frame after 20 ms), so the host fills gaps in the sequence with silence. WakeNet is off while the board streams: the wake word said again mid-sentence doesn't start a new utterance. Implementation: `stream_*` in `main/voice.c`, `host/dualeye-core/src/voice.rs`.
+
 ### `log`
 
 Every `ESP_LOG*` line after the link starts, one line per frame. The level letter and timestamp are part of the text (`I (5120) link: …`), as on a plain serial console.
@@ -81,10 +98,10 @@ Every `ESP_LOG*` line after the link starts, one line per frame. The level lette
 2. The board answers:
 
    ```json
-   {"protocol":2,"firmware":"0.4.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log"],"capabilities":["tools","voice"]}
+   {"protocol":2,"firmware":"0.4.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log","audio_up"],"capabilities":["tools","voice"]}
    ```
 
-   `voice` is there when the wake word runs (ESP-SR models found in the `model` partition).
+   `voice` (and `audio_up`) are there when the wake word runs (ESP-SR models found in the `model` partition).
 
 3. The host reads faces and rotation with `get_state` and adopts them (the CLI pushes its own with `set_face` / `set_rotation` when given on the command line), then streams `metrics`. Later changes on the host are pushed with `tools/call`.
 

@@ -32,6 +32,8 @@ use crate::protocol::Channel;
 use crate::sensors::Collector;
 use crate::serial;
 use crate::snapshot::{Face, Faces, Rotation, Rotations, Snapshot};
+use crate::stt::Transcript;
+use crate::voice::{self, Receiving, Utterance, VoiceConfig};
 
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -49,6 +51,10 @@ pub struct BridgeConfig {
     /// On each handshake, take `faces` and `rotation` from the board instead
     /// of pushing ours. Off when the user asked for specific ones.
     pub adopt_board_settings: bool,
+    /// What happens to what the board hears after its wake word. Shared, so
+    /// a frontend can turn transcription on or change the model while the
+    /// bridge runs; each utterance uses the config of the moment it ends.
+    pub voice: Arc<Mutex<VoiceConfig>>,
 }
 
 impl Default for BridgeConfig {
@@ -60,6 +66,7 @@ impl Default for BridgeConfig {
             rotation: Arc::default(),
             hub: None,
             adopt_board_settings: true,
+            voice: Arc::default(),
         }
     }
 }
@@ -82,6 +89,16 @@ pub enum BridgeEvent {
     Wake { word: String, volume_db: Option<f64> },
     /// What the board's "eyes" overlay shows: `idle`, `listening`, `thinking` or `speaking`.
     VoiceState { state: String },
+    /// The board started streaming what it hears: after the wake word
+    /// (`trigger` `wake`) or `voice/listen` (`host`).
+    Listening { id: u8, trigger: String },
+    /// An utterance ended and arrived. `wav` is where a copy was saved, when
+    /// [`VoiceConfig::dump_dir`] is set.
+    Utterance { utterance: Utterance, duration_ms: u64, peak_db: Option<f64>, wav: Option<String> },
+    /// What was said in utterance `id`; `None` when Whisper heard no words.
+    Transcript { id: u8, transcript: Option<Transcript> },
+    /// Speech-to-text failed, or its sidecar couldn't start.
+    VoiceError { message: String },
     /// Faces or rotation came from the board: at the handshake, or because a
     /// hub client changed them. `faces` and `rotation` in the config hold the
     /// new values already.
@@ -137,6 +154,15 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Run the bridge on the current thread until `stop` is set.
 pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
+    // Whisper loads its model meanwhile, so the first utterance doesn't wait.
+    let stt = config.voice.lock().unwrap().stt.clone();
+    if let Some(stt) = stt {
+        let sink = on_event.clone();
+        let _ = thread::Builder::new().name("dualeye-stt-start".into()).spawn(move || match stt.warm_up() {
+            Ok(()) => sink(BridgeEvent::BoardLog { line: format!("host: speech-to-text ready ({})", stt.config().model.display()) }),
+            Err(e) => sink(BridgeEvent::VoiceError { message: e.to_string() }),
+        });
+    }
     let mut collector = Collector::new();
     let mut claude = ClaudeUsage::new();
     let mut delay = Duration::from_secs(1);
@@ -190,6 +216,20 @@ fn session(
     on_event: &EventSink,
 ) -> io::Result<()> {
     let heard = Arc::new(Heard::default());
+    // The pipeline needs the link to answer the board; it gets it once open.
+    let (link_slot_tx, link_slot_rx) = std::sync::mpsc::channel::<std::sync::Weak<Link>>();
+    let pipeline = {
+        let config = config.voice.clone();
+        let sink = on_event.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<Utterance>();
+        thread::Builder::new().name("dualeye-voice".into()).spawn(move || {
+            if let Ok(link) = link_slot_rx.recv() {
+                voice::run(&config, &link, &sink, rx);
+            }
+        })?;
+        tx
+    };
+    let receiving = Mutex::new(Receiving::new(pipeline));
     let link = Arc::new({
         let heard = heard.clone();
         let sink = on_event.clone();
@@ -213,9 +253,19 @@ fn session(
                     sink(BridgeEvent::VoiceState { state: state.to_string() });
                 }
             }
+            LinkEvent::Notification { method, params } if method == "utterance_start" => {
+                receiving.lock().unwrap().start(&params);
+                sink(BridgeEvent::Listening {
+                    id: params["id"].as_u64().unwrap_or(0) as u8,
+                    trigger: params["trigger"].as_str().unwrap_or("wake").to_string(),
+                });
+            }
+            LinkEvent::Notification { method, params } if method == "utterance_end" => receiving.lock().unwrap().end(&params),
+            LinkEvent::Audio(payload) => receiving.lock().unwrap().audio(&payload),
             LinkEvent::Notification { .. } | LinkEvent::Closed(_) => {}
         })?
     });
+    let _ = link_slot_tx.send(Arc::downgrade(&link));
     on_event(BridgeEvent::Connected { port: port.to_string() });
 
     let mut reported: Option<BoardFirmware> = None;

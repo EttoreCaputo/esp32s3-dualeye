@@ -18,6 +18,10 @@ void ui_voice_create(lv_display_t *const displays[BOARD_LCD_COUNT]);
 /** With the LVGL lock held. */
 void ui_voice_show(voice_state_t state);
 
+/** Mic level while listening, 0..1: a brighter arc at the top of the ring
+ * that grows with it. With the LVGL lock held. */
+void ui_voice_set_level(float level);
+
 #ifdef __cplusplus
 }
 #endif

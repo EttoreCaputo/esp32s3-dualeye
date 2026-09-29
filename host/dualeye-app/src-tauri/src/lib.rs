@@ -13,6 +13,12 @@
 //! For the Claude faces the app can also point Claude Code's status line at
 //! itself (`main.rs` handles that invocation); see `dualeye_core::claude`.
 //!
+//! Voice (opt-in, off by default): with it on, what the board hears after its
+//! wake word is transcribed by a whisper.cpp `whisper-server` sidecar with a
+//! model the app downloads (`dualeye_core::models`). Turning it on, or picking
+//! another model or language, swaps the bridge's shared voice config: no
+//! reconnect.
+//!
 //! The same binary with `--mcp` is an MCP server for Claude Code and Claude
 //! Desktop (`dualeye_core::mcp`). It reaches the board through this app's
 //! [`Hub`], which lives as long as the app, across bridge restarts.
@@ -24,10 +30,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::thread;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
+use dualeye_core::models::{self, Model};
+use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage, Transcript};
+use dualeye_core::voice::{self, VoiceConfig};
 use dualeye_core::{
     BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
     mcp, serial,
@@ -38,6 +48,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 const LOG_LINES: usize = 300;
+const TRANSCRIPTS: usize = 50;
 const TRAY_ID: &str = "main";
 /// The image in the repository's `build/` folder, shipped inside the app.
 const FIRMWARE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../build/merged-binary.bin"));
@@ -50,6 +61,36 @@ struct Settings {
     faces: Faces,
     #[serde(default)]
     rotation: Rotations,
+    #[serde(default)]
+    voice: VoiceSettings,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct VoiceSettings {
+    /// Transcribe what the board hears. Off until the person turns it on.
+    enabled: bool,
+    /// A `models::MODELS` id.
+    model: String,
+    language: SttLanguage,
+    /// Keep each utterance as a WAV file (`voice/` in DualEye's data folder).
+    keep_recordings: bool,
+}
+
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        Self { enabled: false, model: models::DEFAULT_MODEL.into(), language: SttLanguage::Auto, keep_recordings: false }
+    }
+}
+
+/// One line of the Voice tab's log.
+#[derive(Clone, Serialize)]
+struct TranscriptEntry {
+    id: u8,
+    /// Unix time in ms.
+    at: u64,
+    /// `None`: Whisper heard no words.
+    transcript: Option<Transcript>,
 }
 
 #[derive(Default)]
@@ -66,6 +107,7 @@ struct Link {
     logs: VecDeque<String>,
     /// What the board's voice overlay shows (`idle` until it says otherwise).
     voice: Option<String>,
+    transcripts: VecDeque<TranscriptEntry>,
 }
 
 impl Link {
@@ -100,6 +142,15 @@ impl Link {
             BridgeEvent::Firmware { firmware } => self.firmware = Some(firmware.clone()),
             // `AppState` keeps faces and rotation.
             BridgeEvent::Settings { .. } | BridgeEvent::Wake { .. } => {}
+            BridgeEvent::Transcript { id, transcript } => {
+                if self.transcripts.len() == TRANSCRIPTS {
+                    self.transcripts.pop_front();
+                }
+                let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                self.transcripts.push_back(TranscriptEntry { id: *id, at, transcript: transcript.clone() });
+            }
+            // `AppState::stt_error` keeps the last error.
+            BridgeEvent::Listening { .. } | BridgeEvent::Utterance { .. } | BridgeEvent::VoiceError { .. } => {}
             BridgeEvent::VoiceState { state } => self.voice = Some(state.clone()),
             BridgeEvent::Disconnected { reason, .. } => {
                 self.kind = "offline";
@@ -127,6 +178,13 @@ struct AppState {
     device_busy: AtomicBool,
     /// Where esptool's Python and virtualenv live.
     esptool_dir: PathBuf,
+    /// Handed to every bridge; `apply_voice` swaps what's in it.
+    voice: Arc<Mutex<VoiceConfig>>,
+    /// Speech-to-text: `off`, `starting`, `ready` or `error`, and why.
+    stt_state: Arc<Mutex<(&'static str, Option<String>)>>,
+    /// The model being downloaded and how far along (percent).
+    download: Mutex<Option<(String, f32)>>,
+    cancel_download: AtomicBool,
 }
 
 impl AppState {
@@ -142,6 +200,135 @@ impl AppState {
     }
 }
 
+/// Make the bridge's voice config match the settings: start (or keep)
+/// the whisper-server sidecar, or stop it.
+fn apply_voice(state: &AppState) {
+    let settings = state.settings.lock().unwrap().voice.clone();
+    let current = state.voice.lock().unwrap().stt.clone();
+    let wanted = settings.enabled.then(|| stt_config(&settings));
+    let stt = match wanted {
+        None => {
+            *state.stt_state.lock().unwrap() = ("off", None);
+            None
+        }
+        Some(Err(why)) => {
+            *state.stt_state.lock().unwrap() = ("error", Some(why));
+            None
+        }
+        // Same model and language: keep the running server.
+        Some(Ok(config)) if current.as_ref().is_some_and(|s| s.config().model == config.model && s.config().language == config.language) => current,
+        Some(Ok(config)) => {
+            let stt = Arc::new(Stt::new(config));
+            *state.stt_state.lock().unwrap() = ("starting", None);
+            let (warm, status) = (stt.clone(), state.stt_state.clone());
+            thread::spawn(move || {
+                *status.lock().unwrap() = match warm.warm_up() {
+                    Ok(()) => ("ready", None),
+                    Err(e) => ("error", Some(e.to_string())),
+                }
+            });
+            Some(stt)
+        }
+    };
+    let dump_dir = settings.keep_recordings.then(voice::default_dump_dir).flatten();
+    *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt };
+}
+
+fn stt_config(settings: &VoiceSettings) -> Result<SttConfig, String> {
+    let server = stt::find_server().ok_or("whisper-server not found: install whisper.cpp (brew install whisper-cpp on macOS)")?;
+    let model = Model::by_id(&settings.model).ok_or_else(|| format!("unknown model {}", settings.model))?;
+    if !model.is_installed() {
+        return Err(format!("the {} model isn't downloaded yet", model.id));
+    }
+    Ok(SttConfig { server, model: model.path().ok_or("no data folder for the models")?, language: settings.language })
+}
+
+#[derive(Serialize)]
+struct ModelInfo {
+    id: &'static str,
+    bytes: u64,
+    note: &'static str,
+    installed: bool,
+}
+
+#[derive(Serialize)]
+struct VoiceInfo {
+    settings: VoiceSettings,
+    /// The whisper-server binary, if found.
+    server: Option<String>,
+    models: Vec<ModelInfo>,
+    stt: &'static str,
+    stt_error: Option<String>,
+    download: Option<(String, f32)>,
+}
+
+fn voice_info_of(state: &AppState) -> VoiceInfo {
+    let (stt, stt_error) = state.stt_state.lock().unwrap().clone();
+    VoiceInfo {
+        settings: state.settings.lock().unwrap().voice.clone(),
+        server: stt::find_server().map(|p| p.display().to_string()),
+        models: models::MODELS.iter().map(|m| ModelInfo { id: m.id, bytes: m.bytes, note: m.note, installed: m.is_installed() }).collect(),
+        stt,
+        stt_error,
+        download: state.download.lock().unwrap().clone(),
+    }
+}
+
+#[tauri::command]
+fn voice_info(state: State<AppState>) -> VoiceInfo {
+    voice_info_of(&state)
+}
+
+#[tauri::command]
+fn set_voice(state: State<AppState>, settings: VoiceSettings) -> VoiceInfo {
+    state.settings.lock().unwrap().voice = settings;
+    state.save_settings();
+    apply_voice(&state);
+    voice_info_of(&state)
+}
+
+#[tauri::command]
+async fn download_model(app: AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let model = Model::by_id(&id).ok_or_else(|| format!("unknown model {id}"))?;
+        {
+            let mut download = state.download.lock().unwrap();
+            if download.is_some() {
+                return Err("another model is downloading".to_string());
+            }
+            *download = Some((id.clone(), 0.0));
+        }
+        state.cancel_download.store(false, Ordering::SeqCst);
+        let result = model.download(&state.cancel_download, |p| *state.download.lock().unwrap() = Some((id.clone(), p.unwrap_or(0.0))));
+        *state.download.lock().unwrap() = None;
+        result.map_err(|e| e.to_string())?;
+        // The model voice was waiting for.
+        apply_voice(&state);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn cancel_download(state: State<AppState>) {
+    state.cancel_download.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn delete_model(state: State<AppState>, id: String) -> Result<VoiceInfo, String> {
+    let model = Model::by_id(&id).ok_or_else(|| format!("unknown model {id}"))?;
+    let in_use = state.voice.lock().unwrap().stt.as_ref().is_some_and(|s| Some(s.config().model.clone()) == model.path());
+    if in_use {
+        // Stop the server that has it open first.
+        state.voice.lock().unwrap().stt = None;
+    }
+    model.remove().map_err(|e| e.to_string())?;
+    apply_voice(&state);
+    Ok(voice_info_of(&state))
+}
+
 #[derive(Serialize)]
 struct Status {
     link: &'static str,
@@ -154,6 +341,7 @@ struct Status {
     firmware: Option<BoardFirmware>,
     logs: Vec<String>,
     voice: Option<String>,
+    transcripts: Vec<TranscriptEntry>,
     port_setting: Option<String>,
     faces: Faces,
     rotation: Rotations,
@@ -174,6 +362,7 @@ fn status(state: State<AppState>) -> Status {
         firmware: link.firmware.clone(),
         logs: link.logs.iter().cloned().collect(),
         voice: link.voice.clone(),
+        transcripts: link.transcripts.iter().cloned().collect(),
         port_setting: state.settings.lock().unwrap().port.clone(),
         faces: *state.faces.lock().unwrap(),
         rotation: *state.rotation.lock().unwrap(),
@@ -350,10 +539,13 @@ async fn with_device<T: Send + 'static>(
 fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
     let handle = app.clone();
     let state = app.state::<AppState>();
-    let (faces, rotation, hub) = (state.faces.clone(), state.rotation.clone(), state.hub.clone());
-    Bridge::spawn(BridgeConfig { port, faces, rotation, hub, ..Default::default() }, move |event| {
+    let (faces, rotation, hub, voice) = (state.faces.clone(), state.rotation.clone(), state.hub.clone(), state.voice.clone());
+    Bridge::spawn(BridgeConfig { port, faces, rotation, hub, voice, ..Default::default() }, move |event| {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
+            if let BridgeEvent::VoiceError { message } = &event {
+                *state.stt_state.lock().unwrap() = ("error", Some(message.clone()));
+            }
             // Faces and rotation came from the board (at connect, or an MCP
             // client changed them): keep them for the next launch too.
             if let BridgeEvent::Settings { faces, rotation } = &event {
@@ -460,8 +652,17 @@ pub fn run() {
                 collector: Mutex::new(None),
                 device_busy: AtomicBool::new(false),
                 esptool_dir,
+                voice: Arc::default(),
+                stt_state: Arc::new(Mutex::new(("off", None))),
+                download: Mutex::new(None),
+                cancel_download: AtomicBool::new(false),
             });
+            apply_voice(&app.state::<AppState>());
             let handle = app.handle();
+            // A logout or `kill` quits like the tray's Quit, so the port is
+            // released and the whisper-server sidecar stopped.
+            let quitter = handle.clone();
+            let _ = ctrlc::set_handler(move || quitter.exit(0));
             let bridge = start_bridge(handle, port);
             *app.state::<AppState>().bridge.lock().unwrap() = Some(bridge);
             build_tray(handle)?;
@@ -476,7 +677,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {
@@ -484,6 +685,9 @@ pub fn run() {
                 // Release the serial port before the process goes away.
                 if let Some(state) = app.try_state::<AppState>() {
                     state.bridge.lock().unwrap().take();
+                    // Stops the whisper-server sidecar.
+                    state.voice.lock().unwrap().stt = None;
+                    state.cancel_download.store(true, Ordering::SeqCst);
                     if let Some(hub) = &state.hub {
                         hub.set_unavailable("the DualEye app is quitting");
                     }

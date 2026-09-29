@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "board_audio.h"
+#include "link.h"
 #include "cJSON.h"
 #include "esp_afe_config.h"
 #include "esp_afe_sr_models.h"
@@ -25,8 +26,25 @@ static const char *TAG = "voice";
  * two unconnected. The AFE reads the interleaved frames as they come. */
 #define VOICE_INPUT_FORMAT "MRNN"
 #define VOICE_MODEL_PARTITION "model"
-/* Until M4 streams the utterance and the host says when it's done. */
-#define LISTEN_TIMEOUT_MS 6000
+/* The utterance after the wake word, streamed on `audio_up`: it ends after
+ * VAD_HANGOVER_MS + END_SILENCE_MS of silence once speech started,
+ * NO_SPEECH_MS without any, or MAX_UTTERANCE_MS in all. */
+#define VAD_HANGOVER_MS 500
+#define END_SILENCE_MS 250
+/* The VAD still reports the wake word itself for its hangover: speech that
+ * doesn't outlast it isn't the command. */
+#define WAKE_TAIL_MS (VAD_HANGOVER_MS + 200)
+#define NO_SPEECH_MS 5000
+#define MAX_UTTERANCE_MS 12000
+/* Frame header: utterance id, flags (none yet), sequence number (u16 LE). */
+#define AUDIO_HEADER 4
+/* The fetch task mustn't stall on a host that doesn't read. */
+#define AUDIO_SEND_WAIT_MS 20
+/* Level shown on the ring: this range of dBFS, updated this often. */
+#define LEVEL_FLOOR_DB -65.0f
+#define LEVEL_CEIL_DB -30.0f
+#define LEVEL_EVERY_MS 100
+#define LISTEN_TIMEOUT_MS (MAX_UTTERANCE_MS + 1000)
 /* A host that set thinking or speaking and went away doesn't leave it on. */
 #define HOST_STATE_TIMEOUT_MS 30000
 #define FETCH_WAIT_MS 100
@@ -34,6 +52,38 @@ static const char *TAG = "voice";
 #define TASK_PRIORITY 5
 
 #define RUN_BIT BIT0
+/* Host requests, for the fetch task, which owns the stream. */
+#define LISTEN_BIT BIT1
+#define STOP_BIT BIT2
+
+typedef enum {
+    END_SPEECH,
+    END_NO_SPEECH,
+    END_MAX_LENGTH,
+    END_HOST,
+    END_MUTED,
+} end_reason_t;
+
+static const char *const END_NAMES[] = {
+    [END_SPEECH] = "end_of_speech", [END_NO_SPEECH] = "no_speech", [END_MAX_LENGTH] = "max_length",
+    [END_HOST] = "host", [END_MUTED] = "muted",
+};
+
+/* The utterance being streamed. Only the fetch task touches it. */
+typedef struct {
+    bool active;
+    uint8_t id;
+    uint16_t seq;
+    int64_t start_us;
+    int64_t ignore_until_us; /* VAD speech before this is the wake word's */
+    int64_t speech_us; /* last frame with speech; 0 before any */
+    uint32_t samples;
+    uint32_t dropped;
+    int64_t level_us;
+    uint8_t *frame;
+} stream_t;
+
+static stream_t s_stream;
 
 static const char *const STATE_NAMES[VOICE_STATE_COUNT] = {
     [VOICE_IDLE] = "idle",
@@ -69,6 +119,7 @@ static SemaphoreHandle_t s_fetch;
 /* RUN_BIT: the feed task may read the mic (not muted, not paused). */
 static EventGroupHandle_t s_run;
 static SemaphoreHandle_t s_ctl;
+static EventGroupHandle_t s_req;
 static bool s_muted;
 static bool s_paused;
 
@@ -228,6 +279,96 @@ void voice_set_state(voice_state_t state)
     }
 }
 
+static void stream_start(const char *trigger, bool after_wake)
+{
+    stream_t *st = &s_stream;
+    st->active = true;
+    st->id++;
+    st->seq = 0;
+    st->start_us = esp_timer_get_time();
+    st->ignore_until_us = after_wake ? st->start_us + WAKE_TAIL_MS * 1000 : 0;
+    st->speech_us = 0;
+    st->samples = 0;
+    st->dropped = 0;
+    st->level_us = 0;
+    // "Alexa" said again mid-sentence isn't a new wake, and WakeNet's CPU is
+    // free meanwhile.
+    s_afe->disable_wakenet(s_afe_data);
+    cJSON *params = cJSON_CreateObject();
+    cJSON_AddNumberToObject(params, "id", st->id);
+    cJSON_AddStringToObject(params, "trigger", trigger);
+    cJSON_AddNumberToObject(params, "rate", 16000);
+    cJSON_AddStringToObject(params, "format", "s16le");
+    rpc_notify("utterance_start", params);
+    voice_set_state(VOICE_LISTENING);
+}
+
+static void stream_end(end_reason_t reason)
+{
+    stream_t *st = &s_stream;
+    if (!st->active) {
+        return;
+    }
+    st->active = false;
+    s_afe->enable_wakenet(s_afe_data);
+    int ms = (int) (st->samples / 16);
+    ESP_LOGI(TAG, "utterance %d: %d ms, %s%s", st->id, ms, END_NAMES[reason],
+             st->dropped ? " (frames dropped)" : "");
+    cJSON *params = cJSON_CreateObject();
+    cJSON_AddNumberToObject(params, "id", st->id);
+    cJSON_AddStringToObject(params, "reason", END_NAMES[reason]);
+    cJSON_AddNumberToObject(params, "ms", ms);
+    cJSON_AddBoolToObject(params, "speech", st->speech_us != 0);
+    cJSON_AddNumberToObject(params, "frames", st->seq);
+    cJSON_AddNumberToObject(params, "dropped", st->dropped);
+    rpc_notify("utterance_end", params);
+    // With speech the host transcribes it, and says what comes next.
+    voice_set_state(st->speech_us != 0 && reason != END_MUTED ? VOICE_THINKING : VOICE_IDLE);
+    lvgl_port_lock();
+    ui_voice_set_level(0);
+    lvgl_port_unlock();
+}
+
+static void stream_frame(const afe_fetch_result_t *res)
+{
+    stream_t *st = &s_stream;
+    int64_t now = esp_timer_get_time();
+    size_t bytes = (size_t) res->data_size;
+    if (bytes > LINK_MAX_PAYLOAD - AUDIO_HEADER) {
+        bytes = LINK_MAX_PAYLOAD - AUDIO_HEADER;
+    }
+    st->frame[0] = st->id;
+    st->frame[1] = 0;
+    st->frame[2] = (uint8_t) (st->seq & 0xff);
+    st->frame[3] = (uint8_t) (st->seq >> 8);
+    memcpy(st->frame + AUDIO_HEADER, res->data, bytes);
+    if (link_send_timeout(LINK_CHAN_AUDIO_UP, st->frame, AUDIO_HEADER + bytes, AUDIO_SEND_WAIT_MS) != ESP_OK) {
+        st->dropped++;
+    }
+    st->seq++;
+    st->samples += bytes / sizeof(int16_t);
+    if (res->vad_state == VAD_SPEECH && now >= st->ignore_until_us) {
+        st->speech_us = now;
+    }
+
+    if (now - st->level_us >= LEVEL_EVERY_MS * 1000) {
+        st->level_us = now;
+        float level = (res->data_volume - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB);
+        lvgl_port_lock();
+        ui_voice_set_level(level < 0 ? 0 : level > 1 ? 1 : level);
+        lvgl_port_unlock();
+    }
+
+    int64_t elapsed_ms = (now - st->start_us) / 1000;
+    if (st->speech_us != 0 && (now - st->speech_us) / 1000 >= END_SILENCE_MS) {
+        stream_end(END_SPEECH);
+    } else if (st->speech_us == 0 && elapsed_ms >= NO_SPEECH_MS) {
+        stream_end(END_NO_SPEECH);
+    } else if (elapsed_ms >= MAX_UTTERANCE_MS) {
+        stream_end(END_MAX_LENGTH);
+    }
+}
+
 static void on_wake(const afe_fetch_result_t *res)
 {
     ESP_LOGI(TAG, "wake word \"%s\" (%.1f dBFS)", voice_wake_word(), res->data_volume);
@@ -236,7 +377,7 @@ static void on_wake(const afe_fetch_result_t *res)
     cJSON_AddStringToObject(params, "model", s_model);
     cJSON_AddNumberToObject(params, "volume_db", (int) res->data_volume);
     rpc_notify("wake", params);
-    voice_set_state(VOICE_LISTENING);
+    stream_start("wake", true);
 }
 
 static void feed_task(void *arg)
@@ -269,17 +410,48 @@ static void fetch_task(void *arg)
         // Muted or paused nothing is fed, and fetching would only get the AFE
         // to warn about its empty buffer every time.
         EventBits_t run = xEventGroupWaitBits(s_run, RUN_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(FETCH_WAIT_MS));
-        if (run & RUN_BIT) {
-            xSemaphoreTake(s_fetch, portMAX_DELAY);
-            afe_fetch_result_t *res = s_afe->fetch_with_delay(s_afe_data, pdMS_TO_TICKS(FETCH_WAIT_MS));
-            if (res != NULL && res->ret_value != ESP_FAIL && res->wakeup_state == WAKENET_DETECTED) {
-                on_wake(res);
+        EventBits_t req = xEventGroupClearBits(s_req, LISTEN_BIT | STOP_BIT);
+        // s_stream is only touched with s_fetch held.
+        xSemaphoreTake(s_fetch, portMAX_DELAY);
+        if (!(run & RUN_BIT)) {
+            stream_end(END_MUTED);
+        } else {
+            if (req & STOP_BIT) {
+                stream_end(END_HOST);
             }
-            xSemaphoreGive(s_fetch);
+            if ((req & LISTEN_BIT) && !s_stream.active) {
+                stream_start("host", false);
+            }
+            afe_fetch_result_t *res = s_afe->fetch_with_delay(s_afe_data, pdMS_TO_TICKS(FETCH_WAIT_MS));
+            if (res != NULL && res->ret_value != ESP_FAIL) {
+                if (s_stream.active) {
+                    stream_frame(res);
+                } else if (res->wakeup_state == WAKENET_DETECTED) {
+                    on_wake(res);
+                }
+            }
         }
-        if (s_state != VOICE_IDLE && esp_timer_get_time() >= s_state_until_us) {
+        bool streaming = s_stream.active;
+        xSemaphoreGive(s_fetch);
+        if (!streaming && s_state != VOICE_IDLE && esp_timer_get_time() >= s_state_until_us) {
             voice_set_state(VOICE_IDLE);
         }
+    }
+}
+
+bool voice_listen(void)
+{
+    if (!s_available || s_muted) {
+        return false;
+    }
+    xEventGroupSetBits(s_req, LISTEN_BIT);
+    return true;
+}
+
+void voice_stop_listening(void)
+{
+    if (s_available) {
+        xEventGroupSetBits(s_req, STOP_BIT);
     }
 }
 
@@ -297,6 +469,8 @@ static esp_afe_sr_data_t *create_afe(const char *model)
     char *second = cfg->wakenet_model_name_2;
     cfg->wakenet_model_name = (char *) model;
     cfg->wakenet_model_name_2 = NULL;
+    // Silence ends an utterance sooner than the default 1000 ms.
+    cfg->vad_min_noise_ms = VAD_HANGOVER_MS;
     // Internal RAM is short (M0: 36 KB largest block); PSRAM has 8 MB.
     cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     cfg->afe_perferred_core = TASK_CORE;
@@ -325,6 +499,7 @@ esp_err_t voice_set_wake_word(const char *id)
     // the mic, so this waits for it.
     xSemaphoreTake(s_mic, portMAX_DELAY);
     xSemaphoreTake(s_fetch, portMAX_DELAY);
+    stream_end(END_HOST);
     s_afe->destroy(s_afe_data);
     esp_err_t err = ESP_OK;
     s_afe_data = create_afe(model);
@@ -395,7 +570,10 @@ void voice_start(bool muted, const char *wake_word)
     s_fetch = xSemaphoreCreateMutex();
     s_run = xEventGroupCreate();
     s_ctl = xSemaphoreCreateMutex();
-    if (s_mic == NULL || s_fetch == NULL || s_run == NULL || s_ctl == NULL) {
+    s_req = xEventGroupCreate();
+    s_stream.frame = heap_caps_malloc(LINK_MAX_PAYLOAD, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_mic == NULL || s_fetch == NULL || s_run == NULL || s_ctl == NULL || s_req == NULL
+        || s_stream.frame == NULL) {
         ESP_LOGE(TAG, "out of memory, continuing without voice");
         return;
     }

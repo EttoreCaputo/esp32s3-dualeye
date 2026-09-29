@@ -1,8 +1,10 @@
 #pragma once
 
 /* Always-on wake word: I2S mic + speaker loopback -> ESP-SR AFE (AEC,
- * VAD) -> WakeNet, on core 1. Drives the voice state the "eyes" overlay
- * shows and tells the host with `wake` and `voice_state` notifications
+ * VAD) -> WakeNet, on core 1. After the wake word the AFE's output is
+ * streamed to the host on `audio_up` until the speaker stops (VAD), between
+ * `utterance_start` and `utterance_end` notifications. Drives the voice state
+ * the "eyes" overlay shows and tells the host with `wake` and `voice_state`
  * (docs/protocol.md). */
 
 #include <stdbool.h>
@@ -37,6 +39,12 @@ bool voice_muted(void);
 /** Hand the mic to someone else (the audio self-test's `rec`) and back.
  * Blocks until the feed task has let go of it. Nests. */
 void voice_pause(bool pause);
+
+/** Stream an utterance as if the wake word had been heard (push-to-talk).
+ * False without voice or muted. */
+bool voice_listen(void);
+/** End the utterance being streamed, if any. */
+void voice_stop_listening(void);
 
 voice_state_t voice_state(void);
 /** What the overlay shows. The board sets LISTENING on the wake word and

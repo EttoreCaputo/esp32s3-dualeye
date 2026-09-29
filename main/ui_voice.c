@@ -7,15 +7,25 @@
 #define LISTENING_COLOR 0x30D5F0
 #define THINKING_COLOR 0xFFB020
 #define SPEAKING_COLOR 0x40E080
+#define LEVEL_COLOR 0xE0FAFF
+/* The level arc: centred at the top (LVGL: 0 deg is 3 o'clock, clockwise),
+ * up to this span (kept small: LVGL redraws the bounding box of what
+ * changes), in this many steps so a steady voice doesn't redraw. */
+#define LEVEL_CENTER_DEG 270
+#define LEVEL_MAX_DEG 100
+#define LEVEL_STEPS 10
 
 typedef struct {
     /* Full ring: listening and speaking. Drawn once, so it costs one redraw. */
     lv_obj_t *ring;
     /* Turning arc: thinking. LVGL redraws only the arc's old and new sectors. */
     lv_obj_t *spinner;
+    /* Over the ring while listening. LVGL redraws only the sectors that change. */
+    lv_obj_t *level;
 } ui_voice_t;
 
 static ui_voice_t s_voice[BOARD_LCD_COUNT];
+static int s_level_step;
 
 static void style_arc(lv_obj_t *arc)
 {
@@ -40,6 +50,11 @@ void ui_voice_create(lv_display_t *const displays[BOARD_LCD_COUNT])
         lv_arc_set_bg_angles(v->ring, 0, 360);
         lv_arc_set_angles(v->ring, 0, 360);
 
+        v->level = lv_arc_create(top);
+        style_arc(v->level);
+        lv_obj_set_style_arc_color(v->level, lv_color_hex(LEVEL_COLOR), LV_PART_INDICATOR);
+        lv_arc_set_bg_angles(v->level, 0, 360);
+
         v->spinner = lv_spinner_create(top);
         style_arc(v->spinner);
         lv_obj_set_style_arc_color(v->spinner, lv_color_hex(THINKING_COLOR), LV_PART_INDICATOR);
@@ -59,10 +74,33 @@ void ui_voice_show(voice_state_t state)
         } else {
             lv_obj_add_flag(v->ring, LV_OBJ_FLAG_HIDDEN);
         }
+        if (state != VOICE_LISTENING) {
+            lv_obj_add_flag(v->level, LV_OBJ_FLAG_HIDDEN);
+            s_level_step = 0;
+        }
         if (state == VOICE_THINKING) {
             lv_obj_remove_flag(v->spinner, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(v->spinner, LV_OBJ_FLAG_HIDDEN);
         }
+    }
+}
+
+void ui_voice_set_level(float level)
+{
+    int step = (int) (level * LEVEL_STEPS + 0.5f);
+    if (step == s_level_step) {
+        return;
+    }
+    s_level_step = step;
+    int half = step * LEVEL_MAX_DEG / LEVEL_STEPS / 2;
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        ui_voice_t *v = &s_voice[i];
+        if (step == 0) {
+            lv_obj_add_flag(v->level, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_arc_set_angles(v->level, (LEVEL_CENTER_DEG - half + 360) % 360, (LEVEL_CENTER_DEG + half) % 360);
+        lv_obj_remove_flag(v->level, LV_OBJ_FLAG_HIDDEN);
     }
 }

@@ -65,10 +65,31 @@ type BridgeEvent =
   | { kind: "settings"; faces: Faces; rotation: Rotations }
   | { kind: "wake"; word: string; volume_db: number | null }
   | { kind: "voice_state"; state: VoiceState }
+  | { kind: "listening"; id: number; trigger: string }
+  | { kind: "utterance"; utterance: Utterance; duration_ms: number; peak_db: number | null; wav: string | null }
+  | { kind: "transcript"; id: number; transcript: Transcript | null }
+  | { kind: "voice_error"; message: string }
   | { kind: "disconnected"; port: string; reason: string; permission_denied: boolean };
 
 /** What the board's "eyes" overlay shows. */
 export type VoiceState = "idle" | "listening" | "thinking" | "speaking";
+export type Utterance = { id: number; trigger: string; reason: string; speech: boolean; lost_frames: number };
+export type Transcript = { text: string; language: string; logprob: number | null; elapsed_ms: number };
+/** One line of the Voice tab's log; `transcript` null when Whisper heard no words. */
+export type TranscriptEntry = { id: number; at: number; transcript: Transcript | null };
+export type SttLanguage = "auto" | "it" | "en";
+export type VoiceSettings = { enabled: boolean; model: string; language: SttLanguage; keep_recordings: boolean };
+export type ModelInfo = { id: string; bytes: number; note: string; installed: boolean };
+export type SttStatus = "off" | "starting" | "ready" | "error";
+export type VoiceInfo = {
+  settings: VoiceSettings;
+  server: string | null;
+  models: ModelInfo[];
+  stt: SttStatus;
+  stt_error: string | null;
+  download: [string, number] | null;
+};
+const TRANSCRIPTS = 50;
 
 type Status = {
   link: Link;
@@ -81,6 +102,7 @@ type Status = {
   firmware: BoardFirmware | null;
   logs: string[];
   voice: VoiceState | null;
+  transcripts: TranscriptEntry[];
   port_setting: string | null;
   faces: Faces;
   rotation: Rotations;
@@ -121,6 +143,8 @@ class Monitor {
   rotation = $state<Rotations>({ ...DEFAULT_ROTATIONS });
   /** The board's voice overlay, mirrored. */
   voice = $state<VoiceState>("idle");
+  /** Transcribed utterances, oldest first. */
+  transcripts = $state<TranscriptEntry[]>([]);
 
   job = $state<DeviceJob>("idle");
   /** Output of the last esptool run. */
@@ -174,6 +198,7 @@ class Monitor {
     this.boardFirmware = s.firmware;
     this.logs = s.logs;
     this.voice = s.voice ?? "idle";
+    this.transcripts = s.transcripts;
   }
 
   #apply(e: BridgeEvent) {
@@ -217,6 +242,14 @@ class Monitor {
         break;
       case "voice_state":
         this.voice = e.state;
+        break;
+      case "transcript":
+        this.transcripts.push({ id: e.id, at: now, transcript: e.transcript });
+        if (this.transcripts.length > TRANSCRIPTS) this.transcripts.splice(0, this.transcripts.length - TRANSCRIPTS);
+        break;
+      case "listening":
+      case "utterance":
+      case "voice_error":
         break;
       case "disconnected":
         this.link = "offline";
@@ -325,6 +358,43 @@ class Monitor {
     return invoke<McpInfo>("mcp_info");
   }
 
+  async voiceInfo(): Promise<VoiceInfo> {
+    if (this.preview) return { ...previewVoice, settings: { ...previewVoice.settings } };
+    return invoke<VoiceInfo>("voice_info");
+  }
+
+  async setVoice(settings: VoiceSettings): Promise<VoiceInfo> {
+    if (this.preview) {
+      previewVoice.settings = settings;
+      previewVoice.stt = settings.enabled ? (previewVoice.models.find((m) => m.id === settings.model)?.installed ? "ready" : "error") : "off";
+      previewVoice.stt_error = previewVoice.stt === "error" ? `the ${settings.model} model isn't downloaded yet` : null;
+      return this.voiceInfo();
+    }
+    return invoke<VoiceInfo>("set_voice", { settings });
+  }
+
+  async downloadModel(id: string) {
+    if (this.preview) {
+      const m = previewVoice.models.find((m) => m.id === id);
+      if (m) m.installed = true;
+      return;
+    }
+    await invoke("download_model", { id });
+  }
+
+  async cancelDownload() {
+    if (!this.preview) await invoke("cancel_download");
+  }
+
+  async deleteModel(id: string): Promise<VoiceInfo> {
+    if (this.preview) {
+      const m = previewVoice.models.find((m) => m.id === id);
+      if (m) m.installed = false;
+      return this.voiceInfo();
+    }
+    return invoke<VoiceInfo>("delete_model", { id });
+  }
+
   async readings(): Promise<Reading[]> {
     if (this.preview) return previewReadings(this.last);
     return invoke<Reading[]>("readings");
@@ -348,6 +418,19 @@ const previewMcp: McpInfo = {
 
 let previewClaudeLink: ClaudeLink = { connected: false, chained: null, last_update_s: null, settings_path: "~/.claude/settings.json" };
 
+const previewVoice: VoiceInfo = {
+  settings: { enabled: false, model: "small", language: "auto", keep_recordings: false },
+  server: "/opt/homebrew/bin/whisper-server",
+  models: [
+    { id: "base", bytes: 147_951_465, note: "Fastest, for slow CPUs; often wrong in Italian", installed: false },
+    { id: "small", bytes: 487_601_967, note: "Good balance: about 0.7 s a command on an M1 Pro", installed: true },
+    { id: "large-v3-turbo-q5_0", bytes: 574_041_195, note: "Most accurate; wants a GPU (Apple silicon, NVIDIA)", installed: false },
+  ],
+  stt: "off",
+  stt_error: null,
+  download: null,
+};
+
 function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, rotation: () => Rotations) {
   const boot = [
     "ESP-ROM:esp32s3-20210327",
@@ -363,10 +446,17 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
   setTimeout(() => emit({ kind: "firmware", firmware: { state: "legacy" } }), 8000);
   // Now and then someone says the wake word: listening, then thinking, then back to idle.
   const voice = (state: VoiceState, at: number) => setTimeout(() => emit({ kind: "voice_state", state }), at);
+  const phrases: [string, string][] = [
+    ["Metti la faccia rings a sinistra.", "it"],
+    ["What is the GPU temperature?", "en"],
+  ];
+  let said = 0;
   setInterval(() => {
     voice("listening", 0);
     voice("thinking", 2500);
-    voice("idle", 4500);
+    const [text, language] = phrases[said++ % phrases.length];
+    setTimeout(() => emit({ kind: "transcript", id: said, transcript: { text, language, logprob: -0.2, elapsed_ms: 640 } }), 3100);
+    voice("idle", 3200);
   }, 30000);
 
   const t0 = performance.now();

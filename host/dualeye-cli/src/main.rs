@@ -7,11 +7,13 @@
 //!   dualeye --sensors       # list every raw sensor the backends see
 //!   dualeye --cpu-face rings --gpu-face claude
 //!   dualeye --cpu-rotation 180    # a board mounted upside down
+//!   dualeye --voice-dump          # keep what the board hears after its wake word as WAV files
 //!   dualeye --claude-statusline   # Claude Code status line helper (reads stdin)
 //!   dualeye tools                 # list the board's tools
 //!   dualeye call set_face --screen left --face rings
 //!   dualeye call show_text '{"text":"Ciao"}'
 //!   dualeye mcp                   # MCP server on stdio, for Claude Code / Claude Desktop
+//!   dualeye models download small # a Whisper model, for `dualeye --stt`
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -22,6 +24,9 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
 use dualeye_core::claude::statusline;
+use dualeye_core::models::{self, Model};
+use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage};
+use dualeye_core::voice::{self, VoiceConfig};
 use dualeye_core::{Board, BoardFirmware, ClaudeUsage, Collector, Face, Faces, Hub, Memory, Rotation, Rotations, Snapshot, mcp, serial};
 use serde_json::{Map, Value};
 
@@ -66,6 +71,18 @@ struct Args {
     /// Do not print a line per snapshot
     #[arg(long, short)]
     quiet: bool,
+    /// Save each utterance the board streams after its wake word as a WAV
+    /// file, in DIR or in `voice/` in DualEye's data folder
+    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "")]
+    voice_dump: Option<std::path::PathBuf>,
+    /// Transcribe what the board hears with whisper.cpp (`whisper-server` on
+    /// the PATH): a model from `dualeye models` (default: small), or a ggml
+    /// model file
+    #[arg(long, value_name = "MODEL|FILE", num_args = 0..=1, default_missing_value = "small")]
+    stt: Option<String>,
+    /// Language to transcribe in: auto (Italian or English), it or en
+    #[arg(long, default_value = "auto")]
+    stt_language: SttLanguage,
 }
 
 /// Talk to the board's tools. While the app or a streaming `dualeye` runs,
@@ -102,6 +119,19 @@ enum Command {
         #[arg(long, env = "DUALEYE_PORT")]
         port: Option<String>,
     },
+    /// List the Whisper models for `--stt`, or download or remove one
+    Models {
+        #[command(subcommand)]
+        action: Option<ModelsAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelsAction {
+    /// Download a model and check its SHA-256
+    Download { id: String },
+    /// Delete a downloaded model
+    Remove { id: String },
 }
 
 fn main() -> ExitCode {
@@ -109,6 +139,7 @@ fn main() -> ExitCode {
     match args.command {
         Some(Command::Tools { port, json }) => return tools(port, json),
         Some(Command::Call { port, json, tool, args }) => return call(port, json, &tool, &args),
+        Some(Command::Models { action }) => return models_command(action),
         Some(Command::Mcp { port }) => {
             return match mcp::serve_stdio(port) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -150,6 +181,14 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    let stt = match args.stt.as_deref().map(|m| stt_config(m, args.stt_language)) {
+        None => None,
+        Some(Ok(config)) => Some(Arc::new(Stt::new(config))),
+        Some(Err(why)) => {
+            eprintln!("{why}");
+            return ExitCode::FAILURE;
+        }
+    };
     // Lets `dualeye mcp` and `dualeye call` use the board while this streams.
     let hub = Hub::start().inspect_err(|e| eprintln!("not sharing the board with other processes: {e}")).ok();
     let config = BridgeConfig {
@@ -162,8 +201,17 @@ fn main() -> ExitCode {
         })),
         hub,
         adopt_board_settings: args.cpu_face.is_none() && args.gpu_face.is_none() && args.cpu_rotation.is_none() && args.gpu_rotation.is_none(),
+        voice: Arc::new(Mutex::new(VoiceConfig {
+            dump_dir: args.voice_dump.map(|d| if d.as_os_str().is_empty() { voice::default_dump_dir().unwrap_or(d) } else { d }),
+            stt,
+        })),
     };
     let stop = Arc::new(AtomicBool::new(false));
+    // Ctrl-C ends the loop, so the whisper-server sidecar is stopped too.
+    {
+        let stop = stop.clone();
+        let _ = ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed));
+    }
     let fatal = Arc::new(AtomicBool::new(false));
     let quiet = args.quiet;
     let sink = {
@@ -183,6 +231,26 @@ fn main() -> ExitCode {
             },
             BridgeEvent::VoiceState { state } if !quiet => println!("voice: {state}"),
             BridgeEvent::VoiceState { .. } => {}
+            BridgeEvent::Transcript { id, transcript: Some(t) } => {
+                println!("utterance {id} [{}, {:.1} s]: {}", t.language, t.elapsed_ms as f64 / 1000.0, t.text)
+            }
+            BridgeEvent::Transcript { id, transcript: None } => println!("utterance {id}: no words"),
+            BridgeEvent::VoiceError { message } => eprintln!("{message}"),
+            BridgeEvent::Listening { id, trigger } => println!("utterance {id}: listening ({trigger})"),
+            BridgeEvent::Utterance { utterance: u, duration_ms, peak_db, wav } => println!(
+                "utterance {}: {:.1} s, {}{}{}{}",
+                u.id,
+                duration_ms as f64 / 1000.0,
+                u.reason.replace('_', " "),
+                if u.speech || u.reason == "no_speech" { "" } else { ", no speech" },
+                peak_db.map(|db| format!(", peak {db:.0} dBFS")).unwrap_or_default(),
+                match (u.lost_frames, wav) {
+                    (0, None) => String::new(),
+                    (0, Some(w)) => format!(" -> {w}"),
+                    (n, None) => format!(", {n} frames lost"),
+                    (n, Some(w)) => format!(", {n} frames lost -> {w}"),
+                }
+            ),
             BridgeEvent::Settings { faces, rotation } => println!(
                 "board settings: faces {}/{}, rotation {}/{}",
                 faces.cpu.name(),
@@ -210,6 +278,66 @@ fn main() -> ExitCode {
     };
     bridge::run(&config, &stop, sink);
     if fatal.load(Ordering::Relaxed) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+/// `--stt small` (a model from `dualeye models`) or `--stt path/to/ggml-model.bin`.
+fn stt_config(model: &str, language: SttLanguage) -> Result<SttConfig, String> {
+    let server = stt::find_server().ok_or("whisper-server not found: install whisper.cpp (brew install whisper-cpp)")?;
+    let file = std::path::Path::new(model);
+    let model = if file.is_file() {
+        file.to_path_buf()
+    } else {
+        let known = Model::by_id(model).ok_or_else(|| format!("{model}: no such file, and not one of {}", model_ids()))?;
+        if !known.is_installed() {
+            return Err(format!("the {model} model isn't downloaded: dualeye models download {model}"));
+        }
+        known.path().ok_or("no data folder for the models")?
+    };
+    Ok(SttConfig { server, model, language })
+}
+
+fn model_ids() -> String {
+    models::MODELS.iter().map(|m| m.id).collect::<Vec<_>>().join(", ")
+}
+
+fn models_command(action: Option<ModelsAction>) -> ExitCode {
+    let find = |id: &str| Model::by_id(id).ok_or_else(|| format!("unknown model {id:?}: {}", model_ids()));
+    let result = match action {
+        None => {
+            for m in models::MODELS {
+                let mark = if m.is_installed() { "installed" } else { "" };
+                let default = if m.id == models::DEFAULT_MODEL { " (default)" } else { "" };
+                println!("{:<22} {:>5} MB  {:<9}  {}{default}", m.id, m.bytes / 1_000_000, mark, m.note);
+            }
+            if let Some(dir) = stt::models_dir() {
+                println!("\nin {}", dir.display());
+            }
+            Ok(())
+        }
+        Some(ModelsAction::Download { id }) => find(&id).and_then(|m| {
+            let mut last = -1i32;
+            let path = m
+                .download(&AtomicBool::new(false), |p| {
+                    let p = p.unwrap_or(0.0) as i32;
+                    if p / 10 != last / 10 {
+                        last = p;
+                        eprint!("\r{} {p:>3} %", m.id);
+                    }
+                })
+                .map_err(|e| format!("\n{}: {e}", m.id))?;
+            eprintln!();
+            println!("{}", path.display());
+            Ok(())
+        }),
+        Some(ModelsAction::Remove { id }) => find(&id).and_then(|m| m.remove().map_err(|e| e.to_string())),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn board(port: Option<String>) -> Board {

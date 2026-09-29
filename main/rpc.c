@@ -76,8 +76,8 @@ static cJSON *identity(void)
     cJSON_AddStringToObject(id, "idf", app->idf_ver);
     cJSON_AddStringToObject(id, "board", "dualeye");
     cJSON_AddNumberToObject(id, "max_payload", LINK_MAX_PAYLOAD);
-    const char *channels[] = {"ctrl", "metrics", "log"};
-    cJSON_AddItemToObject(id, "channels", cJSON_CreateStringArray(channels, 3));
+    const char *channels[] = {"ctrl", "metrics", "log", "audio_up"};
+    cJSON_AddItemToObject(id, "channels", cJSON_CreateStringArray(channels, voice_available() ? 4 : 3));
     const char *caps[] = {"tools", "voice"};
     cJSON_AddItemToObject(id, "capabilities", cJSON_CreateStringArray(caps, voice_available() ? 2 : 1));
     return id;
@@ -156,6 +156,17 @@ void rpc_handle(uint8_t *payload, size_t len)
             voice_set_state(s);
             result = cJSON_CreateObject();
         }
+    } else if (strcmp(name, "voice/listen") == 0) {
+        // Push-to-talk: stream an utterance without the wake word.
+        if (!voice_listen()) {
+            code = RPC_INVALID_PARAMS;
+            message = voice_available() ? "microphone muted" : "voice not available";
+        } else {
+            result = cJSON_CreateObject();
+        }
+    } else if (strcmp(name, "voice/stop") == 0) {
+        voice_stop_listening();
+        result = cJSON_CreateObject();
     } else if (strcmp(name, "debug/audio") == 0) {
         const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(params, "cmd");
         if (!cJSON_IsString(cmd)) {
