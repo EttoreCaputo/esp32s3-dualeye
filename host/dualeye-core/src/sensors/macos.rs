@@ -1,17 +1,25 @@
 //! macOS: what sysinfo's component list cannot give.
 //!
 //! - Temperatures from the SMC. Apple Silicon keys change with every chip
-//!   generation, so each has its own list (the ones Stats uses); a chip not
-//!   listed falls back to the key prefixes (`Tp`/`Te` CPU, `Tg` GPU). Intel
-//!   Macs use `TC0x` for the CPU and `TG..`/`TCGC` for the GPU.
+//!   generation, so each has its own list; a chip not listed falls back to
+//!   the key prefixes (`Tp`/`Te` CPU, `Tg` GPU). Intel Macs use `TC0x` for the
+//!   CPU and `TG..`/`TCGC` for the GPU. The per-core sensors are instantaneous
+//!   and a power-gated core reads a fixed value below room temperature, so
+//!   each key keeps its last valid reading and the average is smoothed.
 //! - Fan speeds from the SMC (`F<n>Ac`).
-//! - CPU and GPU clocks and power from IOReport (`ioreport.rs`), Apple Silicon only.
+//! - CPU and GPU clocks and power from IOReport (`ioreport.rs`), Apple Silicon
+//!   only. Where macOS 27 froze the CPU energy counter, the CPU power is the
+//!   SMC's SoC power rail minus IOReport's GPU power.
+//! - CPU and GPU power from `powermetrics` when the root helper the app
+//!   installs is running (`power_helper.rs`); it beats both of the above.
 //! - GPU load and memory from IOAccelerator's `PerformanceStatistics`.
 //!
 //! None of it needs root.
 
 use std::ffi::{CStr, c_char, c_void};
+use std::collections::HashMap;
 use std::mem::size_of;
+use std::time::Instant;
 
 use core_foundation::base::{CFType, TCFType, kCFAllocatorDefault};
 use core_foundation::dictionary::CFDictionary;
@@ -26,6 +34,7 @@ use mach2::kern_return::KERN_SUCCESS;
 use mach2::traps::mach_task_self;
 
 use super::ioreport::IoReport;
+use super::power_helper::PowerHelper;
 use super::{PlatformSample, Reading, average};
 use crate::snapshot::{Memory, round1};
 
@@ -143,8 +152,15 @@ impl Smc {
         v.is_finite().then_some(v)
     }
 
+    /// Real die temperatures only: a power-gated Apple Silicon core reads a
+    /// fixed −4…8 °C, and M3 Max parks unused keys at exactly 40.0.
     fn temperature(&self, key: &SmcKey) -> Option<f64> {
-        self.value(key).filter(|t| *t > 0.0 && *t < 150.0)
+        self.value(key).filter(|t| (15.0..120.0).contains(t) && *t != 40.0)
+    }
+
+    /// Watts; Apple Silicon power keys are `flt `.
+    fn power(&self, key: &SmcKey) -> Option<f64> {
+        self.value(key).filter(|w| (0.0..1000.0).contains(w))
     }
 
     fn rpm(&self, key: &SmcKey) -> Option<u32> {
@@ -166,7 +182,8 @@ struct SmcKey {
 }
 
 /// CPU and GPU temperature keys per Apple Silicon generation (Stats'
-/// `Modules/Sensors/values.swift`). Keys a model lacks just do not read back.
+/// `Modules/Sensors/values.swift`, iSMC's for M3). Keys a model lacks just do
+/// not read back.
 fn generation_keys(brand: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
     let generation = brand.strip_prefix("Apple M")?.chars().next()?.to_digit(10)?;
     Some(match generation {
@@ -178,12 +195,18 @@ fn generation_keys(brand: &str) -> Option<(&'static [&'static str], &'static [&'
             &["Tp1h", "Tp1t", "Tp1p", "Tp1l", "Tp01", "Tp05", "Tp09", "Tp0D", "Tp0X", "Tp0b", "Tp0f", "Tp0j"],
             &["Tg0f", "Tg0j"],
         ),
+        // iSMC's map, checked against M3 Pro dumps: each core has a triplet
+        // (raw, calibrated, peak); these are the calibrated ones, as on M1/M2.
+        // Stats' `Tf..` keys are GPU fabric blocks, and absent on M3 Pro.
         3 => (
             &[
-                "Te05", "Te0L", "Te0P", "Te0S", "Tf04", "Tf09", "Tf0A", "Tf0B", "Tf0D", "Tf0E", "Tf44", "Tf49", "Tf4A",
-                "Tf4B", "Tf4D", "Tf4E",
+                "Te05", "Te0H", "Te0P", "Te0S", "Te0U", "Te0L", "Tp05", "Tp0D", "Tp0L", "Tp0b", "Tp0h", "Tp0n", "Tp1F",
+                "Tp1R", "Tp0z",
             ],
-            &["Tf14", "Tf18", "Tf19", "Tf1A", "Tf24", "Tf28", "Tf29", "Tf2A"],
+            &[
+                "Tg01", "Tg05", "Tg0D", "Tg0L", "Tg0V", "Tg13", "Tg1B", "Tg1l", "Tg0z", "Tg1F", "Tg17", "Tg1t", "Tg1y",
+                "Tg22", "Tg2A", "Tg2I", "Tg34", "Tg3C", "Tg3K", "Tg3y",
+            ],
         ),
         4 => (
             &["Te05", "Te0S", "Te09", "Te0H", "Tp01", "Tp05", "Tp09", "Tp0D", "Tp0V", "Tp0Y", "Tp0b", "Tp0e"],
@@ -214,21 +237,35 @@ fn is_fan_key(name: &[u8; 4]) -> bool {
     name[0] == b'F' && name[1].is_ascii_digit() && &name[2..] == b"Ac"
 }
 
+/// SoC power rails, in order of preference. They rise with CPU and GPU load
+/// alike, so the CPU's share is what is left after the GPU's.
+const SOC_POWER_KEYS: &[&[u8; 4]] = &[b"PZC0", b"PHPC", b"PHPS"];
+
+/// Power keys listed by `dualeye --sensors`: system total, the SoC rails and
+/// the per-block `PC..` rails some chips have.
+fn is_power_key(name: &[u8; 4]) -> bool {
+    name == b"PSTR" || SOC_POWER_KEYS.contains(&name) || (name.starts_with(b"PC") && name[2].is_ascii_digit())
+}
+
 #[derive(Default)]
 struct SmcKeys {
     cpu: Vec<SmcKey>,
     gpu: Vec<SmcKey>,
     fans: Vec<SmcKey>,
+    power: Vec<SmcKey>,
+    soc_power: Option<SmcKey>,
 }
 
 /// Walk the SMC's key table once for the temperature and fan keys that read back.
 fn discover(smc: &Smc, brand: &str) -> SmcKeys {
     let mut temps = Vec::new();
     let mut fans = Vec::new();
+    let mut power = Vec::new();
     for code in (0..smc.key_count()).filter_map(|i| smc.key_at(i)) {
         let name = code.to_be_bytes();
         let fan = is_fan_key(&name);
-        if !fan && name[0] != b'T' {
+        let watts = is_power_key(&name);
+        if !fan && !watts && name[0] != b'T' {
             continue;
         }
         let Some(info) = smc.key_info(code) else {
@@ -239,7 +276,12 @@ fn discover(smc: &Smc, brand: &str) -> SmcKeys {
             if smc.rpm(&key).is_some() {
                 fans.push(key);
             }
-        } else if smc.temperature(&key).is_some() {
+        } else if watts {
+            if smc.power(&key).is_some() {
+                power.push(key);
+            }
+        } else if smc.value(&key).is_some_and(|t| (-50.0..150.0).contains(&t)) {
+            // Not `temperature`: a core that is power-gated right now still counts.
             temps.push(key);
         }
     }
@@ -255,7 +297,34 @@ fn discover(smc: &Smc, brand: &str) -> SmcKeys {
         cpu = temps.iter().filter(|k| is_cpu_key(&code(k)) && !is_gpu_key(&code(k))).cloned().collect();
     }
     fans.sort_by_key(|k| k.code);
-    SmcKeys { cpu, gpu, fans }
+    power.sort_by_key(|k| k.code);
+    let soc_power =
+        SOC_POWER_KEYS.iter().find_map(|name| power.iter().find(|k| k.code == fourcc(name))).cloned();
+    SmcKeys { cpu, gpu, fans, power, soc_power }
+}
+
+/// Exponential moving average over wall time, for the instantaneous SMC values.
+#[derive(Default)]
+struct Ema {
+    last: Option<(f64, Instant)>,
+}
+
+impl Ema {
+    /// Seconds for a step change to get ~63% of the way.
+    const TAU: f64 = 2.0;
+
+    fn push(&mut self, value: f64) -> f64 {
+        let now = Instant::now();
+        let smoothed = match self.last {
+            Some((prev, at)) => {
+                let alpha = 1.0 - (-now.duration_since(at).as_secs_f64() / Self::TAU).exp();
+                prev + alpha * (value - prev)
+            }
+            None => value,
+        };
+        self.last = Some((smoothed, now));
+        smoothed
+    }
 }
 
 /// What one IOAccelerator reports.
@@ -336,20 +405,55 @@ pub struct MacSensors {
     smc: Option<Smc>,
     keys: SmcKeys,
     report: Option<IoReport>,
+    helper: PowerHelper,
+    /// Each temperature key's last valid reading, so a core that powers down
+    /// keeps its place in the average instead of making it jump.
+    last_temp: HashMap<u32, f64>,
+    cpu_temp: Ema,
+    gpu_temp: Ema,
+    cpu_power: Ema,
 }
 
 impl MacSensors {
     pub fn new() -> Self {
         let smc = Smc::open();
         let keys = smc.as_ref().map(|s| discover(s, &cpu_brand())).unwrap_or_default();
-        Self { smc, keys, report: IoReport::new() }
+        Self {
+            smc,
+            keys,
+            report: IoReport::new(),
+            helper: PowerHelper::start(),
+            last_temp: HashMap::new(),
+            cpu_temp: Ema::default(),
+            gpu_temp: Ema::default(),
+            cpu_power: Ema::default(),
+        }
     }
 
+    /// The keys' current readings, raw.
     fn temps<'a>(&self, keys: &'a [SmcKey]) -> Vec<(&'a SmcKey, f64)> {
         let Some(smc) = &self.smc else {
             return Vec::new();
         };
         keys.iter().filter_map(|k| Some((k, smc.temperature(k)?))).collect()
+    }
+
+    /// Average over the keys, each at its last valid reading.
+    fn held_average(&mut self, cpu: bool) -> Option<f64> {
+        let smc = self.smc.as_ref()?;
+        let keys = if cpu { &self.keys.cpu } else { &self.keys.gpu };
+        let mut values = Vec::with_capacity(keys.len());
+        for k in keys {
+            if let Some(t) = smc.temperature(k) {
+                self.last_temp.insert(k.code, t);
+            }
+            values.extend(self.last_temp.get(&k.code).copied());
+        }
+        average(&values)
+    }
+
+    fn soc_power(&self) -> Option<f64> {
+        self.smc.as_ref()?.power(self.keys.soc_power.as_ref()?)
     }
 
     fn fans(&self) -> Vec<(&SmcKey, u32)> {
@@ -363,21 +467,33 @@ impl MacSensors {
     /// the memory size of a GPU that shares the RAM. Clocks and power are
     /// averages since the previous call (or [`MacSensors::readings`]).
     pub fn fill(&mut self, out: &mut PlatformSample, ram_total: u64) {
-        let average_of = |t: Vec<(&SmcKey, f64)>| average(&t.into_iter().map(|(_, t)| t).collect::<Vec<_>>());
         // The SMC has a sensor per core; IOHID's are not named after the CPU on every chip.
-        if let Some(t) = average_of(self.temps(&self.keys.cpu)) {
-            out.cpu_temp = Some(t);
+        if let Some(t) = self.held_average(true) {
+            out.cpu_temp = Some(self.cpu_temp.push(t));
         }
-        if let Some(t) = average_of(self.temps(&self.keys.gpu)) {
-            out.gpu.temp_c = Some(round1(t));
+        if let Some(t) = self.held_average(false) {
+            out.gpu.temp_c = Some(round1(self.gpu_temp.push(t)));
         }
         out.board_fans = self.fans().into_iter().map(|(_, rpm)| rpm).collect();
 
+        let exact = self.helper.latest();
         if let Some(s) = self.report.as_mut().and_then(IoReport::sample) {
             out.cpu_clock = s.cpu_mhz.or(out.cpu_clock);
             out.cpu_power = s.cpu_w.or(out.cpu_power);
             out.gpu.clock_mhz = s.gpu_mhz;
             out.gpu.power_w = s.gpu_w.map(round1);
+            if s.cpu_frozen
+                && exact.is_none()
+                && let Some(soc) = self.soc_power()
+            {
+                let cpu = (soc - s.gpu_w.unwrap_or(0.0)).max(0.0);
+                out.cpu_power = Some(self.cpu_power.push(cpu));
+            }
+        }
+
+        if let Some(p) = exact {
+            out.cpu_power = p.cpu_w.or(out.cpu_power);
+            out.gpu.power_w = p.gpu_w.map(round1).or(out.gpu.power_w);
         }
 
         // The busiest one is the GPU in use (Intel Macs switch between two).
@@ -399,6 +515,11 @@ impl MacSensors {
         out.extend(self.temps(&self.keys.cpu).into_iter().map(|(k, t)| smc(format!("CPU {}", k.name), t, "°C")));
         out.extend(self.temps(&self.keys.gpu).into_iter().map(|(k, t)| smc(format!("GPU {}", k.name), t, "°C")));
         out.extend(self.fans().into_iter().map(|(k, rpm)| smc(format!("Fan {}", k.name), f64::from(rpm), "RPM")));
+        if let Some(s) = &self.smc {
+            out.extend(
+                self.keys.power.iter().filter_map(|k| Some(smc(format!("Power {}", k.name), s.power(k)?, "W"))),
+            );
+        }
         if let Some(s) = self.report.as_mut().and_then(IoReport::sample) {
             let ior =
                 |label: &str, value: f64, unit| Reading { source: "ioreport".into(), label: label.into(), value, unit };
@@ -406,6 +527,25 @@ impl MacSensors {
             out.extend(s.cpu_w.map(|w| ior("CPU power", w, "W")));
             out.extend(s.gpu_mhz.map(|f| ior("GPU clock", f64::from(f), "MHz")));
             out.extend(s.gpu_w.map(|w| ior("GPU power", w, "W")));
+            if s.cpu_frozen
+                && let (Some(key), Some(soc)) = (&self.keys.soc_power, self.soc_power())
+            {
+                let label = format!("CPU power ({} − GPU)", key.name);
+                let cpu = (soc - s.gpu_w.unwrap_or(0.0)).max(0.0);
+                out.push(Reading { source: "smc".into(), label, value: cpu, unit: "W" });
+            }
+        }
+        if let Some(p) = self.helper.latest() {
+            let pm = |label: &str, value: f64| Reading {
+                source: "powermetrics".into(),
+                label: label.into(),
+                value,
+                unit: "W",
+            };
+            out.extend(p.cpu_w.map(|w| pm("CPU power", w)));
+            out.extend(p.gpu_w.map(|w| pm("GPU power", w)));
+            out.extend(p.ane_w.map(|w| pm("ANE power", w)));
+            out.extend(p.package_w.map(|w| pm("Package power", w)));
         }
         for (i, a) in accelerators().iter().enumerate() {
             if let Some(u) = a.utilization {

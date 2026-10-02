@@ -135,7 +135,8 @@ Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` i
 | `set_mic` | `muted`: boolean | Stop or restart listening for the wake word. Muted, the mic isn't read at all |
 | `set_wake_word` | `word`: `alexa` (default) · `hiesp` | Listen for "Alexa" or "Hi ESP" from now on. Refused when the `model` partition has no model for it |
 | `set_volume` | `percent`: 0–100 | Speaker volume (default 60) |
-| `set_eyes` | `on`: boolean | During a conversation, show animated eyes over the whole screens (`true`, the default) or the ring round the watch face (`false`). `get_state` has it as `voice.eyes` |
+| `set_eyes` | `on`: boolean; `idle`: boolean (at least one) | `on`: during a conversation, show animated eyes over the whole screens (`true`, the default) or the ring round the watch face (`false`). `idle` (firmware 1.0.2): while nobody is talking, the eyes play a short scene every 30–120 s (`true`, the default). `get_state` has them as `voice.eyes` and `voice.idle_eyes` |
+| `play_eyes` | `name`: `look_around` · `sleepy` · `suspicious` · `happy` · `surprised` · `wink` · `angry` · `sad` · `dizzy` · `cross_eyed` · `eye_roll` · `curious` · `love` · `scan` · `shy` · `flutter`; optional | Play that scene now (a random one without `name`), a few seconds over the watch faces. Refused during a conversation |
 | `get_state` | none | Firmware, uptime, metrics state, each screen's face, rotation and brightness, voice (`available`, `wake_word`, `wake_word_id`, `model`, `wake_words` the board has models for, `muted`, `state`), audio (`speaker`, `volume`, `playing`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (as `structuredContent`) |
 
 Example:

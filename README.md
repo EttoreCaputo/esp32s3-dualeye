@@ -90,7 +90,7 @@ After the wake word the screens turn into two animated eyes (the app's mirror sh
 | Green, smiling and bobbing with the speaker's level | Speaking |
 | Red and sad, with a shake and two falling notes | Something failed, or no words were heard; say "Alexa" again |
 
-They close and the watch faces come back when the conversation ends. Turn off **Show animated eyes while talking** in the Voice tab (firmware 1.0.1) for a ring round the faces instead, in the same colours: cyan with an arc that follows your voice, amber turning, green with the speaker's level, red.
+They close and the watch faces come back when the conversation ends. While nobody is talking they also come out on their own every minute or two for a few seconds (a wink, a yawn, a look around, a dizzy spin...); turn off **Let the eyes play now and then while idle** in the Voice tab (firmware 1.0.2) to keep the faces still. Turn off **Show animated eyes while talking** in the Voice tab (firmware 1.0.1) for a ring round the faces instead, in the same colours: cyan with an arc that follows your voice, amber turning, green with the speaker's level, red.
 
 - **Follow-ups.** After an answer the board keeps listening for 4 s, so *"e anche a destra"* or *"a bit more"* works straight away; the last exchanges are remembered for 3 minutes. Turn it off with **Keep listening after an answer**.
 - **Interrupting.** Say "Alexa" while the board talks: it stops and listens.
@@ -154,7 +154,7 @@ For Claude Desktop, add the same command to `claude_desktop_config.json` (Settin
 
 | Tool | From | Does |
 |------|------|------|
-| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `set_mic`, `set_wake_word`, `set_volume`, `set_eyes`, `get_state` | Board | Passed through as the firmware describes them ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
+| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `set_mic`, `set_wake_word`, `set_volume`, `set_eyes`, `play_eyes`, `get_state` | Board | Passed through as the firmware describes them ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
 | `get_metrics` | Host | CPU and GPU temperature, load, clock, power, memory, fans |
 | `get_claude_usage` | Host | Claude Code tokens in the 5-hour window and today, plan limits used, time to reset, working or idle |
 | `speak` | Host | Says a short text out loud through the board, in Italian or English; needs the app with spoken replies on, or `dualeye --tts`, running |
@@ -224,8 +224,8 @@ dualeye call set_mic --muted true
 |------|-------|---------|-------|
 | CPU load | ✓ | ✓ | ✓ |
 | CPU clock | ✓ | ✓ | Apple Silicon: IOReport (the real average clock; sysinfo only gives the maximum); Intel: ✓ |
-| CPU temp (avg of all CPU sensors) | hwmon: coretemp, k10temp, zenpower | ACPI thermal zone (run as admin; many boards report nothing) | SMC (per-core keys for each chip generation, M1–M5), else IOHID |
-| CPU power | RAPL (see below) | — | Apple Silicon: IOReport `Energy Model` |
+| CPU temp (avg of all CPU sensors) | hwmon: coretemp, k10temp, zenpower | ACPI thermal zone (run as admin; many boards report nothing) | SMC (per-core keys for each chip generation, M1–M5; a core that powers down keeps its last reading, and the average is smoothed over ~2 s), else IOHID |
+| CPU power | RAPL (see below) | — | Apple Silicon: `powermetrics` through the app's system helper (see below), else IOReport `Energy Model`; on macOS 27, which freezes its CPU counter for apps without Apple's entitlement, the SMC SoC rail (`PZC0`) minus the GPU's power |
 | NVIDIA GPU (temp, load, clock, power, fan RPM) | NVML | NVML | — |
 | AMD GPU | hwmon `amdgpu` | — | — |
 | Mac GPU (temp, load, memory, clock, power) | — | — | SMC temperatures (per-generation keys on Apple Silicon, `TG*` on Intel), IOAccelerator; clock and power from IOReport on Apple Silicon |
@@ -244,6 +244,8 @@ echo 'z /sys/class/powercap/intel-rapl:0/energy_uj 0444 - - -' | sudo tee /etc/t
 ```bash
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/dualeye-rapl.conf
 ```
+
+**macOS, CPU power:** macOS 27 lets only Apple's `powermetrics`, run as root, read the CPU's energy counters; other apps get an estimate. For the exact value, turn on **Settings → Sensors → Exact CPU power** in the installed app and allow DualEye in System Settings → General → Login Items & Extensions. That registers `dualeye-power-helper` ([host/dualeye-power-helper](host/dualeye-power-helper)), a LaunchDaemon inside the app bundle (`SMAppService`), which runs `powermetrics` while the app or the CLI is connected and serves its CPU, GPU and ANE power on `/var/run/com.dualeye.monitor.power.sock`. It sends data only to code signed by the same team, takes no input, and turning the switch off removes it. Registering needs the app signed by a team (an Apple Development or Developer ID certificate, `APPLE_SIGNING_IDENTITY`); an ad-hoc build can't. The CLI uses the helper too when it's signed by the same team.
 
 ## Building from source
 
@@ -324,6 +326,8 @@ npm run dev                 # UI only, in a browser, with synthetic data: no boa
 npm run tauri dev           # the real app, hot reload on UI changes
 npm run tauri build         # release build + installers
 ```
+
+On macOS, `tauri dev` and `tauri build` first build the power helper (`tools/build_power_helper.sh`, from `src-tauri/tauri.macos.conf.json`); with the voice sidecars, use `--config src-tauri/tauri.sidecars.macos.conf.json` there instead of `tauri.sidecars.conf.json`, since it lists all three.
 
 `npm run tauri build` packages for the OS it runs on (Tauri does not cross-compile), into `host/target/release/bundle/`:
 

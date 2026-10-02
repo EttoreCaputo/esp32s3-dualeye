@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The root helper that reads the CPU power with powermetrics (see
+  host/dualeye-power-helper). Bundled at
+  Contents/Library/LaunchDaemons/, registered by the app with SMAppService.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.dualeye.monitor.power</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/dualeye-power-helper</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.dualeye.monitor</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

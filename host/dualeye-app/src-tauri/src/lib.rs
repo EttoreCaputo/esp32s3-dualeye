@@ -27,8 +27,12 @@
 //! The same binary with `--mcp` is an MCP server for Claude Code and Claude
 //! Desktop (`dualeye_core::mcp`). It reaches the board through this app's
 //! [`Hub`], which lives as long as the app, across bridge restarts.
+//!
+//! On macOS the app can install a root helper that reads the exact CPU power,
+//! which macOS 27 hides from ordinary apps (`power_helper`).
 
 mod instances;
+mod power_helper;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -533,11 +537,12 @@ fn board() -> Board {
 }
 
 /// The board's own voice settings (it keeps them in NVS); `None` where it
-/// doesn't say (`eyes`: a firmware before 1.0.1).
+/// doesn't say (`eyes`: a firmware before 1.0.1; `idle_eyes`: before 1.0.2).
 #[derive(serde::Serialize)]
 struct BoardVoice {
     volume: Option<u8>,
     eyes: Option<bool>,
+    idle_eyes: Option<bool>,
 }
 
 #[tauri::command]
@@ -548,6 +553,7 @@ async fn board_voice() -> Result<BoardVoice, String> {
         Ok(BoardVoice {
             volume: s.pointer("/audio/volume").and_then(|v| v.as_u64()).map(|v| v as u8),
             eyes: s.pointer("/voice/eyes").and_then(|v| v.as_bool()),
+            idle_eyes: s.pointer("/voice/idle_eyes").and_then(|v| v.as_bool()),
         })
     })
     .await
@@ -570,6 +576,14 @@ async fn set_board_volume(percent: u8) -> Result<(), String> {
 #[tauri::command]
 async fn set_board_eyes(on: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || call_board("set_eyes", serde_json::json!({"on": on})))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The eyes' short scenes, now and then while nobody is talking.
+#[tauri::command]
+async fn set_board_idle_eyes(on: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || call_board("set_eyes", serde_json::json!({"idle": on})))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -673,6 +687,24 @@ async fn readings(app: AppHandle) -> Result<Vec<Reading>, String> {
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn power_helper_status() -> power_helper::HelperStatus {
+    tauri::async_runtime::spawn_blocking(power_helper::status).await.unwrap_or(power_helper::HelperStatus {
+        state: power_helper::HelperState::Unavailable,
+        error: None,
+    })
+}
+
+#[tauri::command]
+async fn set_power_helper(on: bool) -> Result<power_helper::HelperStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || power_helper::set(on)).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_power_helper_settings() {
+    power_helper::open_settings();
 }
 
 #[derive(Serialize)]
@@ -943,7 +975,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, test_voice])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, power_helper_status, set_power_helper, open_power_helper_settings])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

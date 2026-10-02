@@ -1,0 +1,15 @@
+[package]
+name = "dualeye-power-helper"
+version = "1.0.0"
+edition = "2024"
+description = "Root LaunchDaemon for the DualEye app on macOS: CPU and GPU power from powermetrics, served on a Unix socket"
+authors = ["Ettore Caputo <ettore.caputo27@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/EttoreCaputo/esp32s3-dualeye"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10.1"
+libc = "0.2.189"
+plist = "1.10.1"
+security-framework = "3.7.0"
+serde_json = "1.0.151"

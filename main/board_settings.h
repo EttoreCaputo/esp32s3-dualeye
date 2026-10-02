@@ -29,6 +29,8 @@ typedef struct {
     uint8_t volume;
     /* Animated eyes during a conversation, rather than the ring. */
     bool eyes;
+    /* The eyes play a short scene now and then while nobody is talking. */
+    bool idle_eyes;
 } board_settings_t;
 
 /** Open NVS and load the saved settings (defaults where none). */
@@ -46,6 +48,7 @@ esp_err_t board_settings_set_wake_word(const char *id);
 /** Also sets the speaker's volume right away. */
 esp_err_t board_settings_set_volume(uint8_t percent);
 esp_err_t board_settings_set_eyes(bool on);
+esp_err_t board_settings_set_idle_eyes(bool on);
 
 #ifdef __cplusplus
 }

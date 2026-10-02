@@ -11,6 +11,7 @@
 #include "lvgl_port.h"
 #include "metrics_model.h"
 #include "playback.h"
+#include "ui_eyes.h"
 #include "ui_toast.h"
 #include "ui_voice.h"
 #include "voice.h"
@@ -222,17 +223,56 @@ static bool tool_set_volume(const cJSON *args, char *text, cJSON **structured)
 static bool tool_set_eyes(const cJSON *args, char *text, cJSON **structured)
 {
     const cJSON *on = cJSON_GetObjectItemCaseSensitive(args, "on");
-    if (!cJSON_IsBool(on)) {
-        snprintf(text, TEXT_MAX, "on must be true or false");
+    const cJSON *idle = cJSON_GetObjectItemCaseSensitive(args, "idle");
+    if ((on != NULL && !cJSON_IsBool(on)) || (idle != NULL && !cJSON_IsBool(idle)) || (on == NULL && idle == NULL)) {
+        snprintf(text, TEXT_MAX, "give on and/or idle, true or false");
         return false;
     }
-    bool eyes = cJSON_IsTrue(on);
-    board_settings_set_eyes(eyes);
+    int n = 0;
     lvgl_port_lock();
-    ui_voice_set_eyes(eyes);
+    if (on != NULL) {
+        bool eyes = cJSON_IsTrue(on);
+        board_settings_set_eyes(eyes);
+        ui_voice_set_eyes(eyes);
+        n += snprintf(text, TEXT_MAX, eyes ? "talking shows animated eyes" : "talking shows a ring round the screens");
+    }
+    if (idle != NULL) {
+        bool scenes = cJSON_IsTrue(idle);
+        board_settings_set_idle_eyes(scenes);
+        ui_eyes_set_idle(scenes);
+        snprintf(text + n, TEXT_MAX - n, "%s%s", n ? "; " : "",
+                 scenes ? "the eyes play a scene now and then" : "no eye scenes while idle");
+    }
     lvgl_port_unlock();
-    snprintf(text, TEXT_MAX, eyes ? "talking shows animated eyes" : "talking shows a ring round the screens");
     return true;
+}
+
+static bool tool_play_eyes(const cJSON *args, char *text, cJSON **structured)
+{
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(args, "name");
+    if (name != NULL && !cJSON_IsString(name)) {
+        snprintf(text, TEXT_MAX, "name must be a string");
+        return false;
+    }
+    const char *which = name != NULL ? name->valuestring : NULL;
+    lvgl_port_lock();
+    bool ok = ui_eyes_play(which);
+    lvgl_port_unlock();
+    if (ok) {
+        snprintf(text, TEXT_MAX, "playing %s", which != NULL ? which : "a scene");
+        return true;
+    }
+    if (voice_state() != VOICE_IDLE) {
+        snprintf(text, TEXT_MAX, "not now: a conversation is on");
+        return false;
+    }
+    const char *names[24];
+    int count = ui_eyes_animations(names, 24);
+    int len = snprintf(text, TEXT_MAX, "unknown scene; one of:");
+    for (int i = 0; i < count && len < TEXT_MAX; i++) {
+        len += snprintf(text + len, TEXT_MAX - len, " %s", names[i]);
+    }
+    return false;
 }
 
 static const char *metrics_state_name(metrics_ui_state_t state)
@@ -272,6 +312,7 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
     cJSON *voice = cJSON_AddObjectToObject(st, "voice");
     cJSON_AddBoolToObject(voice, "available", voice_available());
     cJSON_AddBoolToObject(voice, "eyes", settings.eyes);
+    cJSON_AddBoolToObject(voice, "idle_eyes", settings.idle_eyes);
     if (voice_available()) {
         cJSON_AddStringToObject(voice, "wake_word", voice_wake_word());
         cJSON_AddStringToObject(voice, "wake_word_id", voice_wake_word_id());
@@ -368,9 +409,22 @@ static const tool_t TOOLS[] = {
     {
         .name = "set_eyes",
         .description = "Choose what the screens show during a voice conversation: animated eyes (on, the default) "
-                       "or a coloured ring round the watch face (off). The board remembers it.",
-        .schema = "{\"type\":\"object\",\"properties\":{\"on\":{\"type\":\"boolean\"}},\"required\":[\"on\"]}",
+                       "or a coloured ring round the watch face (off); and whether the eyes play a short scene "
+                       "now and then while nobody is talking (idle, on by default). The board remembers both.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"on\":{\"type\":\"boolean\"},"
+                  "\"idle\":{\"type\":\"boolean\"}},\"minProperties\":1}",
         .fn = tool_set_eyes,
+    },
+    {
+        .name = "play_eyes",
+        .description = "Play one of the eyes' short scenes on the screens now (a few seconds), or a random one "
+                       "without a name. Refused during a voice conversation.",
+        // The names of SKITS in ui_eyes.c.
+        .schema = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"enum\":["
+                  "\"look_around\",\"sleepy\",\"suspicious\",\"happy\",\"surprised\",\"wink\",\"angry\","
+                  "\"sad\",\"dizzy\",\"cross_eyed\",\"eye_roll\",\"curious\",\"love\",\"scan\",\"shy\","
+                  "\"flutter\"]}}}",
+        .fn = tool_play_eyes,
     },
     {
         .name = "get_state",

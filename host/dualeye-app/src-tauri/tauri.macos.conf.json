@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "../../tools/build_power_helper.sh && npm run dev",
+    "beforeBuildCommand": "../../tools/build_power_helper.sh && npm run build"
+  },
+  "bundle": {
+    "externalBin": ["binaries/dualeye-power-helper"],
+    "macOS": {
+      "files": {
+        "Library/LaunchDaemons/com.dualeye.monitor.power.plist": "power-helper/com.dualeye.monitor.power.plist"
+      }
+    }
+  }
+}

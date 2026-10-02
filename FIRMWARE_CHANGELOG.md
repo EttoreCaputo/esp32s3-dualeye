@@ -7,6 +7,10 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.0.2
+
+- The eyes now come out on their own: every minute or two, while nobody is talking, they open over the watch faces for a few seconds — a look around, a wink, a yawn, a roll of the eyes, a dizzy spin, hearts in their eyes and a dozen more — then close again. Turn it off in the app's Voice tab.
+
 ## 1.0.1
 
 - Animated eyes: after "Alexa" the screens become two cartoon eyes that open, watch you while you talk, look up and think, smile and bob along as the board answers, and close when it's done. Turn them off in the app's Voice tab to get the ring back.

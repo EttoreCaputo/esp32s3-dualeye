@@ -11,6 +11,7 @@
     type Hardware,
     type McpInfo,
     type PortInfo,
+    type PowerHelper,
     type Reading,
     type SttLanguage,
     type VoiceInfo,
@@ -33,6 +34,9 @@
   let firmware = $state<FirmwareInfo | null>(null);
   let confirming = $state(false);
   let readings = $state<Reading[]>([]);
+  let powerHelper = $state<PowerHelper | null>(null);
+  let powerBusy = $state(false);
+  const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
   let consoleEl = $state<HTMLElement>();
   let claudeLink = $state<ClaudeLink | null>(null);
   let claudeError = $state("");
@@ -53,8 +57,11 @@
     if (!open || tab !== "sensors") return;
     let alive = true;
     const load = async () => {
-      const r = await monitor.readings();
-      if (alive) readings = r;
+      const [r, p] = await Promise.all([monitor.readings(), monitor.powerHelper()]);
+      if (!alive) return;
+      readings = r;
+      // Keep the last error until the next toggle.
+      powerHelper = { state: p.state, error: powerHelper?.error ?? null };
     };
     load();
     const id = setInterval(load, 2000);
@@ -108,6 +115,7 @@
   // The speaker's volume and the eyes live on the board: read them when the tab opens.
   let volume = $state<number | null>(null);
   let eyes = $state<boolean | null>(null);
+  let idleEyes = $state<boolean | null>(null);
   $effect(() => {
     if (!open || tab !== "voice" || monitor.link !== "connected") return;
     let alive = true;
@@ -117,16 +125,28 @@
         if (!alive) return;
         volume = b.volume;
         eyes = b.eyes;
+        idleEyes = b.idle_eyes;
       })
       .catch(() => {
         if (!alive) return;
         volume = null;
         eyes = null;
+        idleEyes = null;
       });
     return () => {
       alive = false;
     };
   });
+
+  async function setIdleEyes(on: boolean) {
+    idleEyes = on;
+    try {
+      await monitor.setBoardIdleEyes(on);
+    } catch (e) {
+      idleEyes = !on;
+      voiceError = String(e);
+    }
+  }
 
   async function setEyes(on: boolean) {
     eyes = on;
@@ -292,6 +312,17 @@
     void monitor.logs.length;
     if (follow && consoleEl) queueMicrotask(() => consoleEl && (consoleEl.scrollTop = consoleEl.scrollHeight));
   });
+
+  async function togglePowerHelper(on: boolean) {
+    powerBusy = true;
+    try {
+      powerHelper = await monitor.setPowerHelper(on);
+    } catch (e) {
+      powerHelper = { state: powerHelper?.state ?? "off", error: String(e) };
+    } finally {
+      powerBusy = false;
+    }
+  }
 
   const groups = $derived.by(() => {
     const m = new Map<string, Reading[]>();
@@ -589,6 +620,11 @@
               <input type="checkbox" checked={eyes ?? true} disabled={eyes === null} onchange={(e) => setEyes(e.currentTarget.checked)} />
               <span class="track"><span class="knob"></span></span>
               <span class="slabel">Show animated eyes while talking, instead of the ring</span>
+            </label>
+            <label class="switch" title={idleEyes === null ? "Needs the board connected, with firmware 1.0.2 or newer" : ""}>
+              <input type="checkbox" checked={idleEyes ?? true} disabled={idleEyes === null} onchange={(e) => setIdleEyes(e.currentTarget.checked)} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Let the eyes play now and then while idle</span>
             </label>
             <dl class="facts">
               <div>
@@ -955,6 +991,41 @@
         </section>
       {:else if tab === "sensors"}
         <p class="hint">Every raw value the host can read. The board gets the CPU average, the first GPU, the fastest fan of each kind, RAM and VRAM.</p>
+        {#if isMac && powerHelper}
+          <section>
+            <h3>Exact CPU power</h3>
+            {#if powerHelper.state === "unavailable"}
+              <p class="hint">Only in the installed app (from the .dmg), on macOS 13 or newer.</p>
+            {:else}
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  checked={powerHelper.state !== "off"}
+                  disabled={powerBusy}
+                  onchange={(e) => togglePowerHelper(e.currentTarget.checked)}
+                />
+                <span class="track"><span class="knob"></span></span>
+                <span class="slabel">Read it with powermetrics, through a system helper</span>
+              </label>
+              <p class="hint">
+                macOS 27 hides the CPU's energy counters from apps, so without the helper the CPU power is estimated from the SoC's
+                power minus the GPU's. The helper runs Apple's <code>powermetrics</code> as root while DualEye is open, and only
+                answers apps signed like DualEye.
+              </p>
+              {#if powerHelper.state === "needs_approval"}
+                <p class="hint">
+                  Allow <b>DualEye</b> in System Settings → General → Login Items &amp; Extensions, under "Allow in the Background".
+                </p>
+                <div class="actions">
+                  <button class="btn" onclick={() => monitor.openPowerHelperSettings()}>Open System Settings</button>
+                </div>
+              {/if}
+            {/if}
+            {#if powerHelper.error}
+              <p class="hint error">{powerHelper.error}</p>
+            {/if}
+          </section>
+        {/if}
         {#each groups as [source, list] (source)}
           <section class="group">
             <h3>{source}</h3>

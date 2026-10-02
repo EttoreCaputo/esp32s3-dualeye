@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": ["binaries/whisper-server", "binaries/llama-server", "binaries/dualeye-power-helper"],
+    "resources": {
+      "binaries/licenses/*": "licenses/"
+    }
+  }
+}

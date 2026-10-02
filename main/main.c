@@ -14,6 +14,7 @@
 #include "board_audio.h"
 #include "playback.h"
 #include "ui_toast.h"
+#include "ui_eyes.h"
 #include "ui_voice.h"
 #include "ui_watch.h"
 #include "voice.h"
@@ -94,6 +95,7 @@ void app_main(void)
     ui_watch_create(s_displays[UI_SCREEN_CPU], s_displays[UI_SCREEN_GPU]);
     ui_voice_create(s_displays);
     ui_voice_set_eyes(settings.eyes);
+    ui_eyes_set_idle(settings.idle_eyes);
     ui_toast_create(s_displays);
 
     metrics_snapshot_t snap;

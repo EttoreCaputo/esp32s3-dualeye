@@ -22,6 +22,7 @@ static const char *const BL_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "bl_cpu",
 #define WAKE_WORD_KEY "wake_word"
 #define VOLUME_KEY "volume"
 #define EYES_KEY "eyes"
+#define IDLE_EYES_KEY "idle_eyes"
 
 static SemaphoreHandle_t s_lock;
 static board_settings_t s_settings;
@@ -63,6 +64,10 @@ static void load(void)
     if (nvs_get_u8(nvs, EYES_KEY, &eyes) == ESP_OK) {
         s_settings.eyes = eyes != 0;
     }
+    uint8_t idle_eyes = 0;
+    if (nvs_get_u8(nvs, IDLE_EYES_KEY, &idle_eyes) == ESP_OK) {
+        s_settings.idle_eyes = idle_eyes != 0;
+    }
     size_t len = sizeof(s_settings.wake_word);
     if (nvs_get_str(nvs, WAKE_WORD_KEY, s_settings.wake_word, &len) != ESP_OK) {
         s_settings.wake_word[0] = '\0';
@@ -94,6 +99,7 @@ void board_settings_init(void)
     }
     s_settings.volume = BOARD_VOLUME_DEFAULT;
     s_settings.eyes = true;
+    s_settings.idle_eyes = true;
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -201,6 +207,18 @@ esp_err_t board_settings_set_eyes(bool on)
     xSemaphoreGive(s_lock);
     if (changed) {
         save(EYES_KEY, on, false);
+    }
+    return ESP_OK;
+}
+
+esp_err_t board_settings_set_idle_eyes(bool on)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool changed = s_settings.idle_eyes != on;
+    s_settings.idle_eyes = on;
+    xSemaphoreGive(s_lock);
+    if (changed) {
+        save(IDLE_EYES_KEY, on, false);
     }
     return ESP_OK;
 }

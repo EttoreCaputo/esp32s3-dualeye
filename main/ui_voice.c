@@ -71,6 +71,7 @@ void ui_voice_create(lv_display_t *const displays[BOARD_LCD_COUNT])
 
 static void show_ring(voice_state_t state)
 {
+    ui_eyes_set_busy(state != VOICE_IDLE);
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
         ui_voice_t *v = &s_voice[i];
         bool ring = state == VOICE_LISTENING || state == VOICE_SPEAKING || state == VOICE_ERROR;

@@ -24,5 +24,10 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 tauri = { version = "2.11.6", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.4.5"
 
+# SMAppService, to install the root helper that reads the CPU power (macOS 27).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSString"] }
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }

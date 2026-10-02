@@ -8,6 +8,12 @@
 //!   states' frequencies come from the `pmgr` node in the IORegistry
 //!   (`voltage-states*`), so the residency-weighted average is the clock the
 //!   core ran at.
+//!
+//! macOS 27 froze the `Energy Model` CPU, DRAM and ANE counters for processes
+//! without Apple's private `com.apple.private.pmgr.nrg.reporting` entitlement
+//! (`powermetrics` has it). They then move only while such a process runs, over
+//! part of the window, so the CPU power reads 0 or a jumpy fraction of the real
+//! one. [`Sample::cpu_frozen`] reports it; `GPU Energy` is unaffected.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr::null;
@@ -65,6 +71,9 @@ pub struct Sample {
     pub gpu_mhz: Option<u32>,
     pub cpu_w: Option<f64>,
     pub gpu_w: Option<f64>,
+    /// The CPU energy counter stopped moving (macOS 27), so `cpu_w` is `None`
+    /// for good and the caller needs another source.
+    pub cpu_frozen: bool,
 }
 
 /// DVFS state frequencies in MHz, lowest first.
@@ -82,6 +91,7 @@ pub struct IoReport {
     channels: CFMutableDictionaryRef,
     dvfs: Dvfs,
     prev: Option<(CFDictionaryRef, Instant)>,
+    cpu_frozen: bool,
 }
 
 // The subscription and the dictionaries are CF objects, usable from any thread
@@ -100,16 +110,17 @@ impl IoReport {
             unsafe { CFRelease(channels.cast()) };
             return None;
         }
-        Some(Self { sub, channels, dvfs: dvfs(), prev: None })
+        Some(Self { sub, channels, dvfs: dvfs(), prev: None, cpu_frozen: false })
     }
 
     /// Everything since the previous call; `None` on the first.
     pub fn sample(&mut self) -> Option<Sample> {
-        let now = Instant::now();
         let next = unsafe { IOReportCreateSamples(self.sub, self.channels, null()) };
         if next.is_null() {
             return None;
         }
+        // After the call, which can take tens of ms on a large channel set.
+        let now = Instant::now();
         let (prev, then) = self.prev.replace((next, now))?;
         let delta = unsafe { IOReportCreateSamplesDelta(prev, next, null()) };
         unsafe { CFRelease(prev.cast()) };
@@ -118,12 +129,27 @@ impl IoReport {
         }
         let delta = unsafe { CFDictionary::<CFType, CFType>::wrap_under_create_rule(delta) };
         let secs = now.duration_since(then).as_secs_f64();
-        (secs > 0.0).then(|| self.parse(&delta, secs))
+        if secs <= 0.0 {
+            return None;
+        }
+        let mut out = self.parse(&delta, secs);
+        // A running CPU never spends 0 mJ in 200 ms. Once the counter has
+        // stalled, ignore it even when it moves again: that happens only while
+        // Activity Monitor or powermetrics runs, and covers part of the window.
+        if out.cpu_w == Some(0.0) && secs >= 0.2 {
+            self.cpu_frozen = true;
+        }
+        if self.cpu_frozen {
+            out.cpu_w = None;
+        }
+        out.cpu_frozen = self.cpu_frozen;
+        Some(out)
     }
 
+    /// `cpu_w` is `Some(0.0)` when the CPU channel is there but did not move.
     fn parse(&self, delta: &CFDictionary<CFType, CFType>, secs: f64) -> Sample {
         let mut out = Sample::default();
-        let mut cpu_w = 0.0;
+        let mut cpu_w = None;
         let mut gpu_w = 0.0;
         let mut cores = Vec::new();
         for ch in items(delta) {
@@ -134,7 +160,7 @@ impl IoReport {
                     let Some(joules) = joules(ch) else { continue };
                     // `CPU Energy`, or `DIE_n_CPU Energy` on an Ultra.
                     if name.ends_with("CPU Energy") {
-                        cpu_w += joules / secs;
+                        cpu_w = Some(cpu_w.unwrap_or(0.0) + joules / secs);
                     } else if name == "GPU Energy" {
                         gpu_w += joules / secs;
                     }
@@ -162,7 +188,7 @@ impl IoReport {
         if !cores.is_empty() {
             out.cpu_mhz = Some((cores.iter().map(|&f| u64::from(f)).sum::<u64>() / cores.len() as u64) as u32);
         }
-        out.cpu_w = (cpu_w > 0.0).then_some(cpu_w);
+        out.cpu_w = cpu_w.filter(|w| *w >= 0.0);
         out.gpu_w = (gpu_w > 0.0).then_some(gpu_w);
         out
     }

@@ -163,11 +163,14 @@ jobs:
             platform: macos-apple-silicon
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
+            # Adds the root helper that reads the CPU power (tools/build_power_helper.sh).
+            sidecars: tauri.sidecars.macos.conf.json
           - name: macOS Intel
             os: macos-latest
             platform: macos-intel
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
+            sidecars: tauri.sidecars.macos.conf.json
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -225,7 +228,7 @@ jobs:
           releaseId: ${{ needs.release.outputs.id }}
           # e.g. DualEye_1.0.0_macos-apple-silicon.dmg, DualEye_1.0.0_windows-x64-setup.exe
           assetNamePattern: "[name]_[version]_${{ matrix.platform }}[setup][ext]"
-          args: ${{ matrix.args }} --config src-tauri/tauri.sidecars.conf.json
+          args: ${{ matrix.args }} --config src-tauri/${{ matrix.sidecars || 'tauri.sidecars.conf.json' }}
 
       # tauri-action always uploads the macOS .app as .app.tar.gz too; the
       # .dmg is the only download macOS needs.

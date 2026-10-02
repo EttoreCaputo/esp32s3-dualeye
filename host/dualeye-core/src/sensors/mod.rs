@@ -5,7 +5,7 @@
 //! | CPU load        | sysinfo                     | sysinfo                  | sysinfo            |
 //! | CPU clock       | sysinfo                     | sysinfo                  | IOReport¹ / sysinfo|
 //! | CPU temp        | hwmon (coretemp, k10temp…)  | ACPI thermal zone (WMI)  | SMC / IOHID        |
-//! | CPU power       | RAPL (powercap)             | —                        | IOReport¹          |
+//! | CPU power       | RAPL (powercap)             | —                        | powermetrics³ / IOReport¹ / SMC² |
 //! | NVIDIA GPU      | NVML                        | NVML                     | —                  |
 //! | AMD GPU         | hwmon (amdgpu)              | —                        | —                  |
 //! | Apple/Mac GPU   | —                           | —                        | SMC + IOAccelerator + IOReport¹ |
@@ -14,6 +14,8 @@
 //! | VRAM            | NVML, amdgpu `mem_info_*`   | NVML                     | IOAccelerator      |
 //!
 //! ¹ Apple Silicon only.
+//! ² Where macOS 27 froze IOReport's CPU energy counter: SoC rail minus GPU power.
+//! ³ Through `dualeye-power-helper`, the root daemon the desktop app installs.
 
 #[cfg(not(target_os = "linux"))]
 mod components;
@@ -23,6 +25,8 @@ mod ioreport;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub mod power_helper;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod nvidia;
 

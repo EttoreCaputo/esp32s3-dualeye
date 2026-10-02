@@ -33,6 +33,9 @@ export type ClaudeLink = { connected: boolean; chained: string | null; last_upda
 export type Snapshot = { v: number; ts: number; cpu?: Metrics; gpu?: Metrics; fans?: Fan[]; face?: Faces; rot?: Rotations; claude?: ClaudeMetrics };
 export type PortInfo = { name: string; vid: number; pid: number; product: string | null; is_board: boolean };
 export type Reading = { source: string; label: string; value: number; unit: string };
+/** `power_helper::HelperStatus`: the macOS root helper that reads the exact CPU power. */
+export type PowerHelperState = "unavailable" | "off" | "needs_approval" | "on";
+export type PowerHelper = { state: PowerHelperState; error: string | null };
 export type Esptool = { python: string; version: string };
 /** The app descriptor of the bundled image. */
 export type ImageInfo = { version: string; project: string; idf: string; built: string };
@@ -159,7 +162,7 @@ type Status = {
 
 export type Link = "searching" | "connected" | "offline";
 /** The voice settings the board keeps; null where it doesn't say. */
-export type BoardVoice = { volume: number | null; eyes: boolean | null };
+export type BoardVoice = { volume: number | null; eyes: boolean | null; idle_eyes: boolean | null };
 /** Mirrors `metrics_ui_state_t` plus the moments the firmware is not running the UI. */
 export type BoardState = "off" | "boot" | "waiting" | "live" | "stale";
 export type Sample = { t: number; cpuT?: number; cpuL?: number; gpuT?: number; gpuL?: number };
@@ -485,7 +488,7 @@ class Monitor {
 
   /** The board's speaker volume and eyes; null where the board doesn't say. */
   async boardVoice(): Promise<BoardVoice> {
-    if (this.preview) return { volume: previewVolume, eyes: previewEyes };
+    if (this.preview) return { volume: previewVolume, eyes: previewEyes, idle_eyes: previewIdleEyes };
     const b = await invoke<BoardVoice>("board_voice");
     this.eyes = b.eyes ?? false;
     return b;
@@ -509,6 +512,15 @@ class Monitor {
     this.eyes = on;
   }
 
+  /** The eyes' scenes on the board while nobody is talking (firmware 1.0.2). */
+  async setBoardIdleEyes(on: boolean) {
+    if (this.preview) {
+      previewIdleEyes = on;
+      return;
+    }
+    await invoke("set_board_idle_eyes", { on });
+  }
+
   async testVoice(language: string) {
     if (this.preview) return new Promise((r) => setTimeout(r, 1500));
     await invoke("test_voice", { language });
@@ -517,6 +529,20 @@ class Monitor {
   async readings(): Promise<Reading[]> {
     if (this.preview) return previewReadings(this.last);
     return invoke<Reading[]>("readings");
+  }
+
+  async powerHelper(): Promise<PowerHelper> {
+    if (this.preview) return { state: "off", error: null };
+    return invoke<PowerHelper>("power_helper_status");
+  }
+
+  async setPowerHelper(on: boolean): Promise<PowerHelper> {
+    if (this.preview) return { state: on ? "on" : "off", error: null };
+    return invoke<PowerHelper>("set_power_helper", { on });
+  }
+
+  async openPowerHelperSettings() {
+    if (!this.preview) await invoke("open_power_helper_settings");
   }
 }
 
@@ -539,6 +565,7 @@ let previewClaudeLink: ClaudeLink = { connected: false, chained: null, last_upda
 
 let previewVolume = 60;
 let previewEyes = true;
+let previewIdleEyes = true;
 
 const previewVoice: VoiceInfo = {
   settings: {
