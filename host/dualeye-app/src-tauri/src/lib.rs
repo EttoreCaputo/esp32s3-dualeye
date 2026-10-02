@@ -20,9 +20,10 @@
 //! model the app downloads (`dualeye_core::models`), understood by a small
 //! language model in a llama.cpp `llama-server` sidecar that calls the
 //! board's tools (`dualeye_core::agent`; without one, a few fixed phrases,
-//! `dualeye_core::intents`) and answered out loud by a Piper sidecar through
-//! the board's speaker. The app installs Piper itself, into
-//! a virtualenv made with esptool's Python. Turning voice on, or picking
+//! `dualeye_core::intents`) and answered out loud by a Piper or Kokoro
+//! sidecar through the board's speaker. The app installs either itself, into
+//! a virtualenv made with esptool's Python (Kokoro's always with the pinned
+//! one: it wants 3.10 to 3.13). Turning voice on, or picking
 //! another model, language or voice, swaps the bridge's shared voice config:
 //! no reconnect.
 //!
@@ -57,7 +58,7 @@ use dualeye_core::hardware::{self, Hardware, Recommendation};
 use dualeye_core::llm::{self, Llm, LlmConfig};
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage, Transcript};
-use dualeye_core::tts::{self, Tts, TtsConfig};
+use dualeye_core::tts::{self, Engine, Tts, TtsConfig};
 use dualeye_core::timers::{self, Pomodoro, ShowOn, TimerInfo, Timers};
 use dualeye_core::voice::{self, Spoken, VoiceConfig};
 use dualeye_core::{
@@ -283,8 +284,8 @@ struct AppState {
     tts_state: Arc<Mutex<(&'static str, Option<String>)>>,
     /// The language model, likewise.
     llm_state: Arc<Mutex<(&'static str, Option<String>)>>,
-    /// Piper being installed: the latest line of its output.
-    piper_install: Mutex<Option<String>>,
+    /// The text-to-speech engines being installed: the latest line of their output.
+    installing: Mutex<BTreeMap<Engine, String>>,
     /// The model being downloaded and how far along (percent).
     download: Mutex<Option<(String, f32)>>,
     cancel_download: AtomicBool,
@@ -370,7 +371,6 @@ fn sidecar<C, T: Send + Sync + 'static>(
 }
 
 fn tts_config(settings: &VoiceSettings) -> Result<TtsConfig, String> {
-    let python = tts::find_python().ok_or("Piper isn't installed yet")?;
     let voices: BTreeMap<String, String> = settings
         .voices
         .iter()
@@ -380,7 +380,11 @@ fn tts_config(settings: &VoiceSettings) -> Result<TtsConfig, String> {
     if voices.is_empty() {
         return Err("no voice downloaded yet".into());
     }
-    Ok(TtsConfig { python, voices })
+    let config = TtsConfig { pythons: tts::installed_engines(), voices };
+    if let Some(e) = config.engines().find(|e| !config.pythons.contains_key(e)) {
+        return Err(format!("{} isn't installed yet", e.name()));
+    }
+    Ok(config)
 }
 
 fn llm_config(settings: &VoiceSettings) -> Result<LlmConfig, String> {
@@ -406,6 +410,8 @@ struct ModelInfo {
     id: &'static str,
     kind: Kind,
     language: Option<&'static str>,
+    /// What speaks a voice.
+    engine: Option<Engine>,
     bytes: u64,
     note: &'static str,
     license: &'static str,
@@ -424,6 +430,9 @@ struct VoiceInfo {
     piper: Option<String>,
     /// While Piper installs: the latest line of its output.
     piper_install: Option<String>,
+    /// Kokoro's, likewise.
+    kokoro: Option<String>,
+    kokoro_install: Option<String>,
     tts: &'static str,
     tts_error: Option<String>,
     /// The llama-server binary, if found.
@@ -440,17 +449,20 @@ fn voice_info_of(state: &AppState) -> VoiceInfo {
     let (stt, stt_error) = state.stt_state.lock().unwrap().clone();
     let (tts, tts_error) = state.tts_state.lock().unwrap().clone();
     let (llm, llm_error) = state.llm_state.lock().unwrap().clone();
+    let installing = state.installing.lock().unwrap().clone();
     VoiceInfo {
         settings: state.settings.lock().unwrap().voice.clone(),
         server: stt::find_server().map(|p| p.display().to_string()),
         models: models::MODELS
             .iter()
-            .map(|m| ModelInfo { id: m.id, kind: m.kind, language: m.language, bytes: m.bytes(), note: m.note, license: m.license, installed: m.is_installed() })
+            .map(|m| ModelInfo { id: m.id, kind: m.kind, language: m.language, engine: m.engine(), bytes: m.bytes(), note: m.note, license: m.license, installed: m.is_installed() })
             .collect(),
         stt,
         stt_error,
-        piper: tts::find_python().map(|p| p.display().to_string()),
-        piper_install: state.piper_install.lock().unwrap().clone(),
+        piper: Engine::Piper.python().map(|p| p.display().to_string()),
+        piper_install: installing.get(&Engine::Piper).cloned(),
+        kokoro: Engine::Kokoro.python().map(|p| p.display().to_string()),
+        kokoro_install: installing.get(&Engine::Kokoro).cloned(),
         tts,
         tts_error,
         llm_server: llm::find_server().map(|p| p.display().to_string()),
@@ -513,7 +525,9 @@ fn delete_model(state: State<AppState>, id: String) -> Result<VoiceInfo, String>
         if voice.stt.as_ref().is_some_and(|s| Some(s.config().model.clone()) == model.path()) {
             voice.stt = None;
         }
-        if voice.tts.as_ref().is_some_and(|t| t.config().voices.values().any(|v| v == model.id)) {
+        // Removing a Kokoro voice removes the files all of them share.
+        let gone: Vec<&str> = std::iter::once(model).chain(model.sharing_files()).map(|m| m.id).collect();
+        if voice.tts.as_ref().is_some_and(|t| t.config().voices.values().any(|v| gone.contains(&v.as_str()))) {
             voice.tts = None;
         }
         if let Some(agent) = voice.agent.take_if(|a| Some(a.llm().config().model.clone()) == model.path()) {
@@ -525,27 +539,34 @@ fn delete_model(state: State<AppState>, id: String) -> Result<VoiceInfo, String>
     Ok(voice_info_of(&state))
 }
 
-/// Set Piper up: a virtualenv made with esptool's Python (downloaded first
-/// if the machine has none), then `pip install piper-tts`.
+/// Set a text-to-speech engine up: a virtualenv made with esptool's Python
+/// (downloaded first if the machine has none; for Kokoro, always the pinned
+/// one), then `pip install` it.
 #[tauri::command]
-async fn install_piper(app: AppHandle) -> Result<(), String> {
+async fn install_engine(app: AppHandle, engine: Engine) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         {
-            let mut installing = state.piper_install.lock().unwrap();
-            if installing.is_some() {
-                return Err("Piper is already being installed".to_string());
+            let mut installing = state.installing.lock().unwrap();
+            if installing.contains_key(&engine) {
+                return Err(format!("{} is already being installed", engine.name()));
             }
-            *installing = Some("Getting Python".into());
+            installing.insert(engine, "Getting Python".into());
         }
-        let result = setup::python(&state.esptool_dir, |e| {
+        let progress = |line: String| {
+            state.installing.lock().unwrap().insert(engine, line);
+        };
+        let on_event = |e| {
             if let FlashEvent::Setup { message, percent } = e {
-                let line = percent.map_or(message.clone(), |p| format!("{message} {p:.0}%"));
-                *state.piper_install.lock().unwrap() = Some(line);
+                progress(percent.map_or(message.clone(), |p| format!("{message} {p:.0}%")));
             }
-        })
-        .and_then(|python| tts::install(&python, |line| *state.piper_install.lock().unwrap() = Some(line)));
-        *state.piper_install.lock().unwrap() = None;
+        };
+        let python = match engine {
+            Engine::Piper => setup::python(&state.esptool_dir, on_event),
+            Engine::Kokoro => setup::pinned_python(&state.esptool_dir, on_event),
+        };
+        let result = python.and_then(|python| tts::install(engine, &python, progress));
+        state.installing.lock().unwrap().remove(&engine);
         result.map_err(|e| e.to_string())?;
         apply_voice(&state);
         Ok(())
@@ -1003,8 +1024,8 @@ fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
             if let BridgeEvent::VoiceError { message } = &event {
-                // Which sidecar failed: Piper's and llama.cpp's errors say so.
-                let status = if message.starts_with("piper") {
+                // Which sidecar failed: Piper's, Kokoro's and llama.cpp's errors say so.
+                let status = if message.starts_with("piper") || message.starts_with("kokoro") {
                     &state.tts_state
                 } else if message.starts_with("llama-server") {
                     &state.llm_state
@@ -1127,7 +1148,7 @@ pub fn run() {
                 stt_state: Arc::new(Mutex::new(("off", None))),
                 tts_state: Arc::new(Mutex::new(("off", None))),
                 llm_state: Arc::new(Mutex::new(("off", None))),
-                piper_install: Mutex::new(None),
+                installing: Mutex::new(BTreeMap::new()),
                 download: Mutex::new(None),
                 cancel_download: AtomicBool::new(false),
             });
@@ -1151,7 +1172,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

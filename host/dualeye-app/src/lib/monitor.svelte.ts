@@ -168,12 +168,15 @@ export type ModelInfo = {
   id: string;
   kind: "whisper" | "voice" | "llm";
   language: string | null;
+  /** What speaks a voice. */
+  engine: TtsEngine | null;
   bytes: number;
   note: string;
   license: string;
   installed: boolean;
 };
 export type SttStatus = "off" | "starting" | "ready" | "error";
+export type TtsEngine = "piper" | "kokoro";
 export type VoiceInfo = {
   settings: VoiceSettings;
   server: string | null;
@@ -184,6 +187,9 @@ export type VoiceInfo = {
   piper: string | null;
   /** While Piper installs: its latest output line. */
   piper_install: string | null;
+  /** Kokoro's, likewise. */
+  kokoro: string | null;
+  kokoro_install: string | null;
   tts: SttStatus;
   tts_error: string | null;
   /** llama-server, if found. */
@@ -599,9 +605,11 @@ class Monitor {
       previewVoice.settings = settings;
       previewVoice.stt = settings.enabled ? (previewVoice.models.find((m) => m.id === settings.model)?.installed ? "ready" : "error") : "off";
       previewVoice.stt_error = previewVoice.stt === "error" ? `the ${settings.model} model isn't downloaded yet` : null;
-      const voices = Object.values(settings.voices).filter((id) => previewVoice.models.find((m) => m.id === id)?.installed);
-      previewVoice.tts = !settings.enabled || !settings.speak ? "off" : previewVoice.piper && voices.length ? "ready" : "error";
-      previewVoice.tts_error = previewVoice.tts !== "error" ? null : previewVoice.piper ? "no voice downloaded yet" : "Piper isn't installed yet";
+      const voices = previewVoice.models.filter((m) => Object.values(settings.voices).includes(m.id) && m.installed);
+      const missing = voices.find((m) => !previewVoice[m.engine ?? "piper"]);
+      previewVoice.tts = !settings.enabled || !settings.speak ? "off" : voices.length && !missing ? "ready" : "error";
+      previewVoice.tts_error =
+        previewVoice.tts !== "error" ? null : missing ? `${missing.engine === "kokoro" ? "Kokoro" : "Piper"} isn't installed yet` : "no voice downloaded yet";
       const llmReady = previewVoice.models.find((m) => m.id === settings.llm_model)?.installed;
       previewVoice.llm = !settings.enabled || !settings.llm ? "off" : llmReady ? "ready" : "error";
       previewVoice.llm_error = previewVoice.llm === "error" ? `the ${settings.llm_model} model isn't downloaded yet` : null;
@@ -612,8 +620,9 @@ class Monitor {
 
   async downloadModel(id: string) {
     if (this.preview) {
-      const m = previewVoice.models.find((m) => m.id === id);
-      if (m) m.installed = true;
+      // Kokoro's voices share their files.
+      const engine = previewVoice.models.find((m) => m.id === id)?.engine;
+      for (const m of previewVoice.models) if (m.id === id || (engine === "kokoro" && m.engine === "kokoro")) m.installed = true;
       return;
     }
     await invoke("download_model", { id });
@@ -625,23 +634,24 @@ class Monitor {
 
   async deleteModel(id: string): Promise<VoiceInfo> {
     if (this.preview) {
-      const m = previewVoice.models.find((m) => m.id === id);
-      if (m) m.installed = false;
+      const engine = previewVoice.models.find((m) => m.id === id)?.engine;
+      for (const m of previewVoice.models) if (m.id === id || (engine === "kokoro" && m.engine === "kokoro")) m.installed = false;
       return this.voiceInfo();
     }
     return invoke<VoiceInfo>("delete_model", { id });
   }
 
-  async installPiper() {
+  /** Install a text-to-speech engine into its own virtualenv. */
+  async installEngine(engine: TtsEngine) {
     if (this.preview) {
-      previewVoice.piper_install = "Installing piper-tts";
+      previewVoice[`${engine}_install`] = engine === "kokoro" ? "Installing kokoro-onnx" : "Installing piper-tts";
       await new Promise((r) => setTimeout(r, 2500));
-      previewVoice.piper_install = null;
-      previewVoice.piper = "~/Library/Application Support/dualeye/piper/venv/bin/python";
+      previewVoice[`${engine}_install`] = null;
+      previewVoice[engine] = `~/Library/Application Support/dualeye/${engine}/venv/bin/python`;
       await this.setVoice(previewVoice.settings);
       return;
     }
-    await invoke("install_piper");
+    await invoke("install_engine", { engine });
   }
 
   /** The board's speaker volume and eyes; null where the board doesn't say. */
@@ -746,20 +756,26 @@ const previewVoice: VoiceInfo = {
   },
   server: "/opt/homebrew/bin/whisper-server",
   models: [
-    { id: "base", kind: "whisper", language: null, bytes: 147_951_465, note: "Fastest, for slow CPUs; often wrong in Italian", license: "MIT", installed: false },
-    { id: "small", kind: "whisper", language: null, bytes: 487_601_967, note: "Good balance: about 0.7 s a command on an M1 Pro", license: "MIT", installed: true },
-    { id: "large-v3-turbo-q5_0", kind: "whisper", language: null, bytes: 574_041_195, note: "Most accurate; wants a GPU (Apple silicon, NVIDIA)", license: "MIT", installed: false },
-    { id: "it_IT-paola-medium", kind: "voice", language: "it", bytes: 63_518_137, note: "Italian, woman's voice, natural", license: "Dataset CC0 1.0 (paolapersico1/Voice-Dataset-Italian); fine-tuned from lessac", installed: true },
-    { id: "it_IT-riccardo-x_low", kind: "voice", language: "it", bytes: 28_134_952, note: "Italian, man's voice, smaller and flatter", license: "Dataset M-AILABS (BSD-style); trained from scratch", installed: false },
-    { id: "en_GB-alba-medium", kind: "voice", language: "en", bytes: 63_206_182, note: "British English, woman's voice", license: "Dataset CC BY 4.0 (Edinburgh DataShare 10283/3270); fine-tuned from lessac", installed: false },
-    { id: "en_US-ljspeech-medium", kind: "voice", language: "en", bytes: 63_536_351, note: "American English, woman's voice", license: "Dataset public domain (LJ Speech)", installed: false },
-    { id: "qwen3-4b-2507", kind: "llm", language: null, bytes: 2_497_281_120, note: "Most accurate: all 53 test commands right, about 0.9 s each on an M1 Pro", license: "Apache-2.0", installed: true },
-    { id: "qwen3.5-2b", kind: "llm", language: null, bytes: 1_280_835_840, note: "Lighter and faster (0.65 s); more mistakes, often answers in English", license: "Apache-2.0", installed: false },
+    { id: "base", kind: "whisper", language: null, engine: null, bytes: 147_951_465, note: "Fastest, for slow CPUs; often wrong in Italian", license: "MIT", installed: false },
+    { id: "small", kind: "whisper", language: null, engine: null, bytes: 487_601_967, note: "Good balance: about 0.7 s a command on an M1 Pro", license: "MIT", installed: true },
+    { id: "large-v3-turbo-q5_0", kind: "whisper", language: null, engine: null, bytes: 574_041_195, note: "Most accurate; wants a GPU (Apple silicon, NVIDIA)", license: "MIT", installed: false },
+    { id: "it_IT-paola-medium", kind: "voice", language: "it", engine: "piper", bytes: 63_518_137, note: "Italian, woman's voice, natural", license: "Dataset CC0 1.0 (paolapersico1/Voice-Dataset-Italian); fine-tuned from lessac", installed: true },
+    { id: "it_IT-riccardo-x_low", kind: "voice", language: "it", engine: "piper", bytes: 28_134_952, note: "Italian, man's voice, smaller and flatter", license: "Dataset M-AILABS (BSD-style); trained from scratch", installed: false },
+    { id: "en_GB-alba-medium", kind: "voice", language: "en", engine: "piper", bytes: 63_206_182, note: "British English, woman's voice", license: "Dataset CC BY 4.0 (Edinburgh DataShare 10283/3270); fine-tuned from lessac", installed: false },
+    { id: "en_US-ljspeech-medium", kind: "voice", language: "en", engine: "piper", bytes: 63_536_351, note: "American English, woman's voice", license: "Dataset public domain (LJ Speech)", installed: false },
+    { id: "kokoro-if_sara", kind: "voice", language: "it", engine: "kokoro", bytes: 353_746_785, note: "Italian, woman's voice, Kokoro: warmer and livelier, slower to speak", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false },
+    { id: "kokoro-im_nicola", kind: "voice", language: "it", engine: "kokoro", bytes: 353_746_785, note: "Italian, man's voice, Kokoro", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false },
+    { id: "kokoro-af_heart", kind: "voice", language: "en", engine: "kokoro", bytes: 353_746_785, note: "American English, woman's voice, Kokoro: its best", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false },
+    { id: "kokoro-bf_emma", kind: "voice", language: "en", engine: "kokoro", bytes: 353_746_785, note: "British English, woman's voice, Kokoro", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false },
+    { id: "qwen3-4b-2507", kind: "llm", language: null, engine: null, bytes: 2_497_281_120, note: "Most accurate: all 53 test commands right, about 0.9 s each on an M1 Pro", license: "Apache-2.0", installed: true },
+    { id: "qwen3.5-2b", kind: "llm", language: null, engine: null, bytes: 1_280_835_840, note: "Lighter and faster (0.65 s); more mistakes, often answers in English", license: "Apache-2.0", installed: false },
   ],
   stt: "off",
   stt_error: null,
   piper: null,
   piper_install: null,
+  kokoro: null,
+  kokoro_install: null,
   tts: "off",
   tts_error: null,
   llm_server: "/opt/homebrew/bin/llama-server",

@@ -1,8 +1,9 @@
 //! The models the host runs, downloaded on demand into
 //! [`crate::stt::models_dir`]: multilingual Whisper models (ggml, from
-//! `ggerganov/whisper.cpp` on Hugging Face) for speech-to-text, and Piper
-//! voices (ONNX plus its JSON config, from `rhasspy/piper-voices`) for
-//! speaking, and small language models (GGUF, quantized by Unsloth) for the
+//! `ggerganov/whisper.cpp` on Hugging Face) for speech-to-text, Piper
+//! voices (ONNX plus its JSON config, from `rhasspy/piper-voices`) and
+//! Kokoro voices (one model and one file of voices that they all share, from
+//! `thewh1teagle/kokoro-onnx`'s releases) for speaking, and small language models (GGUF, quantized by Unsloth) for the
 //! voice agent ([`crate::llm`]). Each file is pinned by size and SHA-256.
 //!
 //! A download goes to `<file>.part` and is renamed once its checksum
@@ -12,7 +13,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::stt::models_dir;
 
@@ -25,6 +26,14 @@ pub enum Kind {
     Voice,
     /// A language model for [`crate::Llm`]: what the voice agent thinks with.
     Llm,
+}
+
+/// What speaks a [`Kind::Voice`] ([`crate::tts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    Piper,
+    Kokoro,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -53,6 +62,14 @@ pub struct Model {
 
 const WHISPER_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
 const PIPER_URL: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main/";
+const KOKORO_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/";
+/// Every Kokoro voice is these two files: a voice's id is `kokoro-` and its
+/// name in the second.
+const KOKORO_FILES: &[ModelFile] = &[
+    file("kokoro-v1.0.onnx", 325_532_387, "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5"),
+    file("voices-v1.0.bin", 28_214_398, "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d"),
+];
+const KOKORO_LICENSE: &str = "Apache-2.0 (hexgrad/Kokoro-82M)";
 
 const fn file(name: &'static str, bytes: u64, sha256: &'static str) -> ModelFile {
     ModelFile { name, bytes, sha256 }
@@ -136,6 +153,42 @@ pub const MODELS: &[Model] = &[
         repo: None,
     },
     Model {
+        id: "kokoro-if_sara",
+        kind: Kind::Voice,
+        language: Some("it"),
+        files: KOKORO_FILES,
+        note: "Italian, woman's voice, Kokoro: warmer and livelier, slower to speak",
+        license: KOKORO_LICENSE,
+        repo: None,
+    },
+    Model {
+        id: "kokoro-im_nicola",
+        kind: Kind::Voice,
+        language: Some("it"),
+        files: KOKORO_FILES,
+        note: "Italian, man's voice, Kokoro",
+        license: KOKORO_LICENSE,
+        repo: None,
+    },
+    Model {
+        id: "kokoro-af_heart",
+        kind: Kind::Voice,
+        language: Some("en"),
+        files: KOKORO_FILES,
+        note: "American English, woman's voice, Kokoro: its best",
+        license: KOKORO_LICENSE,
+        repo: None,
+    },
+    Model {
+        id: "kokoro-bf_emma",
+        kind: Kind::Voice,
+        language: Some("en"),
+        files: KOKORO_FILES,
+        note: "British English, woman's voice, Kokoro",
+        license: KOKORO_LICENSE,
+        repo: None,
+    },
+    Model {
         id: "qwen3.5-2b",
         kind: Kind::Llm,
         language: None,
@@ -186,6 +239,22 @@ impl Model {
         MODELS.iter().filter(move |m| m.kind == kind)
     }
 
+    /// What speaks it, for a voice.
+    pub fn engine(&self) -> Option<Engine> {
+        (self.kind == Kind::Voice).then(|| if self.id.starts_with("kokoro-") { Engine::Kokoro } else { Engine::Piper })
+    }
+
+    /// Its name for its engine: a Kokoro voice's in the voices file.
+    pub fn voice_name(&self) -> &'static str {
+        self.id.strip_prefix("kokoro-").unwrap_or(self.id)
+    }
+
+    /// Other models with files of its own (Kokoro's voices share theirs):
+    /// removing it removes those too.
+    pub fn sharing_files(&self) -> impl Iterator<Item = &'static Model> {
+        MODELS.iter().filter(move |m| m.id != self.id && m.files.iter().any(|f| self.files.contains(f)))
+    }
+
     /// All its files.
     pub fn bytes(&self) -> u64 {
         self.files.iter().map(|f| f.bytes).sum()
@@ -194,6 +263,7 @@ impl Model {
     pub fn url(&self, file: &ModelFile) -> String {
         let base = match self.kind {
             Kind::Whisper => WHISPER_URL.to_string(),
+            Kind::Voice if self.engine() == Some(Engine::Kokoro) => KOKORO_URL.to_string(),
             // it_IT-paola-medium → it/it_IT/paola/medium/
             Kind::Voice => {
                 let mut parts = self.id.splitn(3, '-');
@@ -287,6 +357,7 @@ mod tests {
             }
             match m.kind {
                 Kind::Whisper => assert!(m.files[0].name.starts_with("ggml-") && m.language.is_none()),
+                Kind::Voice if m.engine() == Some(Engine::Kokoro) => assert_eq!(m.files, KOKORO_FILES),
                 Kind::Voice => assert_eq!(m.files.iter().map(|f| f.name.to_string()).collect::<Vec<_>>(), [format!("{}.onnx", m.id), format!("{}.onnx.json", m.id)]),
                 Kind::Llm => assert!(m.files[0].name.ends_with(".gguf") && m.repo.is_some() && m.language.is_none()),
             }
@@ -297,5 +368,10 @@ mod tests {
     fn voice_urls_follow_the_repository_layout() {
         let m = Model::by_id("it_IT-riccardo-x_low").unwrap();
         assert_eq!(m.url(&m.files[1]), "https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/riccardo/x_low/it_IT-riccardo-x_low.onnx.json");
+        let k = Model::by_id("kokoro-if_sara").unwrap();
+        assert_eq!((k.engine(), k.voice_name()), (Some(Engine::Kokoro), "if_sara"));
+        assert_eq!(k.url(&k.files[1]), "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin");
+        assert!(k.sharing_files().any(|m| m.id == "kokoro-im_nicola"));
+        assert_eq!(m.sharing_files().count(), 0);
     }
 }

@@ -16,6 +16,8 @@
 //!   dualeye models download small # a Whisper model, for `dualeye --stt`
 //!   dualeye piper install         # Piper, for `dualeye --tts` (needs Python 3)
 //!   dualeye models download it_IT-paola-medium   # a voice for it
+//!   dualeye kokoro install        # Kokoro, for its voices (needs Python 3.10 to 3.13)
+//!   dualeye models download kokoro-if_sara       # a Kokoro voice
 //!   dualeye --stt --tts           # voice commands with spoken replies
 //!   dualeye models download qwen3-4b-2507        # a language model, for `dualeye --llm`
 //!   dualeye --stt --tts --llm     # ...understood by a local language model (llama-server)
@@ -112,7 +114,8 @@ struct Args {
     #[arg(long, default_value = "auto")]
     stt_language: SttLanguage,
     /// Answer voice commands out loud through the board's speaker, with
-    /// Piper (`dualeye piper install`) and the downloaded voices
+    /// Piper (`dualeye piper install`) or Kokoro (`dualeye kokoro install`)
+    /// and the downloaded voices
     #[arg(long)]
     tts: bool,
     /// A voice from `dualeye models` for its language, instead of the
@@ -183,7 +186,13 @@ enum Command {
     /// Show whether Piper (text-to-speech, for `--tts`) is installed, or install it
     Piper {
         #[command(subcommand)]
-        action: Option<PiperAction>,
+        action: Option<EngineAction>,
+    },
+    /// Show whether Kokoro (text-to-speech for the `kokoro-` voices) is
+    /// installed, or install it
+    Kokoro {
+        #[command(subcommand)]
+        action: Option<EngineAction>,
     },
     /// Type a command to the language model, as if said to the board: it
     /// runs the board's tools and prints its answer
@@ -257,10 +266,11 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum PiperAction {
-    /// Create a virtualenv in DualEye's data folder and pip install Piper into it
+enum EngineAction {
+    /// Create a virtualenv in DualEye's data folder and pip install the engine into it
     Install {
-        /// The Python 3 to create it with (default: python3 on the PATH)
+        /// The Python 3 to create it with (default: python3 on the PATH, or
+        /// the newest python3.N the engine supports)
         #[arg(long)]
         python: Option<std::path::PathBuf>,
     },
@@ -280,7 +290,8 @@ fn main() -> ExitCode {
         Some(Command::Tools { port, json }) => return tools(port, json),
         Some(Command::Call { port, json, tool, args }) => return call(port, json, &tool, &args),
         Some(Command::Models { action }) => return models_command(action),
-        Some(Command::Piper { action }) => return piper_command(action),
+        Some(Command::Piper { action }) => return engine_command(tts::Engine::Piper, action),
+        Some(Command::Kokoro { action }) => return engine_command(tts::Engine::Kokoro, action),
         Some(Command::Ask { text, language, port, llm }) => return ask(&text, language.as_deref(), port, &llm),
         Some(Command::Eval { llm, rules, set, language, verbose, json }) => return eval(&llm, rules, &set, language.as_deref(), verbose, json),
         Some(Command::Image { file, screen, clear, port }) => return image(port, file.as_deref(), &screen, clear),
@@ -790,8 +801,7 @@ fn stt_config(model: &str, language: SttLanguage) -> Result<SttConfig, String> {
 
 /// `--tts`: the default voices, or those `--tts-voice` names.
 fn tts_config(voices: &[String]) -> Result<TtsConfig, String> {
-    let python = tts::find_python().ok_or("Piper isn't installed: dualeye piper install")?;
-    let mut config = TtsConfig::with_default_voices(python);
+    let mut config = TtsConfig::with_default_voices();
     for id in voices {
         let m = Model::by_id(id).filter(|m| m.kind == Kind::Voice).ok_or_else(|| format!("{id}: not a voice; see dualeye models"))?;
         if !m.is_installed() {
@@ -803,25 +813,30 @@ fn tts_config(voices: &[String]) -> Result<TtsConfig, String> {
         let defaults: Vec<&str> = ["it", "en"].into_iter().filter_map(models::default_voice).collect();
         return Err(format!("no voice downloaded: dualeye models download {}", defaults.join(" (and) ")));
     }
+    if let Some(e) = config.engines().find(|e| !config.pythons.contains_key(e)) {
+        return Err(format!("{} isn't installed: dualeye {} install", e.name(), e.key()));
+    }
     Ok(config)
 }
 
-fn piper_command(action: Option<PiperAction>) -> ExitCode {
+fn engine_command(engine: tts::Engine, action: Option<EngineAction>) -> ExitCode {
+    let name = engine.name();
     match action {
-        None => match tts::find_python() {
-            Some(python) => println!("Piper installed: {}", python.display()),
+        None => match engine.python() {
+            Some(python) => println!("{name} installed: {}", python.display()),
             None => {
-                println!("Piper isn't installed: dualeye piper install");
+                println!("{name} isn't installed: dualeye {} install", engine.key());
                 return ExitCode::FAILURE;
             }
         },
-        Some(PiperAction::Install { python }) => {
-            let Some(python) = python.or_else(tts::system_python) else {
-                eprintln!("no python3 on the PATH: install Python 3.9 or later, or pass --python");
+        Some(EngineAction::Install { python }) => {
+            let Some(python) = python.or_else(|| tts::system_python(engine)) else {
+                let versions = if engine == tts::Engine::Kokoro { "3.10 to 3.13" } else { "3.9 or later" };
+                eprintln!("no Python {versions} on the PATH: install one, or pass --python");
                 return ExitCode::FAILURE;
             };
-            eprintln!("installing {} with {}", tts::PIPER_REQUIREMENT, python.display());
-            match tts::install(&python, |line| eprintln!("  {line}")) {
+            eprintln!("installing {} with {}", engine.requirement(), python.display());
+            match tts::install(engine, &python, |line| eprintln!("  {line}")) {
                 Ok(p) => println!("{}", p.display()),
                 Err(e) => {
                     eprintln!("{e}");
@@ -844,7 +859,7 @@ fn models_command(action: Option<ModelsAction>) -> ExitCode {
             let hw = Hardware::detect();
             let rec = hardware::recommend(&hw);
             println!("This computer: {}\n  {}\n", hw.summary(), rec.why);
-            let kinds = [(Kind::Whisper, "Speech-to-text (Whisper, --stt)"), (Kind::Voice, "Voices (Piper, --tts)"), (Kind::Llm, "Language models (llama.cpp, --llm)")];
+            let kinds = [(Kind::Whisper, "Speech-to-text (Whisper, --stt)"), (Kind::Voice, "Voices (Piper or Kokoro, --tts)"), (Kind::Llm, "Language models (llama.cpp, --llm)")];
             for (kind, title) in kinds {
                 println!("{title}");
                 for m in Model::of_kind(kind) {

@@ -98,6 +98,14 @@ pub fn python(dir: &Path, mut on_event: impl FnMut(FlashEvent)) -> io::Result<Pa
     portable_python(dir, &mut |message: &str, percent| on_event(FlashEvent::Setup { message: message.into(), percent }))
 }
 
+/// The pinned portable CPython ([`PYTHON_VERSION`]) in `dir`, downloaded if
+/// missing, whatever the machine has: for a virtualenv that wants an older
+/// Python than the newest (Kokoro's).
+pub fn pinned_python(dir: &Path, mut on_event: impl FnMut(FlashEvent)) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    portable_python(dir, &mut |message: &str, percent| on_event(FlashEvent::Setup { message: message.into(), percent }))
+}
+
 /// A usable interpreter already on the machine. Never on macOS: its
 /// `/usr/bin/python3` stub pops up the Xcode tools installer.
 fn system_python() -> Option<PathBuf> {

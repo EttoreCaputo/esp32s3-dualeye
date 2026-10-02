@@ -32,6 +32,7 @@
     type ShowOn,
     type TimerInfo,
     type TimerKind,
+    type TtsEngine,
     type VoiceInfo,
     type VoiceSettings,
   } from "./monitor.svelte";
@@ -239,16 +240,20 @@
     }
   }
 
-  let piperError = $state("");
-  async function installPiper() {
-    piperError = "";
+  let engineError = $state("");
+  async function installEngine(engine: TtsEngine) {
+    engineError = "";
     try {
-      await monitor.installPiper();
+      await monitor.installEngine(engine);
     } catch (e) {
-      piperError = String(e);
+      engineError = String(e);
     }
     voice = await monitor.voiceInfo();
   }
+  const ENGINES: [TtsEngine, string, string][] = [
+    ["piper", "Piper", "Light and quick (GPL-3.0, about 100 MB from PyPI)"],
+    ["kokoro", "Kokoro", "Warmer, livelier voices, a little slower to answer (MIT, about 150 MB from PyPI)"],
+  ];
 
   let testing = $state<string | null>(null);
   async function testVoice(language: string) {
@@ -971,7 +976,7 @@
         <p class="hint">
           After its wake word, <b>“Alexa”</b>, the board sends what you say to this computer. With voice on, whisper.cpp transcribes it
           here, in Italian or English, a small language model works out what to do (“metti la faccia rings a sinistra”, “what's the
-          temperature?”) and Piper answers through the board's speaker. Nothing leaves the computer.
+          temperature?”) and Piper or Kokoro answers through the board's speaker. Nothing leaves the computer.
         </p>
         {#if !voice}
           <p class="empty">Loading…</p>
@@ -1170,19 +1175,30 @@
 
           <section>
             <h3>Voices</h3>
-            {#if voice.piper_install}
-              <p class="hint">Installing Piper… <code>{voice.piper_install}</code></p>
-            {:else if !voice.piper}
-              <p class="hint">
-                Piper speaks the answers. It's a Python program (GPL-3.0) that runs next to the app; installing it puts it in a private
-                virtualenv, about 100 MB from PyPI.
-              </p>
-              <button class="btn primary" onclick={installPiper}>Install Piper</button>
-            {:else}
-              <p class="hint">Piper voices from Hugging Face, one per language. Check each voice's license before sharing what it says.</p>
-            {/if}
-            {#if piperError}
-              <p class="hint error">{piperError}</p>
+            <p class="hint">
+              Two engines speak the answers, each a Python program that runs next to the app, installed into a private virtualenv. Pick a voice
+              of either for each language. Check each voice's license before sharing what it says.
+            </p>
+            <div class="ports">
+              {#each ENGINES as [engine, name, note] (engine)}
+                {@const installing = voice[`${engine}_install`]}
+                <div class="port model" class:checked={!!voice[engine]}>
+                  <span class="mtext">
+                    <span class="pname">{name}</span>
+                    <span class="mnote">{installing ? `Installing… ${installing}` : note}</span>
+                  </span>
+                  <span class="mside">
+                    {#if voice[engine]}
+                      <span class="pmeta">Installed</span>
+                    {:else}
+                      <button class="btn small primary" disabled={!!installing} onclick={() => installEngine(engine)}>{installing ? "Installing…" : "Install"}</button>
+                    {/if}
+                  </span>
+                </div>
+              {/each}
+            </div>
+            {#if engineError}
+              <p class="hint error">{engineError}</p>
             {/if}
             {#each VOICE_LANGUAGES as [lang, label] (lang)}
               <div class="vlang">
@@ -1208,15 +1224,19 @@
                       <span class="radio"></span>
                       <span class="mtext">
                         <span class="pname">{m.id}</span>
-                        <span class="mnote">{m.note}</span>
+                        <span class="mnote">{m.note}{m.engine && !voice[m.engine] ? ` (install ${m.engine === "kokoro" ? "Kokoro" : "Piper"} above)` : ""}</span>
                       </span>
                     </label>
                     <span class="mside">
-                      <span class="pmeta">{mb(m.bytes)}</span>
+                      <span class="pmeta" title={m.engine === "kokoro" ? "One download for every Kokoro voice" : undefined}>{mb(m.bytes)}{m.engine === "kokoro" ? ", shared" : ""}</span>
                       {#if downloading}
                         <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
                       {:else if m.installed}
-                        <button class="btn small" title="Delete the files" onclick={() => removeModel(m.id)}>Delete</button>
+                        <button
+                          class="btn small"
+                          title={m.engine === "kokoro" ? "Delete the files: every Kokoro voice shares them" : "Delete the files"}
+                          onclick={() => removeModel(m.id)}>Delete</button
+                        >
                       {:else}
                         <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
                       {/if}

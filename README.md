@@ -107,7 +107,7 @@ In the app, open Settings → **Voice**:
 
 1. Turn on **Transcribe what the board hears**.
 2. Under **This computer** the app says what it found (processor, memory, GPU) and which models suit it; **Use …** picks them and downloads what's missing (about 3 GB for the default pair, once).
-3. Press **Install Piper**, the program that speaks the answers (about 100 MB, once), and download a voice for each language (the defaults are ticked).
+3. Under **Voices**, install the program that speaks the answers (once), and download a voice for each language (the defaults are ticked). **Piper** is light and quick (about 100 MB); **Kokoro** sounds warmer and livelier, but takes about a second for each sentence instead of a fifth, and its voices share one 354 MB model. You can pick one engine for Italian and the other for English.
 4. Say "Alexa", wait for the cyan eyes, and talk.
 
 ### Talking to it
@@ -152,7 +152,7 @@ Nothing you say leaves your computer. There is no account, no cloud service and 
 - **Audio** goes over USB to the app, is kept in memory until it is transcribed, then dropped. It is written to disk only if you turn on **Keep recordings** (for debugging).
 - **Transcripts and answers** are shown in the Voice tab (the last 50) and forgotten when the app quits.
 - **Speech recognition, the language model and the voice** run as local programs reachable from this computer only (`127.0.0.1`).
-- **The network** is used only to download what you ask for: models from Hugging Face (checked against a SHA-256), Piper from PyPI, and Python the first time the app flashes the board.
+- **The network** is used only to download what you ask for: models from Hugging Face and Kokoro's from GitHub (checked against a SHA-256), Piper and Kokoro from PyPI, and Python the first time the app flashes the board.
 
 ### Troubleshooting
 
@@ -162,7 +162,7 @@ Nothing you say leaves your computer. There is no account, no cloud service and 
 | The eyes appear, then turn red | No words were heard (too far, too quiet), or a helper failed: the Voice tab shows the error under the status |
 | "Speech-to-text: Not working" | The Whisper model isn't downloaded, or whisper-server couldn't start: see `whisper-server.log` in the [data folder](#where-the-app-keeps-its-files)'s `models/` |
 | "Language model: Not working" | The model isn't downloaded, or doesn't fit in memory: pick the recommended one, or a smaller one. `llama-server.log` is next to the models. Meanwhile the fixed phrases answer |
-| "Text-to-speech: Not working" | Piper isn't installed, or no voice is downloaded for a language. Reinstall it from the Voice tab |
+| "Text-to-speech: Not working" | The engine of a chosen voice (Piper or Kokoro) isn't installed, or no voice is downloaded for a language. Reinstall it from the Voice tab; its log is `server.log` in `piper/` or `kokoro/` in the [data folder](#where-the-app-keeps-its-files) |
 | Answers are slow | The Voice tab shows the time of each step. Use the recommended models; on a computer without a GPU, `base` and `qwen3.5-2b` |
 | The board wakes up by itself | Try "Hi ESP" instead |
 | The wrong words come out | Set the language instead of Auto |
@@ -241,6 +241,8 @@ dualeye --stt                                    # print each transcript
 dualeye piper install                            # Piper, in a virtualenv in DualEye's data folder (needs Python 3.9+)
 dualeye models download it_IT-paola-medium       # Italian voice, 64 MB
 dualeye models download en_GB-alba-medium        # English voice, 63 MB
+dualeye kokoro install                           # or Kokoro, likewise (needs Python 3.10 to 3.13)
+dualeye models download kokoro-if_sara           # its Italian voice: the model all Kokoro voices share, 354 MB
 dualeye --stt --tts                              # spoken answers, fixed phrases
 dualeye models download qwen3-4b-2507            # the language model, 2.5 GB
 dualeye --stt --tts --llm                        # ...understood by the language model
@@ -400,7 +402,7 @@ esptool --chip esp32s3 --port /dev/ttyACM0 write-flash 0x0 build/merged-binary.b
 
 ### Voice internals
 
-The board runs Espressif's [ESP-SR](https://github.com/espressif/esp-sr) on core 1 (echo cancellation and voice activity on the mic and the speaker loopback, then WakeNet), with the UI on core 0; its models sit in the `model` partition ([partitions.csv](partitions.csv)). After the wake word it streams what it hears over USB until you stop talking; [whisper.cpp](https://github.com/ggml-org/whisper.cpp) transcribes it, a small language model in llama.cpp's `llama-server` calls the board's tools (the ones MCP offers, plus the computer's sensors and the time) and writes a one-sentence answer, and [Piper](https://github.com/OHF-Voice/piper1-gpl) speaks it a sentence at a time.
+The board runs Espressif's [ESP-SR](https://github.com/espressif/esp-sr) on core 1 (echo cancellation and voice activity on the mic and the speaker loopback, then WakeNet), with the UI on core 0; its models sit in the `model` partition ([partitions.csv](partitions.csv)). After the wake word it streams what it hears over USB until you stop talking; [whisper.cpp](https://github.com/ggml-org/whisper.cpp) transcribes it, a small language model in llama.cpp's `llama-server` calls the board's tools (the ones MCP offers, plus the computer's sensors and the time) and writes a one-sentence answer, and [Piper](https://github.com/OHF-Voice/piper1-gpl) or [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) speaks it a sentence at a time.
 
 The whisper-server and llama-server the app ships use Metal on Apple silicon and the processor elsewhere. To use an NVIDIA card, install CUDA builds of llama.cpp (and whisper.cpp) and point the app at them with `DUALEYE_LLAMA_SERVER` (and `DUALEYE_WHISPER_SERVER`). If the board wakes itself while it talks, build the firmware without barge-in (`CONFIG_DUALEYE_VOICE_BARGE_IN`).
 
