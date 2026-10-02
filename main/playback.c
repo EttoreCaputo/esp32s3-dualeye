@@ -63,6 +63,11 @@ typedef struct {
 } note_t;
 
 static const note_t ERROR_NOTES[] = {{587.3f, 110}, {0, 40}, {392.0f, 200}};
+/* C6 E6 G6, twice. */
+static const note_t ALARM_NOTES[] = {
+    {1046.5f, 110}, {0, 30}, {1318.5f, 110}, {0, 30}, {1568.0f, 220}, {0, 160},
+    {1046.5f, 110}, {0, 30}, {1318.5f, 110}, {0, 30}, {1568.0f, 220},
+};
 
 typedef struct {
     bool active;   /* frames of `id` are coming or buffered */
@@ -194,7 +199,10 @@ void playback_earcon(playback_earcon_t earcon)
 {
     const note_t *notes = ERROR_NOTES;
     size_t count = sizeof(ERROR_NOTES) / sizeof(ERROR_NOTES[0]);
-    (void) earcon;
+    if (earcon == PLAYBACK_EARCON_ALARM) {
+        notes = ALARM_NOTES;
+        count = sizeof(ALARM_NOTES) / sizeof(ALARM_NOTES[0]);
+    }
     if (!s_available) {
         return;
     }

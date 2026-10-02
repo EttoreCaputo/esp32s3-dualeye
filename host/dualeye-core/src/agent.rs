@@ -5,7 +5,8 @@
 //! [`Toolbox`] offers (the board's, plus `get_metrics`) and `get_time`, runs
 //! the tool calls it asks for and feeds their results back, until it answers
 //! in words: that answer is spoken. A question about the time comes with the
-//! time already read, as if the model had called `get_time`. The last few exchanges are kept, so "and
+//! time already read, as if the model had called `get_time`, and one about
+//! the sensors with `get_metrics`. The last few exchanges are kept, so "and
 //! on the right too" works, and forgotten after a few minutes of quiet.
 
 use std::sync::Mutex;
@@ -29,22 +30,26 @@ const MEMORY_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_TOKENS: u32 = 256;
 
 const SYSTEM_PROMPT: &str = "\
-You are DualEye, a small voice assistant in a desk gadget connected to the user's computer. \
-It has two round screens, left (by default the CPU screen) and right (by default the GPU screen), that show watch faces \
-with the computer's sensors (any face goes on either screen; set_face's source picks whether classic, rings, plus and bar show \
-the CPU or the GPU), a microphone and a speaker. The user talks to you in Italian or English; speech recognition wrote down what they said, \
-sometimes with mistakes in names: \"rinza\", \"rinusa\" or \"rinks\" mean the face \"rings\", \"clod\" or \"clawed\" the face \"clawd\", \"cloud\" the face \"claude\".
+You are DualEye, a voice assistant in a desk gadget with two round screens (left = CPU, right = GPU), a microphone and a speaker. \
+The user speaks Italian or English. Speech recognition makes mistakes: \"rinza\", \"rinusa\" or \"rinks\" mean the face rings, \"clod\" or \"clawed\" mean clawd, \"cloud\" means claude.
 
-How to answer:
-- To change the screens or the speaker, call the tools; never just say you did it. \"Sinistra\"/\"left\"/\"CPU\" is the left screen, \
-\"destra\"/\"right\"/\"GPU\" the right one; when no screen is named, use both.
-- \"Sottosopra\"/\"upside down\" is 180 degrees, \"dritto\"/\"upright\" 0.
-- For a change relative to now (louder, quieter, brighter, dimmer), first read the current value with get_state.
-- Muting the speaker is volume 0.
-- For temperatures, load, clocks, fans, memory, network, disk or battery call get_metrics, for the time or the date call get_time: you don't know them otherwise, never make numbers up.
-- Then reply in one short sentence, in the same language as the user's last message. \
-It will be read aloud: plain words, no markdown, no lists, no emoji, numbers rounded.
-- If you can't do something, say so briefly. Small talk gets a short, friendly answer.";
+Rules:
+1. To do something, call a tool. Never say it is done without calling it.
+2. Pick the tool:
+- timer, countdown: set_timer
+- ricordami, remind me: set_reminder
+- pomodoro: pomodoro
+- stop, cancel or pause a timer: control_timer
+- watch face: set_face
+- scrivi, write: show_text
+- temperature, load, fans, memory: get_metrics
+- time or date: get_time
+- louder, quieter, brighter, dimmer: get_state, then set the new value
+3. Sinistra, left, CPU: the left screen. Destra, right, GPU: the right screen. No screen named: both. \
+Sottosopra, upside down: 180. Dritto, upright: 0. Mute: volume 0.
+4. Call each tool once. Never make numbers up.
+5. Then reply with one short sentence in the user's language, plain words for speech: no markdown, no emoji. \
+If you can't do it, say so.";
 
 /// Where the agent's tools come from, and what runs them.
 pub trait Toolbox {
@@ -161,6 +166,14 @@ impl Agent {
             messages.push(json!({"role": "assistant", "content": "", "tool_calls": [{"id": "clock", "type": "function", "function": {"name": "get_time", "arguments": "{}"}}]}));
             messages.push(json!({"role": "tool", "tool_call_id": "clock", "content": now()}));
         }
+        // Likewise "is the CPU hot?": with more tools to pick from they'd
+        // rather ask back than call get_metrics.
+        if intents::asks_metrics(text)
+            && let Ok(metrics) = toolbox.call("get_metrics", &json!({}))
+        {
+            messages.push(json!({"role": "assistant", "content": "", "tool_calls": [{"id": "sensors", "type": "function", "function": {"name": "get_metrics", "arguments": "{}"}}]}));
+            messages.push(json!({"role": "tool", "tool_call_id": "sensors", "content": metrics}));
+        }
         let first = messages.len();
         messages.push(json!({"role": "user", "content": text}));
 
@@ -185,18 +198,20 @@ impl Agent {
             let message = self.llm.chat(&request)?;
             llm_ms += asked.elapsed().as_millis() as u64;
             rounds += 1;
+            let mut content = message["content"].as_str().unwrap_or_default();
             let mut calls: Vec<Value> = message["tool_calls"].as_array().cloned().unwrap_or_default();
-            if calls.is_empty()
-                && let Some(call) = text_tool_call(message["content"].as_str().unwrap_or_default())
-            {
-                calls.push(call);
-            }
-            let content = spoken(message["content"].as_str().unwrap_or_default(), language);
             if calls.is_empty() {
-                reply = content;
+                calls = text_tool_calls(content);
+                if !calls.is_empty() {
+                    // Not in the history as text, or it writes them so again.
+                    content = "";
+                }
+            }
+            if calls.is_empty() {
+                reply = spoken(content, language);
                 break;
             }
-            messages.push(json!({"role": "assistant", "content": message["content"].as_str().unwrap_or_default(), "tool_calls": calls}));
+            messages.push(json!({"role": "assistant", "content": content, "tool_calls": calls}));
             for (i, call) in calls.iter().enumerate() {
                 let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or_default().to_string();
                 let arguments = match call.pointer("/function/arguments") {
@@ -204,10 +219,12 @@ impl Agent {
                     Some(v @ Value::Object(_)) => v.clone(),
                     _ => json!({}),
                 };
-                // Small models like to do the same thing twice.
-                let repeat = actions.iter().any(|a| a.ok && a.tool == name && a.arguments == arguments && !is_read_only(&name));
-                let result = if repeat {
-                    Ok("already done".to_string())
+                // Small models like to do the same thing twice, or to read
+                // the time over and over instead of doing what was asked.
+                let before = actions.iter().find(|a| a.ok && a.tool == name && a.arguments == arguments);
+                let repeat = before.is_some();
+                let result = if let Some(before) = before {
+                    Ok(if is_read_only(&name) { format!("already read: {}. Now do what the user asked.", before.result) } else { "already done".to_string() })
                 } else if name == "get_time" {
                     Ok(now())
                 } else {
@@ -230,7 +247,8 @@ impl Agent {
         if reply.is_empty() {
             // Only tool calls and no words: say whether they worked.
             let it = language == "it";
-            reply = match (actions.iter().all(|a| a.ok), it) {
+            let done = actions.iter().all(|a| a.ok) && actions.iter().any(|a| !is_read_only(&a.tool));
+            reply = match (done, it) {
                 (true, true) => "Fatto.",
                 (true, false) => "Done.",
                 (false, true) => "Non ci sono riuscito.",
@@ -270,14 +288,36 @@ fn now() -> String {
     Local::now().format("%A %-d %B %Y, %H:%M").to_string()
 }
 
-/// A tool call the model wrote as text instead of in its template's tags
-/// (Qwen3 1.7B now and then): `{"name": "set_face", "arguments": {…}}`.
-fn text_tool_call(content: &str) -> Option<Value> {
+/// Tool calls the model wrote as text instead of in its template's tags,
+/// as JSON (Qwen3 1.7B now and then: `{"name": "set_face", "arguments": {…}}`)
+/// or as XML (Qwen3.5: `<tool_call><function=set_face><parameter=face>rings</parameter></function></tool_call>`).
+fn text_tool_calls(content: &str) -> Vec<Value> {
+    let call = |name: &str, arguments: Value| json!({"type": "function", "function": {"name": name, "arguments": arguments.to_string()}});
     let body = content.trim().trim_start_matches("<tool_call>").trim_end_matches("</tool_call>").trim();
-    let v: Value = serde_json::from_str(body).ok()?;
-    let name = v["name"].as_str()?;
-    let arguments = v.get("arguments").cloned().unwrap_or_else(|| json!({}));
-    Some(json!({"type": "function", "function": {"name": name, "arguments": arguments.to_string()}}))
+    if let Ok(v) = serde_json::from_str::<Value>(body) {
+        return match v["name"].as_str() {
+            Some(name) => vec![call(name, v.get("arguments").cloned().unwrap_or_else(|| json!({})))],
+            None => vec![],
+        };
+    }
+    content
+        .split("<function=")
+        .skip(1)
+        .filter_map(|part| {
+            let (name, rest) = part.split_once('>')?;
+            let rest = rest.split("</function>").next().unwrap_or(rest);
+            let mut arguments = serde_json::Map::new();
+            for param in rest.split("<parameter=").skip(1) {
+                let Some((key, value)) = param.split_once('>') else { continue };
+                let value = value.split("</parameter>").next().unwrap_or(value).trim();
+                // Numbers and enums as JSON when they are, else the text.
+                let value = serde_json::from_str(value).unwrap_or_else(|_| json!(value));
+                arguments.insert(key.trim().to_string(), value);
+            }
+            let name = name.trim();
+            (!name.is_empty()).then(|| call(name, Value::Object(arguments)))
+        })
+        .collect()
 }
 
 /// Text fit for the speaker: no thinking left over, no markdown, degrees
@@ -307,10 +347,22 @@ mod tests {
 
     #[test]
     fn tool_calls_written_as_text() {
-        let call = text_tool_call(r#"{"name": "set_face", "arguments": {"face": "classic", "screen": "left"}}"#).unwrap();
-        assert_eq!(call["function"]["name"], "set_face");
-        assert_eq!(serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap()["screen"], "left");
-        assert!(text_tool_call("Fatto.").is_none());
+        let args = |call: &Value| serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap();
+        let calls = text_tool_calls(r#"{"name": "set_face", "arguments": {"face": "classic", "screen": "left"}}"#);
+        assert_eq!(calls[0]["function"]["name"], "set_face");
+        assert_eq!(args(&calls[0])["screen"], "left");
+        assert!(text_tool_calls("Fatto.").is_empty());
+
+        let calls = text_tool_calls("<tool_call>\n<function=get_time>\n</function>\n</tool_call>");
+        assert_eq!(calls[0]["function"]["name"], "get_time");
+        assert_eq!(args(&calls[0]), json!({}));
+        let calls = text_tool_calls(
+            "<tool_call>\n<function=set_timer>\n<parameter=minutes>\n10\n</parameter>\n<parameter=label>\npasta\n</parameter>\n</function>\n</tool_call>\n\
+             <tool_call>\n<function=pomodoro>\n<parameter=action>\nstart\n</parameter>\n</function>\n</tool_call>",
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(args(&calls[0]), json!({"minutes": 10, "label": "pasta"}));
+        assert_eq!(args(&calls[1]), json!({"action": "start"}));
     }
 
     #[test]

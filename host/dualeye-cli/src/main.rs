@@ -22,6 +22,7 @@
 //!   dualeye ask "metti rings a sinistra"         # type a command to the language model
 //!   dualeye eval                  # run the voice commands' eval set against the language model
 //!   dualeye say "Ciao!"           # speak through a running bridge's speaker
+//!   dualeye timer 10m pasta       # a timer on the board (also: timer, timer cancel, timer remind 17:30 call Marco, timer pomodoro)
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -38,6 +39,7 @@ use dualeye_core::tts::{self, Tts, TtsConfig};
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage};
 use dualeye_core::eval::{self, EvalSet, Responder};
 use dualeye_core::llm::{self, Llm, LlmConfig};
+use dualeye_core::timers::{self, Timers};
 use dualeye_core::voice::{self, VoiceConfig};
 use dualeye_core::{
     Agent, Board, BoardFirmware, ClaudeUsage, Collector, Face, Faces, Hub, Memory, Rotation, Rotations, Snapshot, Source, Sources, Tool, Toolbox, intents, mcp, media,
@@ -57,7 +59,7 @@ struct Args {
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(200..))]
     interval_ms: u64,
     /// Watch face on the left screen: classic, rings, plus, bar, claude, clawd,
-    /// net, disk, battery or image. Without any face, source or rotation flag
+    /// net, disk, battery, image or timer. Without any face, source or rotation flag
     /// the board keeps its own; with one, the others fall back to classic,
     /// the usual source and 0
     #[arg(long)]
@@ -232,6 +234,18 @@ enum Command {
         #[arg(long, env = "DUALEYE_PORT")]
         port: Option<String>,
     },
+    /// Timers, reminders and a pomodoro, shown and rung by the board while
+    /// the app or `dualeye` runs: `timer` lists them, `timer 10m [label]`
+    /// (or 90s, 1h30m, 25 for minutes) starts one, `timer cancel|pause|resume
+    /// [label|all]`, `timer remind 17:30|20m <text>`, `timer pomodoro [stop |
+    /// WORK BREAK ROUNDS]`
+    Timer {
+        /// it or en: what the board says when it's up (default: the system's)
+        #[arg(long)]
+        language: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Speak through the board's speaker. Needs the app with spoken replies
     /// on, or `dualeye --tts`, running
     Say {
@@ -282,6 +296,7 @@ fn main() -> ExitCode {
                 }
             };
         }
+        Some(Command::Timer { language, args }) => return timer(language.as_deref(), &args),
         Some(Command::Mcp { port }) => {
             return match mcp::serve_stdio(port) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -381,6 +396,7 @@ fn main() -> ExitCode {
         })),
         // The alerts need the hooks in Claude Code's settings (the app's Display tab adds them).
         claude_alerts: Arc::default(),
+        timers: Arc::new(Timers::open(timers::default_file())),
     };
     let stop = Arc::new(AtomicBool::new(false));
     // Ctrl-C ends the loop, so the whisper-server sidecar is stopped too.
@@ -440,6 +456,8 @@ fn main() -> ExitCode {
                     (n, Some(w)) => format!(", {n} frames lost -> {w}"),
                 }
             ),
+            BridgeEvent::TimerFired { text, error: None, .. } => println!("timer: {text}"),
+            BridgeEvent::TimerFired { text, error: Some(e), .. } => println!("timer: {text} (not said: {e})"),
             BridgeEvent::ClaudeAlert { text, error: None, .. } => println!("claude: {text}"),
             BridgeEvent::ClaudeAlert { text, error: Some(e), .. } => eprintln!("claude: {text} (not given: {e})"),
             BridgeEvent::Settings { faces, rotation } => println!(
@@ -499,6 +517,7 @@ fn agent(args: &LlmArgs) -> Result<Arc<Agent>, String> {
 /// The board's tools for `dualeye ask`, through a running bridge or the port.
 struct BoardTools {
     board: Board,
+    language: String,
 }
 
 impl Toolbox for BoardTools {
@@ -519,11 +538,112 @@ impl Toolbox for BoardTools {
             };
             return Ok(snapshot.metrics_json().to_string());
         }
+        if Timers::tools().iter().any(|t| t.name == name) {
+            return self.board.timer_tool(name, arguments, &self.language);
+        }
         let result = self.board.call_tool(name, arguments.clone()).map_err(|e| e.to_string())?;
         match (result.is_error, name, &result.structured_content) {
             (true, ..) => Err(result.text()),
             (false, "get_state", Some(state)) => Ok(voice::trim_state(state).to_string()),
             _ => Ok(result.text()),
+        }
+    }
+}
+
+/// "10m", "90s", "1h30m", "25" (minutes).
+fn parse_span(s: &str) -> Option<u64> {
+    if let Ok(min) = s.parse::<f64>() {
+        return (min > 0.0).then(|| (min * 60.0).round() as u64);
+    }
+    let (mut total, mut num) = (0u64, String::new());
+    for c in s.chars() {
+        match c {
+            '0'..='9' => num.push(c),
+            'h' | 'm' | 's' => {
+                let n: u64 = num.parse().ok()?;
+                num.clear();
+                total += n * match c {
+                    'h' => 3600,
+                    'm' => 60,
+                    _ => 1,
+                };
+            }
+            _ => return None,
+        }
+    }
+    (num.is_empty() && total > 0).then_some(total)
+}
+
+fn timer(language: Option<&str>, args: &[String]) -> ExitCode {
+    let language = language.unwrap_or(dualeye_core::claude::alerts::system_language());
+    let rest = |from: usize| args.get(from..).unwrap_or_default().join(" ");
+    let first = args.first().map(String::as_str);
+    let (tool, arguments) = match first {
+        None | Some("list" | "ls") => ("get_timers", json!({})),
+        Some(action @ ("cancel" | "pause" | "resume" | "stop")) => {
+            let action = if action == "stop" { "cancel" } else { action };
+            let which = rest(1);
+            ("control_timer", if which.is_empty() { json!({"action": action}) } else { json!({"action": action, "which": which}) })
+        }
+        Some("remind") => {
+            let when = args.get(1).map(String::as_str).unwrap_or_default();
+            let text = rest(2);
+            match (timers::parse_clock(when).filter(|_| when.contains([':', '.'])), parse_span(when)) {
+                (Some(at), _) => ("set_reminder", json!({"text": text, "at": timers::clock_text(at)})),
+                (None, Some(secs)) => ("set_reminder", json!({"text": text, "in_minutes": secs as f64 / 60.0})),
+                (None, None) => {
+                    eprintln!("usage: dualeye timer remind 17:30|20m <text>");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        Some("pomodoro") => match args.get(1).map(String::as_str) {
+            Some("stop") => ("pomodoro", json!({"action": "stop"})),
+            _ => {
+                let n = |i: usize, default: u64| args.get(i).and_then(|a| a.parse().ok()).unwrap_or(default);
+                ("pomodoro", json!({"action": "start", "work_minutes": n(1, 25), "break_minutes": n(2, 5), "rounds": n(3, 4)}))
+            }
+        },
+        Some(span) => match parse_span(span) {
+            Some(secs) => {
+                let label = rest(1);
+                ("set_timer", if label.is_empty() { json!({"seconds": secs}) } else { json!({"seconds": secs, "label": label}) })
+            }
+            None => {
+                eprintln!("unknown timer command `{span}`: see dualeye timer --help");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let board = board(None);
+    match board.timer_tool(tool, &arguments, language) {
+        Ok(text) if tool == "get_timers" => {
+            let list: Value = serde_json::from_str(&text).unwrap_or_default();
+            let timers = list["timers"].as_array().cloned().unwrap_or_default();
+            if timers.is_empty() {
+                println!("no timers");
+            }
+            for t in timers {
+                let left = t["left_s"].as_u64().unwrap_or(0);
+                let name = t["label"].as_str().map(|l| format!(" {l}")).unwrap_or_default();
+                let ends = t["ends_at"].as_str().map(|e| format!(", ends {e}")).unwrap_or_default();
+                println!("{}{name}: {}:{:02}:{:02} left of {} s ({}{ends})", t["kind"].as_str().unwrap_or(""), left / 3600, left % 3600 / 60, left % 60, t["total_s"], t["state"].as_str().unwrap_or(""));
+            }
+            if board.last_route() != Some(dualeye_core::Route::Hub) {
+                eprintln!("(the app isn't running: these ring once it, or `dualeye`, runs)");
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(text) => {
+            println!("{text}");
+            if board.last_route() != Some(dualeye_core::Route::Hub) {
+                eprintln!("(the app isn't running: it rings once the app, or `dualeye`, runs)");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -542,7 +662,7 @@ fn ask(text: &str, language: Option<&str>, port: Option<String>, args: &LlmArgs)
         return ExitCode::FAILURE;
     }
     let language = language.unwrap_or_else(|| intents::guess_language(text));
-    let result = agent.respond(text, language, &BoardTools { board: board(port) });
+    let result = agent.respond(text, language, &BoardTools { board: board(port), language: language.to_string() });
     agent.llm().shutdown();
     match result {
         Ok(turn) => {

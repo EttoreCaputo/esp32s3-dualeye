@@ -29,14 +29,18 @@
     type Reading,
     type Side,
     type SttLanguage,
+    type ShowOn,
+    type TimerInfo,
+    type TimerKind,
     type VoiceInfo,
     type VoiceSettings,
   } from "./monitor.svelte";
 
-  type Tab = "connection" | "display" | "voice" | "device" | "sensors" | "console";
+  type Tab = "connection" | "display" | "timers" | "voice" | "device" | "sensors" | "console";
   const TABS: [Tab, string][] = [
     ["connection", "Connection"],
     ["display", "Display"],
+    ["timers", "Timers"],
     ["voice", "Voice"],
     ["device", "Device"],
     ["sensors", "Sensors"],
@@ -70,6 +74,55 @@
     const id = setInterval(load, 2000);
     return () => clearInterval(id);
   });
+
+  // The Timers tab: read every second while it's open, so the times run.
+  let timerError = $state("");
+  let timerMinutes = $state(10);
+  let timerLabel = $state("");
+  let remindText = $state("");
+  let remindAt = $state("");
+  let pomo = $state({ work: 25, rest: 5, rounds: 4 });
+  $effect(() => {
+    if (!open || tab !== "timers") return;
+    const load = () => monitor.timersInfo().catch((e) => (timerError = String(e)));
+    load();
+    const id = setInterval(load, 1000);
+    return () => clearInterval(id);
+  });
+  async function timerTool(name: string, args: Record<string, unknown>) {
+    timerError = "";
+    try {
+      await monitor.timerTool(name, args);
+    } catch (e) {
+      timerError = String(e);
+    }
+  }
+  const startTimer = (secs: number, label = "") => timerTool("set_timer", label.trim() ? { seconds: secs, label: label.trim() } : { seconds: secs });
+  const controlTimer = (action: "cancel" | "pause" | "resume", t: TimerInfo) => timerTool("control_timer", { action, which: String(t.id) });
+  async function remind() {
+    await timerTool("set_reminder", { text: remindText.trim(), at: remindAt });
+    if (!timerError) remindText = "";
+  }
+  const TIMER_KINDS: Record<TimerKind, [string, string]> = {
+    timer: ["Timer", "#f8a639"],
+    work: ["Pomodoro: focus", "#ff6347"],
+    break: ["Pomodoro: break", "#40e080"],
+    reminder: ["Reminder", "#3ae7ed"],
+  };
+  const clockText = (secs: number) => {
+    const two = (n: number) => String(n).padStart(2, "0");
+    return secs >= 3600 ? `${Math.trunc(secs / 3600)}:${two(Math.trunc((secs % 3600) / 60))}:${two(secs % 60)}` : `${Math.trunc(secs / 60)}:${two(secs % 60)}`;
+  };
+  const timerSub = (t: TimerInfo) => {
+    if (t.state === "ring") return "ringing";
+    if (t.state === "pause") return "paused";
+    return t.ends_at ? `until ${t.ends_at}` : "";
+  };
+  const SHOW_ON: [ShowOn, string][] = [
+    ["left", "Left"],
+    ["right", "Right"],
+    ["none", "Neither"],
+  ];
 
   $effect(() => {
     if (!open || tab !== "sensors") return;
@@ -445,7 +498,9 @@
       disk: last?.disk,
       bat: last?.bat,
       image: monitor.images[side],
-    }, `thumb-${side}`);
+      // A sample one, so the thumbnail shows what the face looks like.
+      timer: last?.timer ?? { kind: "timer", state: "run", left_s: 272, total_s: 600 },
+    });
   };
   const pick = (id: DeviceId, face: Face) => monitor.setFaces({ ...monitor.faces, [id]: face });
   const showSource = (id: DeviceId, source: Source) => monitor.setFaces({ ...monitor.faces, src: { ...monitor.faces.src, [id]: source } });
@@ -816,6 +871,101 @@
               <button class="btn" onclick={() => copy("desktop")}>{copied === "desktop" ? "Copied" : "Copy"}</button>
             </div>
           {/if}
+        </section>
+      {:else if tab === "timers"}
+        {@const info = monitor.timers}
+        <p class="hint">
+          The board counts the first timer down on a screen and rings when it's up; saying "Alexa" silences it, and with spoken replies
+          on it says what the timer was for. By voice: "Alexa, timer 10 minuti", "ricordami alle 17 di chiamare Marco", "start a pomodoro",
+          "quanto manca?". Timers keep running with the window closed, and reminders even across a restart of the app.
+        </p>
+        <section class="timers">
+          <h3>Running</h3>
+          {#each info?.timers ?? [] as t (t.id)}
+            {@const [kind, color] = TIMER_KINDS[t.kind]}
+            <div class="trow" class:ringing={t.state === "ring"} style:--tcolor={color}>
+              <span class="tdot"></span>
+              <div class="tname">
+                <b>{t.label ?? kind}</b>
+                <small>{t.label ? `${kind} · ` : ""}{timerSub(t)}</small>
+              </div>
+              <span class="tleft" class:paused={t.state === "pause"}>{clockText(t.left_s)}</span>
+              <div class="tbtns">
+                {#if t.state === "run"}<button class="btn small" onclick={() => controlTimer("pause", t)}>Pause</button>{/if}
+                {#if t.state === "pause"}<button class="btn small" onclick={() => controlTimer("resume", t)}>Resume</button>{/if}
+                <button class="btn small" onclick={() => controlTimer("cancel", t)}>{t.state === "ring" ? "Stop" : "Cancel"}</button>
+              </div>
+            </div>
+          {:else}
+            <p class="empty">No timers running.</p>
+          {/each}
+          {#if timerError}<p class="hint error">{timerError}</p>{/if}
+        </section>
+        <section class="timers">
+          <h3>New timer</h3>
+          <div class="rots quick">
+            {#each [1, 3, 5, 10, 15, 30] as m (m)}
+              <button class="rot" onclick={() => startTimer(m * 60)}>{m} min</button>
+            {/each}
+          </div>
+          <div class="tform">
+            <input class="tnum" type="number" min="1" max="1440" bind:value={timerMinutes} aria-label="Minutes" />
+            <span class="tunit">min</span>
+            <input class="ttext" type="text" maxlength="40" placeholder="Label (optional)" bind:value={timerLabel} />
+            <button class="btn primary" disabled={!(timerMinutes > 0)} onclick={() => startTimer(Math.round(timerMinutes * 60), timerLabel).then(() => (timerLabel = ""))}
+              >Start</button
+            >
+          </div>
+        </section>
+        <section class="timers">
+          <h3>Reminder</h3>
+          <div class="tform">
+            <input class="ttext" type="text" maxlength="80" placeholder="What to remind you of" bind:value={remindText} />
+            <input class="ttime" type="time" bind:value={remindAt} aria-label="At" />
+            <button class="btn primary" disabled={!remindText.trim() || !remindAt} onclick={remind}>Set</button>
+          </div>
+        </section>
+        <section class="timers">
+          <h3>Pomodoro</h3>
+          {#if info?.pomodoro}
+            {@const p = info.pomodoro}
+            <p class="hint">Round {p.round} of {p.rounds}: {p.work_s / 60} minutes of focus, {p.break_s / 60}-minute breaks.</p>
+            <div class="actions"><button class="btn" onclick={() => timerTool("pomodoro", { action: "stop" })}>Stop the pomodoro</button></div>
+          {:else}
+            <div class="tform">
+              <input class="tnum" type="number" min="1" max="120" bind:value={pomo.work} aria-label="Focus minutes" />
+              <span class="tunit">min focus</span>
+              <input class="tnum" type="number" min="1" max="60" bind:value={pomo.rest} aria-label="Break minutes" />
+              <span class="tunit">min break</span>
+              <input class="tnum" type="number" min="1" max="12" bind:value={pomo.rounds} aria-label="Rounds" />
+              <span class="tunit">rounds</span>
+              <button
+                class="btn primary"
+                onclick={() => timerTool("pomodoro", { action: "start", work_minutes: pomo.work, break_minutes: pomo.rest, rounds: pomo.rounds })}>Start</button
+              >
+            </div>
+          {/if}
+        </section>
+        <section class="timers">
+          <h3>On the board</h3>
+          <div class="rotation">
+            <span class="rlabel">Takes over</span>
+            <div class="rots three" role="radiogroup" aria-label="Screen a running timer takes over">
+              {#each SHOW_ON as [value, label] (value)}
+                <button
+                  class="rot"
+                  class:checked={info?.show_on === value}
+                  role="radio"
+                  aria-checked={info?.show_on === value}
+                  onclick={() => monitor.setTimerScreen(value)}>{label}</button
+                >
+              {/each}
+            </div>
+          </div>
+          <p class="hint" style:margin-top="10px">
+            While a timer runs, that screen shows it instead of its face, and goes back when it's done. The Timer face, in the Display
+            tab, shows it on any screen you put it on.{info && !info.can_speak ? " Turn on spoken replies in the Voice tab to hear what each timer was for." : ""}
+          </p>
         </section>
       {:else if tab === "voice"}
         <p class="hint">
@@ -1352,7 +1502,7 @@
   nav {
     position: relative;
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(7, 1fr);
     margin: 14px;
     padding: 3px;
     border-radius: 12px;
@@ -1363,10 +1513,13 @@
     position: relative;
     z-index: 1;
     height: 30px;
+    padding: 0;
     border: 0;
     background: none;
     color: var(--dim);
-    font: 550 12px/1 var(--sans);
+    font: 550 11px/1 var(--sans);
+    letter-spacing: -0.01em;
+    white-space: nowrap;
     cursor: pointer;
     transition: color 200ms;
   }
@@ -1378,7 +1531,7 @@
     top: 3px;
     bottom: 3px;
     left: 3px;
-    width: calc((100% - 6px) / 6);
+    width: calc((100% - 6px) / 7);
     border-radius: 9px;
     background: rgba(255, 255, 255, 0.08);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
@@ -1406,6 +1559,102 @@
     margin: 0 0 12px;
     font: 400 12.5px/1.5 var(--sans);
     color: var(--dim);
+  }
+  .timers {
+    --accent: #f8a639;
+  }
+  .trow {
+    display: grid;
+    grid-template-columns: 8px 1fr auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .trow.ringing {
+    border-color: color-mix(in srgb, #f05354 60%, transparent);
+    background: color-mix(in srgb, #f05354 10%, transparent);
+  }
+  .tdot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--tcolor);
+  }
+  .tname {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+  .tname b {
+    font: 600 12.5px/1.2 var(--sans);
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tname small {
+    font: 450 11px/1.2 var(--sans);
+    color: var(--faint);
+  }
+  .tleft {
+    font: 600 15px/1 var(--mono);
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .tleft.paused {
+    color: var(--dim);
+  }
+  .tbtns {
+    display: flex;
+    gap: 4px;
+  }
+  .rots.quick {
+    grid-template-columns: repeat(6, 1fr);
+    margin-bottom: 10px;
+  }
+  .rots.three {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .rots.quick .rot {
+    justify-content: center;
+  }
+  .tform {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .tform input {
+    height: 30px;
+    padding: 0 9px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text);
+    font: 500 12px/1 var(--sans);
+    color-scheme: dark;
+  }
+  .tform input:focus-visible {
+    outline: 1.5px solid var(--accent);
+    outline-offset: -1px;
+  }
+  .tform .tnum {
+    width: 58px;
+    font-family: var(--mono);
+  }
+  .tform .ttext {
+    flex: 1;
+    min-width: 120px;
+  }
+  .tunit {
+    font: 500 11.5px/1 var(--sans);
+    color: var(--faint);
+    margin-right: 4px;
   }
   .empty {
     color: var(--faint);

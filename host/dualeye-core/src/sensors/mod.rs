@@ -145,6 +145,7 @@ impl Collector {
             face: None,
             rot: None,
             claude: None,
+            timer: None,
         }
     }
 

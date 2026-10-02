@@ -25,9 +25,12 @@
   const source = (id: DeviceId): DeviceId => shown?.face?.src?.[id] ?? id;
   const screen = (id: DeviceId) => {
     const src = source(id);
+    const side = id === "cpu" ? "left" : "right";
+    // A running timer takes over the screen the host picked, while the board is live.
+    const takeover = board === "live" && shown?.timer?.screen === side;
     return screenFor(
       src,
-      shown?.face?.[id] ?? "classic",
+      takeover ? "timer" : (shown?.face?.[id] ?? "classic"),
       shown?.[src],
       board === "stale",
       board === "waiting",
@@ -37,9 +40,11 @@
         net: shown?.net,
         disk: shown?.disk,
         bat: shown?.bat,
-        image: monitor.images[id === "cpu" ? "left" : "right"],
+        image: monitor.images[side],
+        timer: shown?.timer,
+        timerAgeMs: monitor.now - monitor.sentAt,
+        nowMs: monitor.now,
       },
-      id,
     );
   };
   // A line without `rot` turns both screens upright. Before the first line the

@@ -22,8 +22,8 @@ typedef enum {
 } metrics_ui_state_t;
 
 /** Watch face of one screen. Names on the wire: classic, rings, plus, bar,
- * claude, clawd, net, disk, battery, image. New ones go at the end: NVS
- * keeps the number. */
+ * claude, clawd, net, disk, battery, image, timer. New ones go at the end:
+ * NVS keeps the number. */
 typedef enum {
     METRICS_FACE_CLASSIC = 0,
     METRICS_FACE_RINGS,
@@ -35,6 +35,7 @@ typedef enum {
     METRICS_FACE_DISK,
     METRICS_FACE_BATTERY,
     METRICS_FACE_IMAGE,
+    METRICS_FACE_TIMER,
     METRICS_FACE_COUNT,
 } metrics_face_t;
 
@@ -117,6 +118,35 @@ typedef struct {
     int mins;
 } metrics_battery_t;
 
+/** What a timer counts down to. Names on the wire: timer, work, break,
+ * reminder (work and break are a pomodoro's). */
+typedef enum {
+    METRICS_TIMER_PLAIN = 0,
+    METRICS_TIMER_WORK,
+    METRICS_TIMER_BREAK,
+    METRICS_TIMER_REMINDER,
+} metrics_timer_kind_t;
+
+/* The host's timer that ends first (or is ringing), for the timer face. The
+ * host keeps the timers; the board counts down from `left_s` between
+ * snapshots and rings while `ringing`. */
+typedef struct {
+    bool valid;
+    metrics_timer_kind_t kind;
+    bool paused;
+    bool ringing;
+    float left_s;
+    float total_s;
+    /* Other timers running besides this one. */
+    int more;
+    /* A pomodoro's round and how many there are; 0 for other timers. */
+    int round;
+    int rounds;
+    /* The screen it takes over while it runs (UI_SCREEN_*), -1 for none. */
+    int screen;
+    char label[28];
+} metrics_timer_t;
+
 typedef struct {
     uint32_t ts;
     uint32_t updated_ms;
@@ -127,6 +157,7 @@ typedef struct {
     metrics_net_t net;
     metrics_disk_t disk;
     metrics_battery_t battery;
+    metrics_timer_t timer;
     /* Board settings, not from the host's snapshot: filled in before drawing. */
     metrics_face_t cpu_face;
     metrics_face_t gpu_face;

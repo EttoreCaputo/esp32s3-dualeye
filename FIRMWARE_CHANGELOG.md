@@ -7,6 +7,11 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.2.0
+
+- **Timers, reminders and a pomodoro.** "Alexa, timer 10 minuti", "ricordami alle 17 di chiamare Marco", "start a pomodoro": the right screen shows a ring that empties and the time left, and the board chimes when it's up until you say "Alexa". A new **Timer** face keeps them on a screen all the time. Set them from the app's Timers tab too.
+- **Network** and **Disk** faces, clearer: the speed's unit sits under it, upload below a divider, and the network rings show the speed on a fixed scale (a sixth of ring for each tenfold) instead of filling up whenever traffic is steady; the disk's reads and writes go one above the other, away from the ring.
+
 ## 1.1.0
 
 - Any face on either screen: the CPU and GPU faces show whichever you pick, so both screens can show the GPU, or the CPU can go on the right.

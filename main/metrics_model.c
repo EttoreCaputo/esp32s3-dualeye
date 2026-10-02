@@ -20,6 +20,7 @@ static const char *const FACE_NAMES[METRICS_FACE_COUNT] = {
     [METRICS_FACE_DISK] = "disk",
     [METRICS_FACE_BATTERY] = "battery",
     [METRICS_FACE_IMAGE] = "image",
+    [METRICS_FACE_TIMER] = "timer",
 };
 
 static const char *const SOURCE_NAMES[METRICS_SOURCE_COUNT] = {

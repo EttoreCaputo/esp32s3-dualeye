@@ -29,6 +29,8 @@ use rmcp::{ErrorData, Peer, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{Value, json};
 
 use crate::claude::ClaudeUsage;
+use crate::claude::alerts;
+use crate::timers::Timers;
 use crate::hub::Board;
 use crate::link::{CallError, Tool, ToolResult};
 use crate::sensors::Collector;
@@ -42,7 +44,9 @@ const INSTRUCTIONS: &str = "DualEye is a small USB display on the user's desk wi
 Claude Code usage (claude and clawd) or a picture the user uploaded in the DualEye app (image). \
 The board's tools change what the screens show; show_text puts a short ASCII message on them. \
 get_metrics and get_claude_usage read this computer, and work without the board. \
-speak says a short sentence out loud through the board's speaker, in Italian or English.";
+speak says a short sentence out loud through the board's speaker, in Italian or English. \
+set_timer, set_reminder, pomodoro, control_timer and get_timers run timers on the host: the board counts the first one down on a screen \
+and rings when it's up (they need the DualEye app or `dualeye` running to ring).";
 
 /// A bridge sample older than this is not "current"; sample here instead.
 const FRESH: Duration = Duration::from_secs(5);
@@ -64,7 +68,7 @@ pub fn serve_stdio(port: Option<String>) -> io::Result<()> {
 }
 
 fn cache_file() -> Option<PathBuf> {
-    crate::claude::data_dir().map(|d| d.join("board-tools.json"))
+    crate::link::tools_cache_file()
 }
 
 #[derive(Clone)]
@@ -141,6 +145,14 @@ impl DualEyeMcp {
                     Err(e) => text_result(&format!("The DualEye board can't speak: {e}."), true),
                 })
             }
+            name if Timers::tools().iter().any(|t| t.name == name) => {
+                let language = arguments.get("language").and_then(Value::as_str).unwrap_or(alerts::system_language()).to_string();
+                Ok(match self.inner.board.timer_tool(name, &arguments, &language) {
+                    Ok(text) if name == "get_timers" => json_result(serde_json::from_str(&text).unwrap_or(Value::String(text))),
+                    Ok(text) => text_result(&text, false),
+                    Err(e) => text_result(&e, true),
+                })
+            }
             _ => match self.inner.board.call_tool(name, arguments) {
                 Ok(result) => to_mcp(result),
                 Err(CallError::Rpc { code: -32602, message }) => Err(ErrorData::invalid_params(message, None)),
@@ -177,7 +189,16 @@ impl DualEyeMcp {
 
 fn host_tools() -> Vec<Value> {
     let no_args = json!({"type": "object", "properties": {}, "additionalProperties": false});
-    vec![
+    let timers = Timers::tools().into_iter().map(|t| {
+        let read_only = t.name == "get_timers";
+        json!({
+            "name": t.name,
+            "description": t.description,
+            "inputSchema": t.input_schema,
+            "annotations": {"readOnlyHint": read_only, "destructiveHint": false, "openWorldHint": false},
+        })
+    });
+    let mut tools = vec![
         json!({
             "name": "get_metrics",
             "title": "Computer metrics",
@@ -210,7 +231,9 @@ fn host_tools() -> Vec<Value> {
             },
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false},
         }),
-    ]
+    ];
+    tools.extend(timers);
+    tools
 }
 
 fn to_mcp(result: ToolResult) -> Result<CallToolResult, ErrorData> {
@@ -278,8 +301,9 @@ mod tests {
     fn host_tools_convert_to_mcp() {
         for tool in host_tools() {
             let t: McpTool = serde_json::from_value(tool).expect("valid MCP tool");
-            // Only speak does something.
-            assert_eq!(t.annotations.and_then(|a| a.read_only_hint), Some(t.name != "speak"), "{}", t.name);
+            // Only speak and the timers do something.
+            let reads = t.name.starts_with("get_");
+            assert_eq!(t.annotations.and_then(|a| a.read_only_hint), Some(reads), "{}", t.name);
         }
     }
 

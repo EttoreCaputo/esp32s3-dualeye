@@ -20,6 +20,10 @@
 //! tells the person on the board when Claude needs them, finished a long turn
 //! or is running out of its limits ([`crate::claude::alerts`]), once the board
 //! is out of any voice conversation.
+//!
+//! Timers ([`Timers`]) tick with the snapshots, which carry the one ending
+//! first to the board's timer face. When one is up the board rings and the
+//! same thread says what it was for; the wake word silences it.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,6 +45,7 @@ use crate::sensors::Collector;
 use crate::serial;
 use crate::snapshot::{Face, Faces, Rotation, Rotations, Snapshot, Source, Sources};
 use crate::stt::Transcript;
+use crate::timers::{Fired, Timers};
 use crate::voice::{self, Hearing, Receiving, Session, Speaker, Spoken, Utterance, VoiceConfig};
 use crate::intents;
 
@@ -66,6 +71,9 @@ pub struct BridgeConfig {
     pub voice: Arc<Mutex<VoiceConfig>>,
     /// Which Claude Code alerts to give, and how. Shared like `voice`.
     pub claude_alerts: Arc<Mutex<AlertSettings>>,
+    /// Timers, pomodoro and reminders: the board shows and rings them, the
+    /// voice and hub clients set them.
+    pub timers: Arc<Timers>,
 }
 
 impl Default for BridgeConfig {
@@ -79,12 +87,15 @@ impl Default for BridgeConfig {
             adopt_board_settings: true,
             voice: Arc::default(),
             claude_alerts: Arc::default(),
+            timers: Arc::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// A snapshot a second: its size doesn't matter.
+#[allow(clippy::large_enum_variant)]
 pub enum BridgeEvent {
     /// No board to talk to yet; the bridge keeps retrying.
     Waiting { reason: String },
@@ -125,6 +136,9 @@ pub enum BridgeEvent {
     /// An alert about Claude Code, and how it went: `error` says why it
     /// didn't reach the board (or wasn't spoken).
     ClaudeAlert { alert: Alert, text: String, error: Option<String> },
+    /// A timer or reminder is up (or a pomodoro moved on); `text` is what was
+    /// said about it, `error` why it wasn't.
+    TimerFired { fired: Fired, text: String, error: Option<String> },
     Disconnected { port: String, reason: String, permission_denied: bool },
 }
 
@@ -214,6 +228,7 @@ pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
                 let _ = tx.lock().unwrap().send(AlertInput::Hook(event, Instant::now()));
             }
         })));
+        hub.set_timers(Some(config.timers.clone()));
     }
     thread::scope(|scope| {
         let _ = thread::Builder::new()
@@ -223,6 +238,7 @@ pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
     });
     if let Some(hub) = &config.hub {
         hub.set_claude_hook(None);
+        hub.set_timers(None);
     }
 }
 
@@ -309,6 +325,7 @@ fn session(
         let sink = on_event.clone();
         let speaker = speaker.clone();
         let voice_state = voice_state.clone();
+        let timers = config.timers.clone();
         Link::open(port, move |event| match event {
             LinkEvent::Log(line) => sink(BridgeEvent::BoardLog { line }),
             LinkEvent::Text(line) => {
@@ -320,10 +337,11 @@ fn session(
                 sink(BridgeEvent::BoardLog { line });
             }
             LinkEvent::Notification { method, .. } if method == "ready" => heard.rebooted.store(true, Ordering::Relaxed),
-            LinkEvent::Notification { method, params } if method == "wake" => sink(BridgeEvent::Wake {
-                word: params["word"].as_str().unwrap_or_default().to_string(),
-                volume_db: params["volume_db"].as_f64(),
-            }),
+            LinkEvent::Notification { method, params } if method == "wake" => {
+                // Whoever says the wake word has heard the alarm.
+                timers.dismiss();
+                sink(BridgeEvent::Wake { word: params["word"].as_str().unwrap_or_default().to_string(), volume_db: params["volume_db"].as_f64() })
+            }
             LinkEvent::Notification { method, params } if method == "voice_state" => {
                 if let Some(state) = params["state"].as_str() {
                     *voice_state.lock().unwrap() = state.to_string();
@@ -349,6 +367,7 @@ fn session(
         snapshot: latest.clone(),
         settings_changed: voice_changed_settings.clone(),
         tools: Mutex::default(),
+        timers: config.timers.clone(),
     });
     on_event(BridgeEvent::Connected { port: port.to_string() });
 
@@ -436,6 +455,10 @@ fn session(
         if let Some(metrics) = &snapshot.claude {
             let _ = alert_tx.send(AlertInput::Metrics(metrics.clone()));
         }
+        for fired in config.timers.tick() {
+            let _ = alert_tx.send(AlertInput::Timer(fired));
+        }
+        snapshot.timer = config.timers.board_view();
         if let Some(hub) = &config.hub {
             hub.set_snapshot(&snapshot);
         }
@@ -461,6 +484,8 @@ fn session(
 enum AlertInput {
     Hook(HookEvent, Instant),
     Metrics(ClaudeMetrics),
+    /// A timer that's up, to be said.
+    Timer(Fired),
 }
 
 /// The board the alerts go to, while a session has one.
@@ -486,6 +511,12 @@ fn alert_loop(config: &BridgeConfig, stop: &AtomicBool, target: &Mutex<Option<Al
         let alert = match &input {
             AlertInput::Hook(event, at) => alerts.on_hook(event, &settings, *at),
             AlertInput::Metrics(metrics) => alerts.on_metrics(metrics, &settings),
+            AlertInput::Timer(fired) => {
+                let text = fired.spoken();
+                let error = say_timer(config, stop, target, fired).err();
+                on_event(BridgeEvent::TimerFired { fired: fired.clone(), text, error });
+                continue;
+            }
         };
         let Some(alert) = alert else { continue };
         let error = give_alert(config, stop, target, &settings, &alert).err();
@@ -509,6 +540,31 @@ fn give_alert(config: &BridgeConfig, stop: &AtomicBool, target: &Mutex<Option<Al
     let tts = if settings.speak { config.voice.lock().unwrap().tts.clone() } else { None };
     alerts::deliver(&link, &speaker, tts.as_deref(), alert, &settings.language)
 }
+
+/// Say what `fired` was for, after a chime or two, once the board is out of
+/// any conversation; not if it was silenced meanwhile.
+fn say_timer(config: &BridgeConfig, stop: &AtomicBool, target: &Mutex<Option<AlertTarget>>, fired: &Fired) -> Result<(), String> {
+    let Some(tts) = config.voice.lock().unwrap().tts.clone() else { return Err("spoken replies are off".into()) };
+    let board = || {
+        let target = target.lock().unwrap();
+        let t = target.as_ref()?;
+        Some((t.link.upgrade()?, t.speaker.clone(), t.voice_state.clone()))
+    };
+    let (link, speaker, voice_state) = board().ok_or("the board isn't connected")?;
+    // The first chime plays meanwhile (the board rings from the next snapshot).
+    sleep_unless_stopped(TIMER_SPEECH_DELAY, stop);
+    let until = Instant::now() + CONVERSATION_WAIT;
+    while *voice_state.lock().unwrap() != "idle" && Instant::now() < until && !stop.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(250));
+    }
+    if fired.pomodoro.is_none() && !config.timers.rings(fired.timer.id) {
+        return Ok(());
+    }
+    speaker.speak(&link, &tts, &fired.spoken(), &fired.timer.language).map(|_| ())
+}
+
+/// From a timer's end to saying why: the first chime's length and a breath.
+const TIMER_SPEECH_DELAY: Duration = Duration::from_millis(2600);
 
 /// `host/say` for the hub: speak with the voice config of the moment.
 fn say_fn(link: &Arc<Link>, speaker: &Arc<Speaker>, config: &BridgeConfig) -> crate::hub::SayFn {

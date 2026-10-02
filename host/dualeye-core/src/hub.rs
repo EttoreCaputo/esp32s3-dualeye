@@ -17,6 +17,7 @@
 //! | `host/snapshot` | `{"snapshot": Snapshot or null, "age_ms"}`: the bridge's latest sample |
 //! | `host/say` `{"text","language"?}` | How it was spoken, once played |
 //! | `host/claude_hook` (a Claude Code hook's JSON) | `{"taken"}`: whether a bridge takes alerts |
+//! | `host/timers` `{"name","arguments","language"?}` | `{"text","is_error"}`: a [`Timers::tools`] tool, run on the bridge's timers |
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -33,6 +34,7 @@ use serde_json::{Value, json};
 use crate::link::{CallError, Hello, Link, Tool, ToolResult};
 use crate::serial;
 use crate::snapshot::Snapshot;
+use crate::timers::{self, Timers};
 
 /// Reply for a request the hub can't pass on because no board is attached.
 pub const NO_BOARD: i64 = -32000;
@@ -92,6 +94,8 @@ struct Shared {
     say: Mutex<Option<SayFn>>,
     /// Takes Claude Code's hook events, while a bridge runs.
     claude_hook: Mutex<Option<HookFn>>,
+    /// The bridge's timers, while it runs.
+    timers: Mutex<Option<Arc<Timers>>>,
     clients: AtomicUsize,
     calls: AtomicU64,
     last_call: Mutex<Option<(String, Instant)>>,
@@ -138,6 +142,7 @@ impl Hub {
             settings_changed: AtomicBool::new(false),
             say: Mutex::default(),
             claude_hook: Mutex::default(),
+            timers: Mutex::default(),
             clients: AtomicUsize::new(0),
             calls: AtomicU64::new(0),
             last_call: Mutex::default(),
@@ -176,6 +181,11 @@ impl Hub {
     /// What `host/claude_hook` hands its event to; `None` without a bridge.
     pub(crate) fn set_claude_hook(&self, hook: Option<HookFn>) {
         *self.shared.claude_hook.lock().unwrap() = hook;
+    }
+
+    /// The timers `host/timers` works on; `None` without a bridge.
+    pub(crate) fn set_timers(&self, timers: Option<Arc<Timers>>) {
+        *self.shared.timers.lock().unwrap() = timers;
     }
 
     pub(crate) fn set_snapshot(&self, snapshot: &Snapshot) {
@@ -321,6 +331,17 @@ fn handle(shared: &Shared, method: &str, params: Value) -> Result<Value, (i64, S
                 hook(params);
             }
             return Ok(json!({"taken": taken}));
+        }
+        "host/timers" => {
+            let timers = shared.timers.lock().unwrap().clone().ok_or((NO_BOARD, "the bridge isn't running".to_string()))?;
+            let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
+            let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let language = params.get("language").and_then(Value::as_str).unwrap_or("en");
+            return match timers.call_tool(name, &arguments, language) {
+                Some(Ok(text)) => Ok(json!({"text": text, "is_error": false})),
+                Some(Err(text)) => Ok(json!({"text": text, "is_error": true})),
+                None => Err((INVALID_PARAMS, format!("unknown timer tool `{name}`"))),
+            };
         }
         "host/snapshot" => {
             let snapshot = shared.snapshot.lock().unwrap();
@@ -528,6 +549,31 @@ impl Board {
         let hub = self.hub_client(&mut slot).ok_or_else(|| CallError::Unavailable("the DualEye app isn't running".into()))?;
         *self.route.lock().unwrap() = Some(Route::Hub);
         hub.request("host/claude_hook", event)
+    }
+
+    /// Run timer tool `name` ([`Timers::tools`]) on the running bridge's
+    /// timers; without a bridge, on the ones kept on disk, which ring once
+    /// the app or `dualeye` runs again. `Err` is the tool's failure, as text.
+    pub fn timer_tool(&self, name: &str, arguments: &Value, language: &str) -> Result<String, String> {
+        {
+            let mut slot = self.hub.lock().unwrap();
+            if let Some(hub) = self.hub_client(&mut slot) {
+                *self.route.lock().unwrap() = Some(Route::Hub);
+                match hub.request("host/timers", json!({"name": name, "arguments": arguments, "language": language})) {
+                    Ok(reply) => {
+                        let text = reply["text"].as_str().unwrap_or_default().to_string();
+                        return if reply["is_error"].as_bool() == Some(true) { Err(text) } else { Ok(text) };
+                    }
+                    // An older hub, or one whose bridge stopped: the file then.
+                    Err(CallError::Rpc { code: METHOD_NOT_FOUND, .. } | CallError::Unavailable(_)) => {}
+                    Err(CallError::Rpc { message, .. }) => return Err(message),
+                    Err(_) => *slot = None,
+                }
+            }
+        }
+        *self.route.lock().unwrap() = Some(Route::Direct);
+        let timers = Timers::open(timers::default_file());
+        timers.call_tool(name, arguments, language).unwrap_or_else(|| Err(format!("unknown timer tool `{name}`")))
     }
 
     /// The bridge's latest sample and its age; `None` without a bridge, or

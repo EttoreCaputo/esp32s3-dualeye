@@ -76,7 +76,7 @@ static bool tool_set_face(const cJSON *args, char *text, cJSON **structured)
     metrics_face_t f;
     if (!cJSON_IsString(face) || !metrics_face_from_name(face->valuestring, &f)) {
         snprintf(text, TEXT_MAX,
-                 "face must be one of classic, rings, plus, bar, claude, clawd, net, disk, battery, image");
+                 "face must be one of classic, rings, plus, bar, claude, clawd, net, disk, battery, image, timer");
         return false;
     }
     const cJSON *source = cJSON_GetObjectItemCaseSensitive(args, "source");
@@ -371,12 +371,13 @@ static const tool_t TOOLS[] = {
         .description = "Switch the watch face of one or both round screens. Any face goes on either screen.",
         .schema = "{\"type\":\"object\",\"properties\":{"
                   "\"face\":{\"type\":\"string\",\"enum\":[\"classic\",\"rings\",\"plus\",\"bar\",\"claude\",\"clawd\","
-                  "\"net\",\"disk\",\"battery\",\"image\"],"
+                  "\"net\",\"disk\",\"battery\",\"image\",\"timer\"],"
                   "\"description\":\"classic: temperature, clock, power, load ring and fan; rings: load, temperature "
                   "and memory rings; plus: classic with a memory bar and numbers; bar: classic with a small memory "
                   "bar; claude: Claude Code usage limits and tokens; clawd: animated Claude Code mascot; net: "
                   "download and upload speed; disk: system disk space and activity; battery: the laptop's battery; "
-                  "image: the picture or GIF uploaded for that screen\"},"
+                  "image: the picture or GIF uploaded for that screen; timer: the host's timers and reminders "
+                  "counting down (a running timer also shows by itself)\"},"
                   "\"source\":{\"type\":\"string\",\"enum\":[\"cpu\",\"gpu\"],\"description\":\"Whose metrics "
                   "classic, rings, plus and bar show; unchanged when left out\"},"
                   SCREEN_PROP "},\"required\":[\"face\"]}",

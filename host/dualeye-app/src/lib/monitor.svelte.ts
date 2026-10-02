@@ -50,6 +50,29 @@ export type Net = { rx_bps: number; tx_bps: number };
 /** The system disk, in GB; throughput where the OS tells. */
 export type Disk = { used_gb: number; total_gb: number; read_bps?: number; write_bps?: number };
 export type Battery = { pct: number; charging: boolean; plugged: boolean; mins?: number };
+export type TimerKind = "timer" | "work" | "break" | "reminder";
+/** `BoardTimer` in dualeye-core: the timer the board's timer face shows. */
+export type BoardTimer = {
+  kind: TimerKind;
+  state: "run" | "pause" | "ring";
+  left_s: number;
+  total_s: number;
+  label?: string;
+  more?: number;
+  round?: number;
+  rounds?: number;
+  /** The screen it takes over while it runs. */
+  screen?: Side;
+};
+/** `TimerInfo` in dualeye-core: one timer as the Timers tab lists it. */
+export type TimerInfo = { id: number; kind: TimerKind; label?: string; total_s: number; left_s: number; state: "run" | "pause" | "ring"; ends_at?: string };
+export type ShowOn = "left" | "right" | "none";
+export type TimersInfo = {
+  timers: TimerInfo[];
+  pomodoro: { work_s: number; break_s: number; rounds: number; round: number } | null;
+  show_on: ShowOn;
+  can_speak: boolean;
+};
 export type Snapshot = {
   v: number;
   ts: number;
@@ -62,6 +85,7 @@ export type Snapshot = {
   face?: Faces;
   rot?: Rotations;
   claude?: ClaudeMetrics;
+  timer?: BoardTimer;
 };
 /** `Prepared` in dualeye-core: what went to the board. */
 export type ImageSent = { frames: number; source_frames: number; bytes: number; duration_ms: number };
@@ -110,6 +134,7 @@ type BridgeEvent =
   | { kind: "reply"; id: number; text: string; language: string; actions: string[]; understood: boolean; by: ReplyBy; elapsed_ms: number }
   | { kind: "spoken"; id: number; spoken: Spoken }
   | { kind: "voice_error"; message: string }
+  | { kind: "timer_fired"; text: string; error: string | null }
   | { kind: "disconnected"; port: string; reason: string; permission_denied: boolean };
 
 /** What the board's "eyes" overlay shows. */
@@ -241,6 +266,8 @@ class Monitor {
   images = $state<Record<Side, string | null>>({ left: null, right: null });
   /** An image on its way to the board: which screen and how far (0–1). */
   sending = $state<{ side: Side; progress: number } | null>(null);
+  /** The timers, as the Timers tab last read them; null until it does. */
+  timers = $state<TimersInfo | null>(null);
 
   job = $state<DeviceJob>("idle");
   /** Output of the last esptool run. */
@@ -359,6 +386,9 @@ class Monitor {
         if (entry) entry.spoken = e.spoken;
         break;
       }
+      case "timer_fired":
+        if (this.timers) void this.timersInfo();
+        break;
       case "listening":
       case "utterance":
       case "voice_error":
@@ -520,6 +550,33 @@ class Monitor {
       return;
     }
     await invoke("test_claude_alert");
+  }
+
+  async timersInfo(): Promise<TimersInfo> {
+    const info = this.preview ? previewTimers.info() : await invoke<TimersInfo>("timers_info");
+    this.timers = info;
+    return info;
+  }
+
+  /** One of the host's timer tools: `set_timer`, `set_reminder`, `pomodoro`, `control_timer`. */
+  async timerTool(name: string, args: Record<string, unknown>): Promise<TimersInfo> {
+    const info = this.preview ? previewTimers.call(name, args) : await invoke<TimersInfo>("timer_tool", { name, arguments: args });
+    this.timers = info;
+    return info;
+  }
+
+  async setTimerScreen(show_on: ShowOn): Promise<TimersInfo> {
+    if (this.preview) previewTimers.showOn = show_on;
+    const info = this.preview ? previewTimers.info() : await invoke<TimersInfo>("set_timer_screen", { showOn: show_on });
+    this.timers = info;
+    return info;
+  }
+
+  async dismissTimers(): Promise<TimersInfo> {
+    if (this.preview) previewTimers.call("control_timer", { action: "cancel" });
+    const info = this.preview ? previewTimers.info() : await invoke<TimersInfo>("dismiss_timers");
+    this.timers = info;
+    return info;
   }
 
   /** The newest log line for utterance `id` (ids wrap at 256). */
@@ -781,6 +838,7 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
         disk: { used_gb: 612.4, total_gb: 994.7, read_bps: Math.round(2_000_000 * burst), write_bps: Math.round(300_000 + 4_000_000 * burst * Math.random()) },
         bat: { pct: Math.max(5, Math.round(84 - t / 30)), charging: false, plugged: false, mins: Math.max(10, Math.round(312 - t / 6)) },
         face: { ...faces() },
+        ...(previewTimers.board() ? { timer: previewTimers.board() } : {}),
         // Like the bridge: left out when both screens are upright.
         ...(rotation().cpu || rotation().gpu ? { rot: { ...rotation() } } : {}),
         // Claude works in bursts and naps between them.
@@ -799,6 +857,75 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
     }, 1000);
   }, 2600);
 }
+
+type PreviewTimer = { id: number; kind: TimerKind; label?: string; total_s: number; end: number; left: number; paused: boolean; rang?: number };
+/** Timers for the browser preview: a small copy of `dualeye_core::timers`, without the pomodoro's turns. */
+const previewTimers = {
+  showOn: "right" as ShowOn,
+  list: [] as PreviewTimer[],
+  next: 1,
+  leftOf(t: PreviewTimer): number {
+    return t.paused ? t.left : Math.max(0, (t.end - Date.now()) / 1000);
+  },
+  tick() {
+    const now = Date.now();
+    for (const t of this.list) if (!t.paused && !t.rang && t.end <= now) t.rang = now;
+    this.list = this.list.filter((t) => !t.rang || now - t.rang < 60_000);
+  },
+  info(): TimersInfo {
+    this.tick();
+    const timers: TimerInfo[] = this.list
+      .map((t) => ({
+        id: t.id,
+        kind: t.kind,
+        label: t.label,
+        total_s: t.total_s,
+        left_s: Math.ceil(this.leftOf(t)),
+        state: (t.rang ? "ring" : t.paused ? "pause" : "run") as TimerInfo["state"],
+        ends_at: t.paused || t.rang ? undefined : new Date(t.end).toTimeString().slice(0, 5),
+      }))
+      .sort((a, b) => Number(b.state === "ring") - Number(a.state === "ring") || Number(a.state === "pause") - Number(b.state === "pause") || a.left_s - b.left_s);
+    const work = this.list.find((t) => t.kind === "work");
+    return { timers, pomodoro: work ? { work_s: work.total_s, break_s: 300, rounds: 4, round: 1 } : null, show_on: this.showOn, can_speak: false };
+  },
+  board(): BoardTimer | undefined {
+    const [first, ...rest] = this.info().timers;
+    if (!first) return undefined;
+    const screen = this.showOn === "none" ? undefined : this.showOn;
+    const label = first.label?.toUpperCase().slice(0, 27);
+    const pomodoro = first.kind === "work" ? { round: 1, rounds: 4 } : {};
+    const t = this.list.find((x) => x.id === first.id)!;
+    return { kind: first.kind, state: first.state, left_s: Math.round(this.leftOf(t) * 10) / 10, total_s: first.total_s, label, more: rest.filter((r) => r.state !== "ring").length, screen, ...pomodoro };
+  },
+  add(kind: TimerKind, secs: number, label?: string) {
+    this.list.push({ id: this.next++, kind, label: label || undefined, total_s: secs, end: Date.now() + secs * 1000, left: secs, paused: false });
+  },
+  call(name: string, a: Record<string, unknown>): TimersInfo {
+    const n = (k: string) => Number(a[k] ?? 0) || 0;
+    if (name === "set_timer") this.add("timer", Math.round(n("hours") * 3600 + n("minutes") * 60 + n("seconds")), a.label as string | undefined);
+    if (name === "set_reminder") this.add("reminder", Math.round(n("in_minutes") * 60) || 600, a.text as string);
+    if (name === "pomodoro") {
+      this.list = this.list.filter((t) => t.kind !== "work" && t.kind !== "break");
+      if (a.action !== "stop") this.add("work", (n("work_minutes") || 25) * 60);
+    }
+    if (name === "control_timer") {
+      const which = a.which as string | undefined;
+      const ringing = this.list.filter((t) => t.rang);
+      const picked = which === "all" ? this.list : which ? this.list.filter((t) => String(t.id) === which || t.label === which) : ringing.length ? ringing : this.list.slice(0, 1);
+      for (const t of picked) {
+        if (a.action === "pause" && !t.paused) {
+          t.left = this.leftOf(t);
+          t.paused = true;
+        } else if (a.action === "resume" && t.paused) {
+          t.end = Date.now() + t.left * 1000;
+          t.paused = false;
+        }
+      }
+      if (a.action === "cancel") this.list = this.list.filter((t) => !picked.includes(t));
+    }
+    return this.info();
+  },
+};
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

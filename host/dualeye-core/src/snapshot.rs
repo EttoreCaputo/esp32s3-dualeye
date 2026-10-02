@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::claude::ClaudeMetrics;
+use crate::timers::BoardTimer;
 
 /// The snapshot format's version, the `v` field.
 pub const SNAPSHOT_VERSION: u32 = 2;
@@ -72,10 +73,12 @@ pub enum Face {
     Battery,
     /// The picture or GIF uploaded for that screen (firmware 1.1).
     Image,
+    /// The host's timers and reminders counting down (firmware 1.2).
+    Timer,
 }
 
 impl Face {
-    pub const ALL: [Face; 10] = [
+    pub const ALL: [Face; 11] = [
         Face::Classic,
         Face::Rings,
         Face::Plus,
@@ -86,6 +89,7 @@ impl Face {
         Face::Disk,
         Face::Battery,
         Face::Image,
+        Face::Timer,
     ];
 
     pub fn name(self) -> &'static str {
@@ -100,6 +104,7 @@ impl Face {
             Face::Disk => "disk",
             Face::Battery => "battery",
             Face::Image => "image",
+            Face::Timer => "timer",
         }
     }
 
@@ -338,6 +343,10 @@ pub struct Snapshot {
     /// hasn't run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude: Option<ClaudeMetrics>,
+    /// The timer that ends first, for the timer face (firmware 1.2), set by
+    /// the bridge from its [`crate::Timers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timer: Option<BoardTimer>,
 }
 
 impl Snapshot {
@@ -409,6 +418,7 @@ mod tests {
             face: Some(Faces::new(Face::Rings, Face::Plus)),
             rot: None,
             claude: None,
+            timer: None,
         };
         assert_eq!(
             payload(&snap),
@@ -433,6 +443,7 @@ mod tests {
             face: None,
             rot: None,
             claude: None,
+            timer: None,
         };
         assert_eq!(payload(&snap), "{\"v\":1,\"ts\":0}");
         assert!(!snap.is_sendable());
@@ -460,6 +471,7 @@ mod tests {
                 state: crate::ClaudeState::Work,
                 model: Some("OPUS 5.5".into()),
             }),
+            timer: None,
         };
         assert_eq!(
             payload(&snap),
@@ -497,6 +509,7 @@ mod tests {
             face: None,
             rot: Some(Rotations { cpu: Rotation::R180, gpu: Rotation::R0 }),
             claude: None,
+            timer: None,
         };
         assert_eq!(payload(&snap), "{\"v\":1,\"ts\":0,\"cpu\":{\"temp_c\":40.0}}");
         // Frontends still see it on the snapshot.

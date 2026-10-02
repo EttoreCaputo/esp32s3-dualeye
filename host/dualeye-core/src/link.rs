@@ -245,6 +245,11 @@ impl Drop for Link {
     }
 }
 
+/// Where the board's last tool list is kept, for when it doesn't answer.
+pub(crate) fn tools_cache_file() -> Option<std::path::PathBuf> {
+    crate::claude::data_dir().map(|d| d.join("board-tools.json"))
+}
+
 fn read_loop(mut rx: Box<dyn SerialPort>, shared: &Shared, on_event: &dyn Fn(LinkEvent)) {
     let mut decoder = Decoder::new();
     let mut text = TextLines::default();

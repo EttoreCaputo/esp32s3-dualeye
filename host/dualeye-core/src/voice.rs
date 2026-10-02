@@ -38,6 +38,7 @@ use crate::link::{Link, Tool};
 use crate::protocol::Channel;
 use crate::snapshot::Snapshot;
 use crate::stt::Stt;
+use crate::timers::Timers;
 use crate::tts::{self, Tts};
 
 /// The board's audio: 16 kHz, mono, s16le.
@@ -232,8 +233,10 @@ pub(crate) struct Session {
     pub snapshot: Arc<Mutex<Option<Snapshot>>>,
     /// Set after a tool changed faces or rotation: the bridge reads them back.
     pub settings_changed: Arc<AtomicBool>,
-    /// The board's tools for the agent, asked for once per connection.
+    /// The board's tools for the agent, listed once per connection.
     pub tools: Mutex<Option<Vec<Tool>>>,
+    /// The host's timers, which the voice sets and silences.
+    pub timers: Arc<Timers>,
 }
 
 /// What the link's reader hands the pipeline.
@@ -254,7 +257,7 @@ pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSi
             Hearing::Utterance(u) => u,
             Hearing::Started => {
                 if let (Some(agent), Some(link)) = (&config.agent, session.link.upgrade())
-                    && let Err(e) = agent.prime(&BoardToolbox { link: &link, session })
+                    && let Err(e) = agent.prime(&BoardToolbox { link: &link, session, language: "en" })
                 {
                     sink(BridgeEvent::VoiceError { message: e.to_string() });
                 }
@@ -327,7 +330,11 @@ enum Next {
 /// Act on the words and answer.
 fn respond(link: &Link, session: &Session, config: &VoiceConfig, sink: &EventSink, id: u8, text: &str, language: &str) -> Next {
     let started = Instant::now();
-    let answer = config.agent.as_ref().and_then(|agent| match agent.respond(text, language, &BoardToolbox { link, session }) {
+    // "Stop" for an alarm needs no language model: the rules, at once.
+    let alarm = session.timers.is_ringing() || session.timers.dismissed_within(ALARM_FOLLOW_UP);
+    let quick = alarm && intents::understand(text, language, &Context { alarm, ..Context::default() }).calls.iter().any(|(t, _)| t == "control_timer");
+    let agent = config.agent.as_ref().filter(|_| !quick);
+    let answer = agent.and_then(|agent| match agent.respond(text, language, &BoardToolbox { link, session, language }) {
         Ok(turn) => Some((turn.reply, turn.actions.iter().map(action_line).collect(), true, "llm")),
         Err(e) => {
             sink(BridgeEvent::VoiceError { message: format!("{e}; answering with the rules instead") });
@@ -370,9 +377,11 @@ fn rules(link: &Link, session: &Session, text: &str, language: &str) -> (String,
         let state = link.call_tool("get_state", json!({}), TOOL_TIMEOUT).ok()?;
         Some(state.structured_content?.pointer("/audio/volume")?.as_u64()? as u8)
     };
-    let ctx = Context { snapshot: session.snapshot.lock().unwrap().clone(), volume: volume() };
+    let timers = &session.timers;
+    let alarm = timers.is_ringing() || timers.dismissed_within(ALARM_FOLLOW_UP);
+    let ctx = Context { snapshot: session.snapshot.lock().unwrap().clone(), volume: volume(), timers: timers.list(), alarm };
     let plan = intents::understand(text, language, &ctx);
-    let toolbox = BoardToolbox { link, session };
+    let toolbox = BoardToolbox { link, session, language };
     let mut actions = Vec::new();
     for (tool, args) in &plan.calls {
         let result = toolbox.call(tool, args);
@@ -385,20 +394,23 @@ fn rules(link: &Link, session: &Session, text: &str, language: &str) -> (String,
     (plan.reply, actions, plan.understood)
 }
 
+/// After the wake word silenced an alarm, "stop" is still about it this long.
+const ALARM_FOLLOW_UP: Duration = Duration::from_secs(20);
+
 /// Board tools the voice agent doesn't get: muted by voice, the board
 /// couldn't be unmuted by voice; the eyes are a setting for the app and a
 /// toy, not worth a tool in a small model's prompt.
 const NOT_BY_VOICE: &[&str] = &["set_mic", "set_eyes", "play_eyes"];
 
 /// The board's tools as the voice agent gets them: without those in
-/// [`NOT_BY_VOICE`], plus the host's `get_metrics`.
+/// [`NOT_BY_VOICE`], plus the host's `get_metrics` and timers ([`Timers::tools`]).
 pub fn voice_tools(board: Vec<Tool>) -> Vec<Tool> {
     let metrics = Tool {
         name: "get_metrics".into(),
         description: "Current CPU and GPU temperature, load, clock, power and memory of this computer, and its fan speeds.".into(),
         input_schema: json!({"type": "object", "properties": {}}),
     };
-    board.into_iter().filter(|t| !NOT_BY_VOICE.contains(&t.name.as_str())).chain([metrics]).collect()
+    board.into_iter().filter(|t| !NOT_BY_VOICE.contains(&t.name.as_str())).chain([metrics]).chain(Timers::tools()).collect()
 }
 
 /// `get_state` without what only a developer wants (memory, link and UI
@@ -411,25 +423,47 @@ pub fn trim_state(state: &Value) -> Value {
     out
 }
 
-/// The board's tools, run over the link.
+/// The board's tools, run over the link, and the host's.
 struct BoardToolbox<'a> {
     link: &'a Link,
     session: &'a Session,
+    /// What a timer says when it ends in.
+    language: &'a str,
 }
 
 impl Toolbox for BoardToolbox<'_> {
     fn tools(&self) -> Vec<Tool> {
         let mut tools = self.session.tools.lock().unwrap();
-        if tools.is_none() {
-            *tools = self.link.list_tools(TOOL_TIMEOUT).ok().map(voice_tools);
+        if let Some(tools) = &*tools {
+            return tools.clone();
         }
-        tools.clone().unwrap_or_default()
+        let cache = crate::link::tools_cache_file();
+        match self.link.list_tools(TOOL_TIMEOUT) {
+            Ok(board) => {
+                if let Some(path) = &cache
+                    && let Ok(json) = serde_json::to_vec_pretty(&board)
+                {
+                    let _ = fs::write(path, json);
+                }
+                tools.insert(voice_tools(board)).clone()
+            }
+            // The board didn't answer in time (busy with the audio): its
+            // tools as last seen, asked for again next time. Without any the
+            // model would only have get_time, and call it over and over.
+            Err(_) => {
+                let cached = cache.and_then(|p| fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Vec<Tool>>(&b).ok());
+                voice_tools(cached.unwrap_or_default())
+            }
+        }
     }
 
     fn call(&self, name: &str, arguments: &Value) -> Result<String, String> {
         if name == "get_metrics" {
             let snapshot = self.session.snapshot.lock().unwrap().clone().ok_or("no sensor reading yet")?;
             return Ok(snapshot.metrics_json().to_string());
+        }
+        if let Some(result) = self.session.timers.call_tool(name, arguments, self.language) {
+            return result;
         }
         if NOT_BY_VOICE.contains(&name) {
             return Err(format!("{name} can't be used by voice"));

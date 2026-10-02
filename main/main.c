@@ -4,6 +4,7 @@
 #include "board_display.h"
 #include "board_settings.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "link.h"
@@ -55,15 +56,35 @@ static void current_view(metrics_snapshot_t *snap, board_settings_t *settings)
     snap->gpu_source = settings->source[UI_SCREEN_GPU];
 }
 
+/* While the host says a timer rings: the chime every ALARM_EVERY_MS, unless
+ * someone is talking to the board (the host stops it on the wake word). */
+#define ALARM_EVERY_MS 2500
+
+static void ring_alarm(const metrics_snapshot_t *snap, uint32_t *last_ms)
+{
+    uint32_t now = (uint32_t) (esp_timer_get_time() / 1000);
+    bool ringing = snap->timer.valid && snap->timer.ringing && snap->state == METRICS_UI_LIVE;
+    if (!ringing || voice_state() != VOICE_IDLE || playback_active()) {
+        return;
+    }
+    if (*last_ms != 0 && now - *last_ms < ALARM_EVERY_MS) {
+        return;
+    }
+    *last_ms = now;
+    playback_earcon(PLAYBACK_EARCON_ALARM);
+}
+
 static void ui_refresh_task(void *arg)
 {
     metrics_snapshot_t prev;
     memset(&prev, 0, sizeof(prev));
+    uint32_t alarm_ms = 0;
 
     while (true) {
         metrics_snapshot_t snap;
         board_settings_t settings;
         current_view(&snap, &settings);
+        ring_alarm(&snap, &alarm_ms);
         bool turned = memcmp(settings.rot, s_rot, sizeof(s_rot)) != 0;
         if (turned || memcmp(&prev, &snap, sizeof(snap)) != 0) {
             lvgl_port_lock();

@@ -49,7 +49,7 @@ Closing the window keeps the app running in the tray, so the screens stay live.
 
 ## Watch faces
 
-Each screen shows one of ten faces, chosen independently in Settings → **Display**; any face goes on either screen:
+Each screen shows one of eleven faces, chosen independently in Settings → **Display**; any face goes on either screen:
 
 | Face | Shows |
 |------|-------|
@@ -59,12 +59,21 @@ Each screen shows one of ten faces, chosen independently in Settings → **Displ
 | `bar` | Classic with a slimmer RAM/VRAM bar, no numbers |
 | `claude` | Claude Code: 5-hour limit used on the outer ring, weekly limit on the inner ring (orange from 80 %, red from 95 %), time to the 5-hour reset, and a small Clawd |
 | `clawd` | Claude Code's mascot, large and animated: walks while Claude works, blinks when idle, sleeps after 30 min |
-| `net` | Download speed in large and on the outer ring, upload on the inner ring; the rings scale to the last minute's peak (firmware 1.1) |
-| `disk` | The system disk: space used on the ring (orange from 90 %), used/total, reads and writes per second where the OS reports them (firmware 1.1) |
+| `net` | Download speed in large with its unit and on the outer ring, upload below and on the inner ring; the rings are logarithmic, from 100 B/s to 1 GB/s, so a sixth more ring is ten times the speed (firmware 1.1, clearer in 1.2) |
+| `disk` | The system disk: space used in large and on the ring (orange from 90 %), used / total, then reads and writes per second where the OS reports them, one above the other (firmware 1.1, clearer in 1.2) |
 | `battery` | The laptop's charge on the ring (orange below 20 %, red below 10 % on battery), whether it's charging, and the time to empty or to full; "No battery" on a desktop (firmware 1.1) |
 | `image` | A picture or an animated GIF of your own (firmware 1.1, see below) |
+| `timer` | The timer, reminder or pomodoro that ends first, counting down on a ring that empties (firmware 1.2, see [Timers](#timers-reminders-and-a-pomodoro)) |
 
 The first four show the CPU or the GPU: by default the CPU on the left screen and the GPU on the right one, but **Shows** under each screen switches it, so both screens can show the GPU, or the CPU can go on the right.
+
+### Timers, reminders and a pomodoro
+
+"Alexa, timer 10 minuti", "set a pasta timer for 8 minutes", "ricordami alle 17 di chiamare Marco", "remind me in 20 minutes to stretch", "avvia un pomodoro", "quanto manca?", "metti in pausa il timer", "annulla tutti i timer". Or from Settings → **Timers**, or `dualeye timer`.
+
+While a timer runs, the right screen (or the left, or neither: Settings → **Timers** → **Takes over**) shows it instead of its face: a ring that empties, the time left, its name, and "+1 more" when others are running. Timers are amber, a pomodoro's focus red and its breaks green, reminders cyan. When one is up the board chimes every few seconds for a minute; saying "Alexa" silences it ("Alexa, stop"), and with spoken replies on it says what it was for: *"Il timer pasta è finito"*, *"Promemoria: chiamare Marco."* A pomodoro is 25 minutes of focus and 5 of break, four times, unless you say otherwise; it moves on by itself with a short chime. Put the `timer` face on a screen to keep the timers there all the time.
+
+The timers live on the computer (`timers.json` in DualEye's data folder), so they run with the window closed and a reminder still comes after a restart; they ring while the app (or `dualeye`) runs.
 
 ### Your own pictures
 
@@ -117,7 +126,7 @@ They close and the watch faces come back when the conversation ends. While nobod
 - **Follow-ups.** After an answer the board keeps listening for 4 s, so *"e anche a destra"* or *"a bit more"* works straight away; the last exchanges are remembered for 3 minutes. Turn it off with **Keep listening after an answer**.
 - **Interrupting.** Say "Alexa" while the board talks: it stops and listens.
 - **Wake word, mic and volume.** Choose "Alexa" or "Hi ESP", mute the mic, and set the speaker's volume; the board remembers all three.
-- **Without a language model** (turned off, or not downloaded) a few fixed phrases still work: faces, screens, brightness, rotation, volume, temperatures and the time.
+- **Without a language model** (turned off, or not downloaded) a few fixed phrases still work: faces, screens, brightness, rotation, volume, temperatures, the time, and timers, reminders and the pomodoro.
 
 On an M1 Pro the answer starts about 1.5 s after you stop talking (2–3 s when something changes on the board).
 
@@ -180,6 +189,7 @@ For Claude Desktop, add the same command to `claude_desktop_config.json` (Settin
 | `get_metrics` | Host | CPU and GPU temperature, load, clock, power, memory, fans |
 | `get_claude_usage` | Host | Claude Code tokens in the 5-hour window and today, plan limits used, time to reset, working or idle |
 | `speak` | Host | Says a short text out loud through the board, in Italian or English; needs the app with spoken replies on, or `dualeye --tts`, running |
+| `set_timer`, `set_reminder`, `pomodoro`, `control_timer`, `get_timers` | Host | [Timers](#timers-reminders-and-a-pomodoro) the board counts down and rings; they ring while the app (or `dualeye`) runs |
 
 Changes made this way show up in the app. It works with the app closed too: the server then opens the board's port for each call.
 
@@ -237,6 +247,11 @@ dualeye --stt --tts --llm                        # ...understood by the language
 dualeye ask "metti rings a sinistra"             # type a command instead of saying it
 dualeye eval                                     # the eval set on a simulated board
 dualeye say "Ciao!"                              # speak through the running app or dualeye --tts
+dualeye timer 10m pasta                          # a timer; also 90s, 1h30m, or 25 for minutes
+dualeye timer                                    # what's running
+dualeye timer cancel pasta                       # or pause / resume, a label or all
+dualeye timer remind 17:30 call Marco            # or remind 20m ...
+dualeye timer pomodoro                           # 25/5 x 4; pomodoro 50 10 2, pomodoro stop
 dualeye call set_wake_word --word hiesp          # "Hi ESP" instead of "Alexa"
 dualeye call set_mic --muted true
 ```
@@ -439,6 +454,12 @@ Parsed by `main/metrics_parser.c`; snapshots without any temperature are ignored
 ```
 
 `tok` and `today` are tokens in the 5-hour window and since local midnight, `left_min` the minutes until the window resets, `s_pct` / `w_pct` the 5-hour and weekly limits used (only with the status line connected), `state` one of `work`, `idle`, `sleep`.
+
+And `timer` while a timer runs (firmware 1.2), the one the timer face shows:
+
+```json
+"timer":{"kind":"timer","state":"run","left_s":272.4,"total_s":600,"label":"PASTA","more":1,"screen":"right"}
+```
 
 ## License
 

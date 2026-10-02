@@ -5,7 +5,8 @@
     "left.rotation": 0, "right.rotation": 0,
     "left.brightness": 80, "right.brightness": 80,
     "volume": 60, "muted": false, "wake_word": "alexa",
-    "text": "", "text.screen": ""
+    "text": "", "text.screen": "",
+    "timers": ""
   },
   "metrics": {"cpu": {"temp_c": 52.3, "load_pct": 23.0, "clock_mhz": 3228, "power_w": 18.4, "mem": {"used_mb": 11468, "total_mb": 32768}},
               "gpu": {"temp_c": 41.2, "load_pct": 7.0, "clock_mhz": 1296, "power_w": 6.1},
@@ -38,6 +39,11 @@
     {"lang": "it", "say": ["Luminosità al 50.", "Ancora più bassa, al 20."], "expect": {"left.brightness": 20, "right.brightness": 20}},
     {"lang": "it", "say": ["Usa Hi ESP come parola di attivazione."], "expect": {"wake_word": "hiesp"}},
     {"lang": "it", "say": ["Gira gli schermi sottosopra.", "Rimettili dritti."], "expect": {}},
+    {"lang": "it", "say": ["Imposta un timer di 10 minuti."], "expect": {"timers": "timer:600"}},
+    {"lang": "it", "say": ["Timer di mezz'ora per la pasta."], "expect": {"timers": "timer:1800"}},
+    {"lang": "it", "say": ["Ricordami tra 20 minuti di chiamare Marco."], "expect": {"timers": "~reminder:chiam"}},
+    {"lang": "it", "say": ["Avvia un pomodoro."], "expect": {"timers": "work:1500"}},
+    {"lang": "it", "say": ["Timer di 10 minuti.", "Annulla il timer."], "expect": {}},
     {"lang": "it", "say": ["Spegni lo schermo destro.", "Riaccendilo."], "expect": {"right.brightness": ">0"}},
 
     {"lang": "en", "say": ["Put rings on the left."], "expect": {"left.face": "rings"}},
@@ -64,6 +70,9 @@
     {"lang": "en", "say": ["What can you do?"], "expect": {}},
     {"lang": "en", "say": ["Order me a pizza."], "expect": {}},
     {"lang": "en", "say": ["Put plus on the right.", "Now on the left as well."], "expect": {"left.face": "plus", "right.face": "plus"}},
-    {"lang": "en", "say": ["Set the brightness to 60.", "A bit brighter, 90."], "expect": {"left.brightness": 90, "right.brightness": 90}}
+    {"lang": "en", "say": ["Set the brightness to 60.", "A bit brighter, 90."], "expect": {"left.brightness": 90, "right.brightness": 90}},
+    {"lang": "en", "say": ["Set a timer for five minutes."], "expect": {"timers": "timer:300"}},
+    {"lang": "en", "say": ["Remind me to stretch in 45 minutes."], "expect": {"timers": "reminder:stretch"}},
+    {"lang": "en", "say": ["Start a pomodoro."], "expect": {"timers": "work:1500"}}
   ]
 }

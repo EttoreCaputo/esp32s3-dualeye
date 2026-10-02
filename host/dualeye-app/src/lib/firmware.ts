@@ -1,7 +1,7 @@
 // Constants and formatting copied from main/ui_watch.c, so the mirror shows the
 // same pixels the board does. Keep in sync when the firmware UI changes.
 
-import type { Battery, ClaudeMetrics, ClaudeState, Disk, Metrics, Net } from "./monitor.svelte";
+import type { Battery, BoardTimer, ClaudeMetrics, ClaudeState, Disk, Metrics, Net } from "./monitor.svelte";
 
 export const LCD = 240;
 export const USAGE_ARC_SIZE = 216;
@@ -32,10 +32,16 @@ export const COLOR = {
   weekTrack: "#2B2019",
   green: "#40E080",
   greenTrack: "#0F2A18",
+  timerTrack: "#33230D",
+  tomato: "#FF6347",
+  tomatoTrack: "#3A1512",
+  divider: "#3A3A3C",
   error: "#FF453A",
 } as const;
-export const NET_SCALE_MIN = 65536;
-export const NET_SCALE_DECAY = 0.97;
+/** The net rings are logarithmic: log10 of the speed, 100 B/s (empty) to 1 GB/s (full). */
+export const NET_LOG_MIN = 2;
+export const NET_LOG_MAX = 9;
+export const TIMER_BLINK_MS = 500;
 export const DISK_FULL_PCT = 90;
 export const BATTERY_LOW_PCT = 20;
 export const BATTERY_EMPTY_PCT = 10;
@@ -47,7 +53,7 @@ export const DEVICES = {
 export type DeviceId = keyof typeof DEVICES;
 
 /** `metrics_face_t`; the names are what goes on the wire. */
-export type Face = "classic" | "rings" | "plus" | "bar" | "claude" | "clawd" | "net" | "disk" | "battery" | "image";
+export type Face = "classic" | "rings" | "plus" | "bar" | "claude" | "clawd" | "net" | "disk" | "battery" | "image" | "timer";
 /** `metrics_source_t`: whose metrics classic, rings, plus and bar show. */
 export type Source = DeviceId;
 /** Faces by screen (`cpu` is the left one, `gpu` the right one, as on the wire) and each screen's source. */
@@ -65,6 +71,7 @@ export const FACES: { id: Face; name: string; blurb: string }[] = [
   { id: "disk", name: "Disk", blurb: "System disk space, reads and writes" },
   { id: "battery", name: "Battery", blurb: "The laptop's charge and time left" },
   { id: "image", name: "Image", blurb: "A picture or GIF of your own" },
+  { id: "timer", name: "Timer", blurb: "Timers, reminders and the pomodoro counting down" },
 ];
 /** Faces that show the CPU's or the GPU's metrics, as the screen's source says. */
 export const hasSource = (face: Face) => face === "classic" || face === "rings" || face === "plus" || face === "bar";
@@ -115,17 +122,48 @@ export type Screen = {
   battery?: BatteryView;
   /** The image face: a data URL of the picture, or null without one. */
   image?: string | null;
+  /** The timer face; `null` without a timer (the hint). */
+  timer?: TimerView | null;
 };
 
-/** `update_net()`: download outside and in large, upload inside. */
+/** `update_net()`: download outside and in large, upload inside and below a divider. */
 export type NetView = { rxPct: number; txPct: number; unit: string; tx: string };
 /** `update_disk()` */
 export type DiskView = { pct: number; color: string; space: string; read: string | null; write: string | null };
+/** `update_timer()` and `timer_tick()`: the ring empties as the time runs out. */
+export type TimerView = {
+  pct: number;
+  color: string;
+  track: string;
+  title: string;
+  titleColor: string;
+  value: string;
+  /** Over an hour the time is in the bold 32 font. */
+  small: boolean;
+  valueColor: string;
+  dim: boolean;
+  label: string;
+  info: string;
+  infoColor: string;
+  more: string;
+};
 /** `update_battery()` */
 export type BatteryView = { pct: number; color: string; status: string; statusColor: string; time: string };
 
 /** What the screens show besides one device's metrics. */
-export type Extras = { net?: Net; disk?: Disk; bat?: Battery; image?: string | null; claude?: ClaudeMetrics; fan?: number };
+export type Extras = {
+  net?: Net;
+  disk?: Disk;
+  bat?: Battery;
+  image?: string | null;
+  claude?: ClaudeMetrics;
+  fan?: number;
+  timer?: BoardTimer;
+  /** How long ago the snapshot with `timer` came, in ms: the board counts down meanwhile. */
+  timerAgeMs?: number;
+  /** For the blink while it rings. */
+  nowMs?: number;
+};
 
 /** What `update_claude()` and `update_clawd_face()` put on screen. */
 export type ClaudeView = {
@@ -152,11 +190,7 @@ const cInt = (v: number) => Math.trunc(v + 0.5); // (int) (v + 0.5f)
 const pct = (v: number, max: number) => Math.min(100, Math.max(0, cInt((v / max) * 100)));
 const pctText = (p: number | undefined) => (p === undefined ? "--%" : `${p}%`);
 
-/**
- * One screen: `face`, with `source`'s metrics `m` for the faces that have a
- * source. `peaks` names the screen whose net rings scale to their recent peak,
- * like the board's; without it they scale to the moment.
- */
+/** One screen: `face`, with `source`'s metrics `m` for the faces that have a source. */
 export function screenFor(
   source: DeviceId,
   face: Face,
@@ -164,31 +198,89 @@ export function screenFor(
   stale: boolean,
   waiting: boolean,
   extras: Extras = {},
-  peaks?: string,
 ): Screen {
   const screen = sensorScreen(source, face, m, stale, waiting, extras.fan);
   if (isClaudeFace(face)) return { ...screen, claude: claudeView(extras.claude, stale, waiting) };
-  if (face === "net") return netScreen(screen, extras.net, stale, waiting, peaks);
+  if (face === "timer") return { ...screen, timer: timerView(extras, stale) };
+  if (face === "net") return netScreen(screen, extras.net, stale, waiting);
   if (face === "disk") return diskScreen(screen, extras.disk, stale, waiting);
   if (face === "battery") return batteryScreen(screen, extras.bat, stale, waiting);
   if (face === "image") return { ...screen, image: extras.image ?? null };
   return screen;
 }
 
-/** `format_rate()`: the number and its unit. */
+/** `format_rate()`: three figures at most, the number and its unit. */
 export function formatRate(bps: number): [string, string] {
   const units = ["B/s", "KB/s", "MB/s", "GB/s"];
   let u = 0;
-  while (bps >= 1000 && u < 3) {
+  bps = Math.max(0, bps);
+  while (bps >= 999.5 && u < 3) {
     bps /= 1000;
     u++;
   }
-  return [bps < 9.95 && u > 0 ? bps.toFixed(1) : String(cInt(bps)), units[u]];
+  return [bps < 99.95 && u > 0 ? bps.toFixed(1) : String(cInt(bps)), units[u]];
 }
 const rate = (bps: number) => formatRate(bps).join(" ");
 
-const peaks = new Map<string, { rx: number; tx: number }>();
-const follow = (peak: number, v: number) => Math.max(NET_SCALE_MIN, Math.max(peak * NET_SCALE_DECAY, v));
+/** `net_ring_pct()` */
+const netPct = (bps: number) => (bps <= 1 ? 0 : pct(Math.log10(bps) - NET_LOG_MIN, NET_LOG_MAX - NET_LOG_MIN));
+
+/** `format_span()`: "10 min", "1 h 30 min", "45 s". */
+function formatSpan(secs: number): string {
+  const h = Math.trunc(secs / 3600), m = Math.trunc((secs % 3600) / 60), s = secs % 60;
+  if (h > 0) return m > 0 ? `${h} h ${m} min` : `${h} h`;
+  if (m > 0) return s > 0 ? `${m} min ${s} s` : `${m} min`;
+  return `${s} s`;
+}
+
+const TIMER_COLORS: Record<BoardTimer["kind"], [string, string]> = {
+  timer: [COLOR.warm, COLOR.timerTrack],
+  work: [COLOR.tomato, COLOR.tomatoTrack],
+  break: [COLOR.green, COLOR.greenTrack],
+  reminder: [COLOR.cyan, COLOR.tempTrack],
+};
+
+function timerTitle(t: BoardTimer, ringing: boolean): string {
+  switch (t.kind) {
+    case "work":
+      return ringing ? "BREAK TIME" : "FOCUS";
+    case "break":
+      return ringing ? "BACK TO WORK" : "BREAK";
+    case "reminder":
+      return "REMINDER";
+    default:
+      return ringing ? "TIME'S UP" : "TIMER";
+  }
+}
+
+function timerView(x: Extras, stale: boolean): TimerView | null {
+  const t = x.timer;
+  if (!t || t.total_s <= 0) return null;
+  const ringing = t.state === "ring";
+  const paused = t.state === "pause";
+  const left = ringing ? 0 : paused ? t.left_s : Math.max(0, t.left_s - (x.timerAgeMs ?? 0) / 1000);
+  const secs = Math.max(0, Math.ceil(left - 0.05));
+  const two = (n: number) => String(n).padStart(2, "0");
+  const value = secs >= 3600 ? `${Math.trunc(secs / 3600)}:${two(Math.trunc((secs % 3600) / 60))}:${two(secs % 60)}` : `${Math.trunc(secs / 60)}:${two(secs % 60)}`;
+  const [color, track] = TIMER_COLORS[t.kind] ?? TIMER_COLORS.timer;
+  const on = !ringing || Math.trunc((x.nowMs ?? 0) / TIMER_BLINK_MS) % 2 === 0;
+  const info = paused ? "paused" : t.rounds ? `round ${t.round ?? 1} of ${t.rounds}` : `of ${formatSpan(Math.trunc(t.total_s + 0.5))}`;
+  return {
+    pct: ringing ? 100 : Math.min(100, (left / t.total_s) * 100),
+    color: on ? color : COLOR.hot,
+    track,
+    title: timerTitle(t, ringing),
+    titleColor: stale ? COLOR.stale : color,
+    value,
+    small: secs >= 3600,
+    valueColor: paused ? COLOR.textDim : COLOR.text,
+    dim: !on,
+    label: t.label ?? "",
+    info,
+    infoColor: paused ? COLOR.stale : COLOR.textDim,
+    more: t.more ? `+${t.more} MORE` : "",
+  };
+}
 
 function placeholderScreen(screen: Screen, title: string, waiting: boolean): Screen {
   return {
@@ -202,13 +294,10 @@ function placeholderScreen(screen: Screen, title: string, waiting: boolean): Scr
   };
 }
 
-function netScreen(screen: Screen, net: Net | undefined, stale: boolean, waiting: boolean, key?: string): Screen {
+function netScreen(screen: Screen, net: Net | undefined, stale: boolean, waiting: boolean): Screen {
   if (waiting || !net) {
     return { ...placeholderScreen(screen, "NET", waiting), net: { rxPct: 0, txPct: 0, unit: "--", tx: "--" } };
   }
-  const last = key ? peaks.get(key) : undefined;
-  const peak = { rx: follow(last?.rx ?? NET_SCALE_MIN, net.rx_bps), tx: follow(last?.tx ?? NET_SCALE_MIN, net.tx_bps) };
-  if (key) peaks.set(key, peak);
   const [value, unit] = formatRate(net.rx_bps);
   return {
     ...screen,
@@ -218,7 +307,7 @@ function netScreen(screen: Screen, net: Net | undefined, stale: boolean, waiting
     labelColor: stale ? COLOR.stale : COLOR.cyan,
     valueColor: stale ? COLOR.textDim : COLOR.text,
     warn: false,
-    net: { rxPct: pct(net.rx_bps, peak.rx), txPct: pct(net.tx_bps, peak.tx), unit, tx: rate(net.tx_bps) },
+    net: { rxPct: netPct(net.rx_bps), txPct: netPct(net.tx_bps), unit, tx: rate(net.tx_bps) },
   };
 }
 
@@ -230,8 +319,8 @@ function diskScreen(screen: Screen, disk: Disk | undefined, stale: boolean, wait
   const full = p >= DISK_FULL_PCT;
   const space =
     disk.total_gb >= 1000
-      ? `${(disk.used_gb / 1000).toFixed(1)}/${(disk.total_gb / 1000).toFixed(1)} TB`
-      : `${disk.used_gb.toFixed(0)}/${disk.total_gb.toFixed(0)} GB`;
+      ? `${(disk.used_gb / 1000).toFixed(1)} / ${(disk.total_gb / 1000).toFixed(1)} TB`
+      : `${disk.used_gb.toFixed(0)} / ${disk.total_gb.toFixed(0)} GB`;
   const io = disk.read_bps !== undefined || disk.write_bps !== undefined;
   return {
     ...screen,

@@ -21,6 +21,7 @@ use crate::intents::{self, Context};
 use crate::link::Tool;
 use crate::llm::LlmError;
 use crate::snapshot::Snapshot;
+use crate::timers::{Kind, Timers};
 
 const COMMANDS: &str = include_str!("../eval/commands.json");
 const HOLDOUT: &str = include_str!("../eval/holdout.json");
@@ -65,11 +66,14 @@ impl EvalSet {
     }
 }
 
-/// A board in memory with the settings the tools change.
+/// A board in memory with the settings the tools change. Its timers are
+/// real ones, in memory; the state has them as `timers`, a string of
+/// `kind:seconds` (`timer:600`, `work:1500`) and `reminder:text`, by end.
 pub struct SimBoard {
     tools: Vec<Tool>,
     state: Mutex<BTreeMap<String, Value>>,
     metrics: Snapshot,
+    timers: Timers,
 }
 
 impl SimBoard {
@@ -79,7 +83,7 @@ impl SimBoard {
         metrics.cpu = serde_json::from_value(set.metrics["cpu"].clone()).unwrap_or_default();
         metrics.gpu = serde_json::from_value(set.metrics["gpu"].clone()).unwrap_or_default();
         metrics.fans = serde_json::from_value(set.metrics["fans"].clone()).unwrap_or_default();
-        Self { tools: crate::voice::voice_tools(tools), state: Mutex::new(set.start.clone()), metrics }
+        Self { tools: crate::voice::voice_tools(tools), state: Mutex::new(set.start.clone()), metrics, timers: Timers::default() }
     }
 
     pub fn state(&self) -> BTreeMap<String, Value> {
@@ -129,6 +133,19 @@ impl Toolbox for SimBoard {
 
     /// Like the firmware (`main/board_tools.c`): the same checks and answers.
     fn call(&self, name: &str, args: &Value) -> Result<String, String> {
+        if let Some(result) = self.timers.call_tool(name, args, "en") {
+            let timers: Vec<String> = self
+                .timers
+                .list()
+                .iter()
+                .map(|t| match t.kind {
+                    Kind::Reminder => format!("reminder:{}", t.label.as_deref().unwrap_or("").to_lowercase()),
+                    _ => format!("{}:{}", t.kind.name(), t.total_s),
+                })
+                .collect();
+            self.state.lock().unwrap().insert("timers".into(), json!(timers.join(", ")));
+            return result;
+        }
         let mut state = self.state.lock().unwrap();
         let mut set = |k: String, v: Value| {
             state.insert(k, v);
@@ -301,7 +318,7 @@ pub fn run_case(set: &EvalSet, case: &Case, responder: &Responder) -> Result<Cas
             Responder::Rules => {
                 let started = Instant::now();
                 let volume = board.get("volume").as_u64().map(|v| v as u8);
-                let plan = intents::understand(text, &case.lang, &Context { snapshot: Some(board.metrics.clone()), volume });
+                let plan = intents::understand(text, &case.lang, &Context { snapshot: Some(board.metrics.clone()), volume, timers: board.timers.list(), alarm: false });
                 let mut ok = true;
                 for (tool, args) in &plan.calls {
                     let result = board.call(tool, args);

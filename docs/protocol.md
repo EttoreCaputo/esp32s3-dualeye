@@ -80,6 +80,8 @@ The snapshot the host sends about once a second. Its shape is protocol 1's line 
 {"v":2,"ts":1700000000,"cpu":{"temp_c":36.3,"load_pct":1.8,"clock_mhz":1572,"power_w":14.6,"mem":{"used_mb":12288,"total_mb":31744}},"gpu":{"temp_c":31.0},"fans":[{"id":"cpu","rpm":3770}],"claude":{"tok":1234567,"today":4500000,"left_min":133,"s_pct":42.0,"state":"work","model":"OPUS 5.5"}}
 ```
 
+Firmware 1.2 also reads `"timer":{"kind":"timer","state":"run","left_s":272.4,"total_s":600,"label":"PASTA","more":1,"round":2,"rounds":4,"screen":"right"}`, the host's timer that ends first (absent when none runs), for the `timer` face: `kind` is `timer`, `work` or `break` (a pomodoro's, with its `round` of `rounds`) or `reminder`; `state` is `run`, `pause` or `ring`; `left_s` counts from the snapshot (the board counts down on its own between snapshots); `label` is ASCII capitals, up to 27 characters; `more` is how many other timers run; `screen` (`left` or `right`, optional) is the screen that shows the timer face instead of its own while the data is live. While `state` is `ring` the board plays a chime every 2.5 s, unless the voice overlay or the speaker is busy. The host keeps the timers, ends the ringing (after a minute, on the wake word, or when told) and says what the timer was for.
+
 Firmware 1.1 also reads `"net":{"rx_bps":…,"tx_bps":…}` (bytes per second, every interface but loopback), `"disk":{"used_gb":…,"total_gb":…,"read_bps":…,"write_bps":…}` (the system disk; the rates are optional) and `"bat":{"pct":…,"charging":…,"plugged":…,"mins":…}` (absent without a battery; `mins` to empty, or to full while charging, optional), for the `net`, `disk` and `battery` faces; older firmware skips them.
 
 The board ignores a snapshot with neither temperature, and marks its data stale 3 s after the last one.
@@ -135,7 +137,7 @@ Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` i
 
 | Tool | Arguments | Effect |
 |------|-----------|--------|
-| `set_face` | `face`: `classic` · `rings` · `plus` · `bar` · `claude` · `clawd` · `net` · `disk` · `battery` · `image` (the last four: firmware 1.1); `source`: `cpu` · `gpu` (firmware 1.1, optional); `screen` | Switch the watch face. `source` is whose metrics classic, rings, plus and bar show on that screen, kept until changed (by default the CPU on the left, the GPU on the right) |
+| `set_face` | `face`: `classic` · `rings` · `plus` · `bar` · `claude` · `clawd` · `net` · `disk` · `battery` · `image` (those four: firmware 1.1) · `timer` (firmware 1.2); `source`: `cpu` · `gpu` (firmware 1.1, optional); `screen` | Switch the watch face. `source` is whose metrics classic, rings, plus and bar show on that screen, kept until changed (by default the CPU on the left, the GPU on the right) |
 | `set_rotation` | `degrees`: 0 · 90 · 180 · 270; `screen` | Turn the screen clockwise on top of the DualEye mounting |
 | `set_brightness` | `percent`: 0–100; `screen` | Backlight level (0 turns it off) |
 | `show_text` | `text` (up to 120 characters, ASCII); `screen`; `seconds`: 1–30, default 4 | Show a message over the face, then hide it |
@@ -166,6 +168,7 @@ One JSON-RPC 2.0 message per line, one request at a time. The first request must
 | `hello` | `{"token":"…","client":"dualeye-mcp/0.1.0"}` | `{"bridge":"0.1.0","board":<hello result or null>,"port":"/dev/cu.usbmodem101"}` |
 | `tools/list`, `tools/call`, `media/...` | As on `ctrl` | Passed to the board unchanged, one at a time |
 | `host/snapshot` | none | `{"snapshot":<latest sample or null>,"age_ms":…}` |
+| `host/timers` | `{"name":"set_timer","arguments":{"minutes":10},"language":"it"}`: one of the timer tools (`set_timer`, `set_reminder`, `pomodoro`, `control_timer`, `get_timers`) | `{"text":…,"is_error":false}`, run on the bridge's timers; `-32000` without a bridge (then `Board::timer_tool` uses `timers.json` directly) |
 | `host/say` | `{"text":"Ciao!","language":"it"}` (`language` optional: what the text looks like) | Once played: `{"text":…,"first_audio_ms":…,"played_ms":…,"reason":"done","underruns":0,"lost":0}`. `-32000` unless the bridge has text-to-speech (the app with spoken replies on, or `dualeye --tts`) |
 
 While no board is attached (not found, rebooting, esptool flashing it) board methods fail with `-32000` and the reason as the message. After a successful `set_face` or `set_rotation` the bridge reads `get_state` and updates its own settings, so the app shows the change and keeps it.

@@ -523,6 +523,77 @@ static bool parse_battery_object(js_t *j, metrics_battery_t *bat)
     }
 }
 
+static metrics_timer_kind_t timer_kind_from_name(const char *name)
+{
+    if (strcmp(name, "work") == 0) {
+        return METRICS_TIMER_WORK;
+    }
+    if (strcmp(name, "break") == 0) {
+        return METRICS_TIMER_BREAK;
+    }
+    return strcmp(name, "reminder") == 0 ? METRICS_TIMER_REMINDER : METRICS_TIMER_PLAIN;
+}
+
+/* {"kind": s, "state": "run" | "pause" | "ring", "left_s": n, "total_s": n,
+ *  "label"?: s, "more"?: n, "round"?: n, "rounds"?: n, "screen"?: "left" | "right"} */
+static bool parse_timer_object(js_t *j, metrics_timer_t *timer)
+{
+    if (!consume(j, '{')) {
+        return false;
+    }
+    timer->screen = -1;
+    bool got_total = false;
+    for (;;) {
+        char key[32];
+        bool done = false;
+        if (!object_key(j, key, sizeof(key), &done)) {
+            return false;
+        }
+        if (done) {
+            timer->valid = got_total && timer->total_s > 0.0f;
+            return true;
+        }
+        bool ok = true;
+        float value = 0.0f;
+        if (strcmp(key, "kind") == 0) {
+            char name[12];
+            ok = parse_string(j, name, sizeof(name));
+            timer->kind = timer_kind_from_name(name);
+        } else if (strcmp(key, "state") == 0) {
+            char name[8];
+            ok = parse_string(j, name, sizeof(name));
+            timer->paused = strcmp(name, "pause") == 0;
+            timer->ringing = strcmp(name, "ring") == 0;
+        } else if (strcmp(key, "left_s") == 0) {
+            ok = read_number_field(j, &timer->left_s);
+        } else if (strcmp(key, "total_s") == 0) {
+            ok = read_number_field(j, &timer->total_s);
+            got_total = ok;
+        } else if (strcmp(key, "label") == 0) {
+            ok = parse_string(j, timer->label, sizeof(timer->label));
+        } else if (strcmp(key, "more") == 0) {
+            ok = read_number_field(j, &value);
+            timer->more = (int) value;
+        } else if (strcmp(key, "round") == 0) {
+            ok = read_number_field(j, &value);
+            timer->round = (int) value;
+        } else if (strcmp(key, "rounds") == 0) {
+            ok = read_number_field(j, &value);
+            timer->rounds = (int) value;
+        } else if (strcmp(key, "screen") == 0) {
+            char name[8];
+            ok = parse_string(j, name, sizeof(name));
+            timer->screen = strcmp(name, "left") == 0 ? 0 : strcmp(name, "right") == 0 ? 1 : -1;
+        } else {
+            ok = skip_value(j, 1);
+        }
+        if (!ok) {
+            return false;
+        }
+        object_sep(j);
+    }
+}
+
 esp_err_t metrics_parse_line(const char *line, metrics_snapshot_t *out)
 {
     if (line == NULL || out == NULL) {
@@ -560,6 +631,8 @@ esp_err_t metrics_parse_line(const char *line, metrics_snapshot_t *out)
             ok = parse_disk_object(&j, &out->disk);
         } else if (strcmp(key, "bat") == 0) {
             ok = parse_battery_object(&j, &out->battery);
+        } else if (strcmp(key, "timer") == 0) {
+            ok = parse_timer_object(&j, &out->timer);
         } else if (strcmp(key, "ts") == 0) {
             double value = 0.0;
             ok = parse_number(&j, &value);

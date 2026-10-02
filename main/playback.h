@@ -32,6 +32,8 @@ void playback_barge_in(void);
 typedef enum {
     /* Two falling notes: the host failed, or didn't catch the words. */
     PLAYBACK_EARCON_ERROR,
+    /* Two rising chimes: a timer is up. Played again and again while it rings. */
+    PLAYBACK_EARCON_ALARM,
 } playback_earcon_t;
 
 /** Play a short sound made on the board, unless the host's speech is

@@ -1,5 +1,6 @@
 #include "ui_watch.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -10,6 +11,7 @@
 
 LV_FONT_DECLARE(lv_font_montserrat_bold_12)
 LV_FONT_DECLARE(lv_font_montserrat_bold_48)
+LV_FONT_DECLARE(lv_font_montserrat_bold_32)
 LV_FONT_DECLARE(lv_font_fan_16)
 
 /* Font Awesome 6 Free solid "fan", U+F863 */
@@ -41,14 +43,24 @@ LV_FONT_DECLARE(lv_font_fan_16)
 /* Upload on the net face, and the battery. */
 #define COLOR_GREEN 0x40E080
 #define COLOR_GREEN_TRACK 0x0F2A18
+/* Timers: amber, a pomodoro's focus in tomato red, its break green, reminders cyan. */
+#define COLOR_TIMER_TRACK 0x33230D
+#define COLOR_TOMATO 0xFF6347
+#define COLOR_TOMATO_TRACK 0x3A1512
+#define COLOR_DIVIDER 0x3A3A3C
 
-/* The net face's rings scale to the fastest of the last minute or so, never below 64 KB/s. */
-#define NET_SCALE_MIN 65536.0f
-#define NET_SCALE_DECAY 0.97f
+/* The net face's rings are logarithmic, 100 B/s (empty) to 1 GB/s (full):
+ * a ring a sixth fuller is ten times the speed. */
+#define NET_LOG_MIN 2.0f
+#define NET_LOG_MAX 9.0f
 #define DISK_FULL_PCT 90
 #define BATTERY_LOW_PCT 20
 #define BATTERY_EMPTY_PCT 10
 #define IMAGE_TICK_MS 20
+/* The timer face counts down between snapshots, and blinks while it rings. */
+#define TIMER_TICK_MS 100
+#define TIMER_BLINK_MS 500
+#define TIMER_ARC_RANGE 1000
 
 #define TEMP_WARM_C 80.0f
 #define TEMP_HOT_C 90.0f
@@ -134,30 +146,51 @@ typedef struct {
     lv_obj_t *week;
 } ui_claude_t;
 
-/* Download on the outer ring and in large, upload inside. */
+/* Download on the outer ring and in large with its unit, upload on the inner
+ * ring and below a divider. */
 typedef struct {
     lv_obj_t *root;
     lv_obj_t *rx_arc;
     lv_obj_t *tx_arc;
     ui_title_t title;
     lv_obj_t *value;
+    lv_obj_t *rx_icon;
     lv_obj_t *unit;
+    lv_obj_t *tx_icon;
     lv_obj_t *tx;
-    float rx_peak;
-    float tx_peak;
 } ui_net_t;
 
-/* The system disk: space used on the ring, reads and writes below. */
+/* The system disk: space used on the ring and in large, used of total below,
+ * then reads and writes one above the other. */
 typedef struct {
     lv_obj_t *root;
     lv_obj_t *arc;
     ui_title_t title;
     lv_obj_t *value;
     lv_obj_t *space;
-    lv_obj_t *io_row;
+    lv_obj_t *io;
     lv_obj_t *read;
     lv_obj_t *write;
 } ui_disk_t;
+
+/* The host's timer that ends first: a ring that empties, the time left, its
+ * label; or a hint when there is none. Counts down on its own between
+ * snapshots from `left_s` as of `base_ms`. */
+typedef struct {
+    lv_obj_t *root;
+    lv_obj_t *arc;
+    lv_obj_t *col;
+    ui_title_t title;
+    lv_obj_t *value;
+    lv_obj_t *label;
+    lv_obj_t *info;
+    lv_obj_t *more;
+    lv_obj_t *hint;
+    metrics_timer_t timer;
+    uint32_t updated_ms;
+    uint32_t base_ms;
+    uint32_t color;
+} ui_timer_face_t;
 
 /* Charge on the ring, what the battery is doing and for how long. */
 typedef struct {
@@ -212,6 +245,7 @@ typedef struct {
     ui_disk_t disk;
     ui_battery_t battery;
     ui_image_face_t image;
+    ui_timer_face_t timer;
 } ui_screen_t;
 
 /* How the classic-based faces differ: column offset, gap under the title and
@@ -601,21 +635,53 @@ static void create_clawd_face(ui_screen_t *ui)
     (void) row;
 }
 
+/* A thin rule between the main value and the details under it. */
+static lv_obj_t *create_divider(lv_obj_t *col, int w)
+{
+    lv_obj_t *line = create_cell(col, COLOR_DIVIDER);
+    lv_obj_set_size(line, w, 1);
+    lv_obj_set_style_margin_top(line, 7, 0);
+    lv_obj_set_style_margin_bottom(line, 7, 0);
+    return line;
+}
+
+/* A small icon (in the plain font, which has the symbols) and a value. */
+static lv_obj_t *create_icon_row(lv_obj_t *col, lv_obj_t **icon, const char *symbol, uint32_t color,
+                                 lv_obj_t **value, const lv_font_t *font)
+{
+    lv_obj_t *row = make_flex(col, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(row, 5, 0);
+    *icon = create_text(row, symbol, &lv_font_montserrat_12, color);
+    *value = create_text(row, "--", font, color);
+    return row;
+}
+
 static void create_net(ui_screen_t *ui)
 {
     ui_net_t *f = &ui->net;
     f->root = make_face(ui->screen);
     f->rx_arc = create_arc(f->root, USAGE_ARC_SIZE, COLOR_CYAN, COLOR_TEMP_TRACK);
     f->tx_arc = create_arc(f->root, USAGE_ARC_SIZE - RING_GAP, COLOR_GREEN, COLOR_GREEN_TRACK);
-    f->rx_peak = NET_SCALE_MIN;
-    f->tx_peak = NET_SCALE_MIN;
 
-    lv_obj_t *col = create_column(f->root, 2);
-    create_title(&f->title, col, "NET", COLOR_CYAN, 6);
+    lv_obj_t *col = create_column(f->root, 4);
+    create_title(&f->title, col, "NET", COLOR_CYAN, 8);
     f->value = create_text(col, "—", &lv_font_montserrat_bold_48, COLOR_TEXT);
-    f->unit = create_text(col, LV_SYMBOL_DOWN " --", &lv_font_montserrat_14, COLOR_CYAN);
-    lv_obj_set_style_margin_bottom(f->unit, 4, 0);
-    f->tx = create_text(col, LV_SYMBOL_UP " --", &lv_font_montserrat_14, COLOR_GREEN);
+    lv_obj_t *rx = create_icon_row(col, &f->rx_icon, LV_SYMBOL_DOWN, COLOR_CYAN, &f->unit, &lv_font_montserrat_14);
+    lv_obj_set_style_margin_top(rx, 6, 0);
+    create_divider(col, 56);
+    create_icon_row(col, &f->tx_icon, LV_SYMBOL_UP, COLOR_GREEN, &f->tx, &lv_font_montserrat_16);
+}
+
+/* "R" or "W" in the bold font, and a rate. */
+static void create_io_row(lv_obj_t *col, const char *name, uint32_t color, lv_obj_t **value)
+{
+    lv_obj_t *row = make_flex(col, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(row, 6, 0);
+    lv_obj_t *label = create_text(row, name, &lv_font_montserrat_bold_12, color);
+    lv_obj_set_width(label, 10);
+    *value = create_text(row, "--", &lv_font_montserrat_14, COLOR_TEXT);
+    lv_obj_set_style_min_width(*value, 72, 0);
+    lv_obj_set_style_text_align(*value, LV_TEXT_ALIGN_LEFT, 0);
 }
 
 static void create_disk(ui_screen_t *ui)
@@ -624,19 +690,16 @@ static void create_disk(ui_screen_t *ui)
     f->root = make_face(ui->screen);
     f->arc = create_arc(f->root, USAGE_ARC_SIZE, COLOR_MEM, COLOR_MEM_TRACK);
 
-    lv_obj_t *col = create_column(f->root, 2);
-    create_title(&f->title, col, "DISK", COLOR_MEM, 6);
+    lv_obj_t *col = create_column(f->root, 4);
+    create_title(&f->title, col, "DISK", COLOR_MEM, 8);
     f->value = create_text(col, "—", &lv_font_montserrat_bold_48, COLOR_TEXT);
     f->space = create_text(col, "-- GB", &lv_font_montserrat_14, COLOR_TEXT_DIM);
-    lv_obj_set_style_margin_bottom(f->space, 4, 0);
-    f->io_row = make_flex(col, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_column(f->io_row, 10, 0);
-    lv_obj_t *read_name = NULL;
-    lv_obj_t *write_name = NULL;
-    lv_obj_t *r = create_pair(f->io_row, &read_name, "R", COLOR_MEM, &f->read);
-    lv_obj_t *w = create_pair(f->io_row, &write_name, "W", COLOR_WARM, &f->write);
-    (void) r;
-    (void) w;
+    lv_obj_set_style_margin_top(f->space, 6, 0);
+    f->io = make_flex(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(f->io, 2, 0);
+    create_divider(f->io, 56);
+    create_io_row(f->io, "R", COLOR_MEM, &f->read);
+    create_io_row(f->io, "W", COLOR_WARM, &f->write);
 }
 
 static void create_battery(ui_screen_t *ui)
@@ -670,6 +733,35 @@ static void create_image(ui_screen_t *ui)
     create_text(col, "Pick one in the\nDualEye app", &lv_font_montserrat_14, COLOR_TEXT_DIM);
     // Not loaded yet: the first update looks.
     f->generation = UINT32_MAX;
+}
+
+static void create_timer_face(ui_screen_t *ui)
+{
+    ui_timer_face_t *f = &ui->timer;
+    f->root = make_face(ui->screen);
+    f->arc = create_arc(f->root, USAGE_ARC_SIZE, COLOR_WARM, COLOR_TIMER_TRACK);
+    lv_arc_set_range(f->arc, 0, TIMER_ARC_RANGE);
+    f->color = COLOR_WARM;
+
+    f->col = create_column(f->root, 2);
+    create_title(&f->title, f->col, "TIMER", COLOR_WARM, 8);
+    f->value = create_text(f->col, "—", &lv_font_montserrat_bold_48, COLOR_TEXT);
+    f->label = create_text(f->col, "", &lv_font_montserrat_bold_12, COLOR_TEXT);
+    lv_obj_set_style_text_letter_space(f->label, 1, 0);
+    lv_obj_set_width(f->label, 150);
+    lv_label_set_long_mode(f->label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_margin_top(f->label, 8, 0);
+    f->info = create_text(f->col, "", &lv_font_montserrat_14, COLOR_TEXT_DIM);
+    lv_obj_set_style_margin_top(f->info, 4, 0);
+    f->more = create_text(f->root, "", &lv_font_montserrat_12, COLOR_TEXT_DIM);
+    lv_obj_align(f->more, LV_ALIGN_BOTTOM_MID, 0, -40);
+
+    f->hint = create_column(f->root, 0);
+    lv_obj_t *title = create_text(f->hint, "NO TIMERS", &lv_font_montserrat_bold_12, COLOR_TEXT_DIM);
+    lv_obj_set_style_text_letter_space(title, 1, 0);
+    lv_obj_set_style_margin_bottom(title, 6, 0);
+    create_text(f->hint, "Say \"Alexa, set a\ntimer for 10 minutes\"", &lv_font_montserrat_14, COLOR_TEXT_DIM);
+    lv_obj_add_flag(f->col, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* Name and colour the classic, rings, plus and bar faces after `source`. */
@@ -718,6 +810,7 @@ static void create_screen(ui_screen_t *ui, lv_display_t *disp, int index, metric
     create_disk(ui);
     create_battery(ui);
     create_image(ui);
+    create_timer_face(ui);
     lv_obj_remove_flag(ui->classic.root, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -1021,16 +1114,21 @@ static void update_clawd_face(ui_screen_t *ui, const metrics_claude_t *c, metric
     set_tokens(f->tokens, c->tokens);
 }
 
-/* "512 B/s", "9.4 KB/s", "12 MB/s": the number and its unit apart, for the large value. */
+/* "512 B/s", "9.4 KB/s", "48.2 MB/s", "125 MB/s": three figures at most, the
+ * number and its unit apart, for the large value. */
 static void format_rate(float bps, char *num, size_t num_len, const char **unit)
 {
     static const char *const UNITS[] = {"B/s", "KB/s", "MB/s", "GB/s"};
     int u = 0;
-    while (bps >= 1000.0f && u < 3) {
+    if (bps < 0.0f) {
+        bps = 0.0f;
+    }
+    // 999.6 KB/s would round to "1000 KB/s".
+    while (bps >= 999.5f && u < 3) {
         bps /= 1000.0f;
         u++;
     }
-    if (bps < 9.95f && u > 0) {
+    if (bps < 99.95f && u > 0) {
         snprintf(num, num_len, "%.1f", bps);
     } else {
         snprintf(num, num_len, "%d", (int) (bps + 0.5f));
@@ -1038,22 +1136,21 @@ static void format_rate(float bps, char *num, size_t num_len, const char **unit)
     *unit = UNITS[u];
 }
 
-static void set_rate(lv_obj_t *label, const char *prefix, float bps)
+static void set_rate(lv_obj_t *label, float bps)
 {
     char num[12];
     const char *unit;
     format_rate(bps, num, sizeof(num), &unit);
-    lv_label_set_text_fmt(label, "%s%s %s", prefix, num, unit);
+    lv_label_set_text_fmt(label, "%s %s", num, unit);
 }
 
-/* A peak that follows `value` up at once and down slowly. */
-static float follow_peak(float peak, float value)
+/* How full a net ring is: log10 of the speed between NET_LOG_MIN and NET_LOG_MAX. */
+static int net_ring_pct(float bps)
 {
-    peak *= NET_SCALE_DECAY;
-    if (value > peak) {
-        peak = value;
+    if (bps <= 1.0f) {
+        return 0;
     }
-    return peak < NET_SCALE_MIN ? NET_SCALE_MIN : peak;
+    return clamp_pct(log10f(bps) - NET_LOG_MIN, NET_LOG_MAX - NET_LOG_MIN);
 }
 
 static void update_net(ui_screen_t *ui, const metrics_net_t *net, metrics_ui_state_t state)
@@ -1063,23 +1160,21 @@ static void update_net(ui_screen_t *ui, const metrics_net_t *net, metrics_ui_sta
         lv_arc_set_value(f->rx_arc, 0);
         lv_arc_set_value(f->tx_arc, 0);
         lv_label_set_text(f->value, "—");
-        lv_label_set_text(f->unit, LV_SYMBOL_DOWN " --");
-        lv_label_set_text(f->tx, LV_SYMBOL_UP " --");
+        lv_label_set_text(f->unit, "--");
+        lv_label_set_text(f->tx, "--");
         set_title(&f->title, placeholder_title(state), false);
         set_text_color(f->value, COLOR_TEXT_DIM);
         return;
     }
-    f->rx_peak = follow_peak(f->rx_peak, net->rx_bps);
-    f->tx_peak = follow_peak(f->tx_peak, net->tx_bps);
-    lv_arc_set_value(f->rx_arc, clamp_pct(net->rx_bps, f->rx_peak));
-    lv_arc_set_value(f->tx_arc, clamp_pct(net->tx_bps, f->tx_peak));
+    lv_arc_set_value(f->rx_arc, net_ring_pct(net->rx_bps));
+    lv_arc_set_value(f->tx_arc, net_ring_pct(net->tx_bps));
 
     char num[12];
     const char *unit;
     format_rate(net->rx_bps, num, sizeof(num), &unit);
     lv_label_set_text(f->value, num);
-    lv_label_set_text_fmt(f->unit, LV_SYMBOL_DOWN " %s", unit);
-    set_rate(f->tx, LV_SYMBOL_UP " ", net->tx_bps);
+    lv_label_set_text(f->unit, unit);
+    set_rate(f->tx, net->tx_bps);
     bool stale = state == METRICS_UI_STALE;
     set_title(&f->title, stale ? COLOR_STALE : COLOR_CYAN, false);
     set_text_color(f->value, stale ? COLOR_TEXT_DIM : COLOR_TEXT);
@@ -1092,7 +1187,7 @@ static void update_disk(ui_screen_t *ui, const metrics_disk_t *disk, metrics_ui_
         lv_arc_set_value(f->arc, 0);
         lv_label_set_text(f->value, "—");
         lv_label_set_text(f->space, "-- GB");
-        lv_obj_add_flag(f->io_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(f->io, LV_OBJ_FLAG_HIDDEN);
         set_title(&f->title, placeholder_title(state), false);
         set_text_color(f->value, COLOR_TEXT_DIM);
         return;
@@ -1103,16 +1198,16 @@ static void update_disk(ui_screen_t *ui, const metrics_disk_t *disk, metrics_ui_
     set_arc_color(f->arc, full ? COLOR_WARM : COLOR_MEM);
     set_pct(f->value, true, pct);
     if (disk->total_gb >= 1000.0f) {
-        lv_label_set_text_fmt(f->space, "%.1f/%.1f TB", disk->used_gb / 1000.0f, disk->total_gb / 1000.0f);
+        lv_label_set_text_fmt(f->space, "%.1f / %.1f TB", disk->used_gb / 1000.0f, disk->total_gb / 1000.0f);
     } else {
-        lv_label_set_text_fmt(f->space, "%.0f/%.0f GB", disk->used_gb, disk->total_gb);
+        lv_label_set_text_fmt(f->space, "%.0f / %.0f GB", disk->used_gb, disk->total_gb);
     }
     if (disk->has_io) {
-        lv_obj_remove_flag(f->io_row, LV_OBJ_FLAG_HIDDEN);
-        set_rate(f->read, "", disk->read_bps);
-        set_rate(f->write, "", disk->write_bps);
+        lv_obj_remove_flag(f->io, LV_OBJ_FLAG_HIDDEN);
+        set_rate(f->read, disk->read_bps);
+        set_rate(f->write, disk->write_bps);
     } else {
-        lv_obj_add_flag(f->io_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(f->io, LV_OBJ_FLAG_HIDDEN);
     }
     uint32_t tone = state == METRICS_UI_STALE ? COLOR_STALE : full ? COLOR_WARM : COLOR_MEM;
     set_title(&f->title, tone, full);
@@ -1228,6 +1323,186 @@ static void image_timer_cb(lv_timer_t *timer)
     }
 }
 
+/* Ring colour and track of a timer. */
+static void timer_colors(metrics_timer_kind_t kind, uint32_t *color, uint32_t *track)
+{
+    switch (kind) {
+    case METRICS_TIMER_WORK:
+        *color = COLOR_TOMATO;
+        *track = COLOR_TOMATO_TRACK;
+        break;
+    case METRICS_TIMER_BREAK:
+        *color = COLOR_GREEN;
+        *track = COLOR_GREEN_TRACK;
+        break;
+    case METRICS_TIMER_REMINDER:
+        *color = COLOR_CYAN;
+        *track = COLOR_TEMP_TRACK;
+        break;
+    default:
+        *color = COLOR_WARM;
+        *track = COLOR_TIMER_TRACK;
+        break;
+    }
+}
+
+/* "10 min", "1 h 30 min", "45 s": how long a timer was set for. */
+static void format_span(char *out, size_t len, int secs)
+{
+    int h = secs / 3600, m = (secs % 3600) / 60, s = secs % 60;
+    if (h > 0 && m > 0) {
+        snprintf(out, len, "%d h %d min", h, m);
+    } else if (h > 0) {
+        snprintf(out, len, "%d h", h);
+    } else if (m > 0 && s > 0) {
+        snprintf(out, len, "%d min %d s", m, s);
+    } else if (m > 0) {
+        snprintf(out, len, "%d min", m);
+    } else {
+        snprintf(out, len, "%d s", s);
+    }
+}
+
+/* Seconds left now: counted down from the last snapshot unless it's held. */
+static float timer_left(const ui_timer_face_t *f)
+{
+    const metrics_timer_t *t = &f->timer;
+    if (t->paused || t->ringing) {
+        return t->ringing ? 0.0f : t->left_s;
+    }
+    float left = t->left_s - (float) (lv_tick_get() - f->base_ms) / 1000.0f;
+    return left > 0.0f ? left : 0.0f;
+}
+
+/* The parts that move: the ring, the time left and the blink while it rings. */
+static void timer_tick(ui_timer_face_t *f)
+{
+    const metrics_timer_t *t = &f->timer;
+    if (!t->valid) {
+        return;
+    }
+    float left = timer_left(f);
+    // Up, like a kitchen timer: 10:00 until a whole second has gone.
+    int secs = (int) ceilf(left - 0.05f);
+    if (secs < 0) {
+        secs = 0;
+    }
+    char text[16];
+    if (secs >= 3600) {
+        snprintf(text, sizeof(text), "%d:%02d:%02d", secs / 3600, (secs % 3600) / 60, secs % 60);
+    } else {
+        snprintf(text, sizeof(text), "%d:%02d", secs / 60, secs % 60);
+    }
+    const lv_font_t *font = secs >= 3600 ? &lv_font_montserrat_bold_32 : &lv_font_montserrat_bold_48;
+    if (lv_obj_get_style_text_font(f->value, 0) != font) {
+        lv_obj_set_style_text_font(f->value, font, 0);
+    }
+    if (strcmp(lv_label_get_text(f->value), text) != 0) {
+        lv_label_set_text(f->value, text);
+    }
+
+    int arc = t->ringing ? TIMER_ARC_RANGE : (int) (left / t->total_s * TIMER_ARC_RANGE + 0.5f);
+    if (arc > TIMER_ARC_RANGE) {
+        arc = TIMER_ARC_RANGE;
+    }
+    if (lv_arc_get_value(f->arc) != arc) {
+        lv_arc_set_value(f->arc, arc);
+    }
+    bool on = !t->ringing || (lv_tick_get() / TIMER_BLINK_MS) % 2 == 0;
+    lv_opa_t opa = on ? LV_OPA_COVER : LV_OPA_30;
+    if (lv_obj_get_style_opa(f->value, 0) != opa) {
+        lv_obj_set_style_opa(f->value, opa, 0);
+        set_arc_color(f->arc, on ? f->color : COLOR_HOT);
+    }
+}
+
+static const char *timer_title(const metrics_timer_t *t)
+{
+    switch (t->kind) {
+    case METRICS_TIMER_WORK:
+        return t->ringing ? "BREAK TIME" : "FOCUS";
+    case METRICS_TIMER_BREAK:
+        return t->ringing ? "BACK TO WORK" : "BREAK";
+    case METRICS_TIMER_REMINDER:
+        return "REMINDER";
+    default:
+        return t->ringing ? "TIME'S UP" : "TIMER";
+    }
+}
+
+static void update_timer(ui_screen_t *ui, const metrics_timer_t *timer, uint32_t updated_ms, metrics_ui_state_t state)
+{
+    ui_timer_face_t *f = &ui->timer;
+    if (!timer->valid) {
+        f->timer.valid = false;
+        lv_arc_set_value(f->arc, 0);
+        lv_obj_add_flag(f->col, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(f->more, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(f->hint, LV_OBJ_FLAG_HIDDEN);
+        set_arc_color(f->arc, COLOR_TIMER_TRACK);
+        return;
+    }
+    // A new snapshot: count down from what it says.
+    if (updated_ms != f->updated_ms || !f->timer.valid) {
+        f->updated_ms = updated_ms;
+        f->base_ms = lv_tick_get();
+    }
+    f->timer = *timer;
+    lv_obj_add_flag(f->hint, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(f->col, LV_OBJ_FLAG_HIDDEN);
+
+    uint32_t track;
+    timer_colors(timer->kind, &f->color, &track);
+    lv_obj_set_style_arc_color(f->arc, lv_color_hex(track), LV_PART_MAIN);
+    set_arc_color(f->arc, f->color);
+    lv_obj_set_style_opa(f->value, LV_OPA_COVER, 0);
+
+    lv_label_set_text(f->title.label, timer_title(timer));
+    set_title(&f->title, state == METRICS_UI_STALE ? COLOR_STALE : f->color, false);
+    set_text_color(f->value, timer->paused ? COLOR_TEXT_DIM : COLOR_TEXT);
+
+    if (strcmp(lv_label_get_text(f->label), timer->label) != 0) {
+        lv_label_set_text(f->label, timer->label);
+    }
+    if (timer->label[0] == '\0') {
+        lv_obj_add_flag(f->label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(f->label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    char info[32];
+    if (timer->paused) {
+        snprintf(info, sizeof(info), "paused");
+    } else if (timer->rounds > 0) {
+        snprintf(info, sizeof(info), "round %d of %d", timer->round, timer->rounds);
+    } else {
+        char span[20];
+        format_span(span, sizeof(span), (int) (timer->total_s + 0.5f));
+        snprintf(info, sizeof(info), "of %s", span);
+    }
+    lv_label_set_text(f->info, info);
+    set_text_color(f->info, timer->paused ? COLOR_STALE : COLOR_TEXT_DIM);
+
+    if (timer->more > 0) {
+        lv_label_set_text_fmt(f->more, "+%d MORE", timer->more);
+        lv_obj_remove_flag(f->more, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(f->more, LV_OBJ_FLAG_HIDDEN);
+    }
+    timer_tick(f);
+}
+
+static void timer_timer_cb(lv_timer_t *timer)
+{
+    (void) timer;
+    ui_screen_t *screens[] = {&s_cpu, &s_gpu};
+    for (int i = 0; i < 2; i++) {
+        if (!lv_obj_has_flag(screens[i]->timer.root, LV_OBJ_FLAG_HIDDEN)) {
+            timer_tick(&screens[i]->timer);
+        }
+    }
+}
+
 static void show_face(ui_screen_t *ui, metrics_face_t face)
 {
     lv_obj_t *roots[METRICS_FACE_COUNT] = {
@@ -1241,6 +1516,7 @@ static void show_face(ui_screen_t *ui, metrics_face_t face)
         [METRICS_FACE_DISK] = ui->disk.root,
         [METRICS_FACE_BATTERY] = ui->battery.root,
         [METRICS_FACE_IMAGE] = ui->image.root,
+        [METRICS_FACE_TIMER] = ui->timer.root,
     };
     for (int i = 0; i < METRICS_FACE_COUNT; i++) {
         if (i == (int) face) {
@@ -1279,6 +1555,9 @@ static void update_screen(ui_screen_t *ui, metrics_face_t face, metrics_source_t
     case METRICS_FACE_IMAGE:
         update_image(ui);
         break;
+    case METRICS_FACE_TIMER:
+        update_timer(ui, &snap->timer, snap->updated_ms, state);
+        break;
     case METRICS_FACE_RINGS:
         update_rings(ui, temp, temp_max, state);
         break;
@@ -1310,6 +1589,7 @@ void ui_watch_create(lv_display_t *disp_cpu, lv_display_t *disp_gpu)
     create_screen(&s_gpu, disp_gpu, UI_SCREEN_GPU, METRICS_SOURCE_GPU);
     lv_timer_create(clawd_timer_cb, CLAWD_TICK_MS, NULL);
     lv_timer_create(image_timer_cb, IMAGE_TICK_MS, NULL);
+    lv_timer_create(timer_timer_cb, TIMER_TICK_MS, NULL);
     ESP_LOGI(TAG, "Watch UI created");
 }
 
@@ -1328,6 +1608,10 @@ void ui_watch_update(const metrics_snapshot_t *snap)
     if (snap == 0) {
         return;
     }
-    update_screen(&s_cpu, snap->cpu_face, snap->cpu_source, snap);
-    update_screen(&s_gpu, snap->gpu_face, snap->gpu_source, snap);
+    // A running timer takes over the screen the host picked while the host is there.
+    bool takeover = snap->timer.valid && snap->state == METRICS_UI_LIVE;
+    metrics_face_t cpu_face = takeover && snap->timer.screen == UI_SCREEN_CPU ? METRICS_FACE_TIMER : snap->cpu_face;
+    metrics_face_t gpu_face = takeover && snap->timer.screen == UI_SCREEN_GPU ? METRICS_FACE_TIMER : snap->gpu_face;
+    update_screen(&s_cpu, cpu_face, snap->cpu_source, snap);
+    update_screen(&s_gpu, gpu_face, snap->gpu_source, snap);
 }

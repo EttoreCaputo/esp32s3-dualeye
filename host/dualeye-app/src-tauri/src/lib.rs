@@ -30,6 +30,11 @@
 //! Desktop (`dualeye_core::mcp`). It reaches the board through this app's
 //! [`Hub`], which lives as long as the app, across bridge restarts.
 //!
+//! Timers, reminders and a pomodoro (`dualeye_core::timers`) live here too,
+//! in `timers.json` next to the hub file: the bridge ticks them and the board
+//! counts the first one down and rings; the Timers tab, the voice and MCP
+//! clients set them.
+//!
 //! On macOS the app can install a root helper that reads the exact CPU power,
 //! which macOS 27 hides from ordinary apps (`power_helper`).
 
@@ -53,6 +58,7 @@ use dualeye_core::llm::{self, Llm, LlmConfig};
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage, Transcript};
 use dualeye_core::tts::{self, Tts, TtsConfig};
+use dualeye_core::timers::{self, Pomodoro, ShowOn, TimerInfo, Timers};
 use dualeye_core::voice::{self, Spoken, VoiceConfig};
 use dualeye_core::{
     Agent, Board, BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
@@ -213,8 +219,8 @@ impl Link {
                 self.logs.push_back(line.clone());
             }
             BridgeEvent::Firmware { firmware } => self.firmware = Some(firmware.clone()),
-            // `AppState` keeps faces and rotation.
-            BridgeEvent::Settings { .. } | BridgeEvent::Wake { .. } => {}
+            // `AppState` keeps faces and rotation, and the timers.
+            BridgeEvent::Settings { .. } | BridgeEvent::Wake { .. } | BridgeEvent::TimerFired { .. } => {}
             BridgeEvent::Transcript { id, transcript } => {
                 if self.transcripts.len() == TRANSCRIPTS {
                     self.transcripts.pop_front();
@@ -269,6 +275,8 @@ struct AppState {
     voice: Arc<Mutex<VoiceConfig>>,
     /// Handed to every bridge, like `faces`.
     claude_alerts: Arc<Mutex<AlertSettings>>,
+    /// Handed to every bridge; kept in their own file.
+    timers: Arc<Timers>,
     /// Speech-to-text: `off`, `starting`, `ready` or `error`, and why.
     stt_state: Arc<Mutex<(&'static str, Option<String>)>>,
     /// Text-to-speech, likewise.
@@ -899,6 +907,47 @@ async fn test_claude_alert() -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// The Timers tab: what's running and where it shows.
+#[derive(Serialize)]
+struct TimersInfo {
+    timers: Vec<TimerInfo>,
+    pomodoro: Option<Pomodoro>,
+    show_on: ShowOn,
+    /// The bridge says what a timer was for when it's up.
+    can_speak: bool,
+}
+
+fn timers_info_of(state: &AppState) -> TimersInfo {
+    let t = &state.timers;
+    TimersInfo { timers: t.list(), pomodoro: t.pomodoro(), show_on: t.show_on(), can_speak: state.voice.lock().unwrap().tts.is_some() }
+}
+
+#[tauri::command]
+fn timers_info(state: State<AppState>) -> TimersInfo {
+    timers_info_of(&state)
+}
+
+/// Run one of `Timers::tools` (`set_timer`, `control_timer`...), in the alerts' language.
+#[tauri::command]
+fn timer_tool(state: State<AppState>, name: String, arguments: serde_json::Value) -> Result<TimersInfo, String> {
+    let language = state.claude_alerts.lock().unwrap().language.clone();
+    state.timers.call_tool(&name, &arguments, &language).ok_or_else(|| format!("unknown timer tool {name}"))??;
+    Ok(timers_info_of(&state))
+}
+
+#[tauri::command]
+fn set_timer_screen(state: State<AppState>, show_on: ShowOn) -> TimersInfo {
+    state.timers.set_show_on(show_on);
+    timers_info_of(&state)
+}
+
+/// Silence whatever rings.
+#[tauri::command]
+fn dismiss_timers(state: State<AppState>) -> TimersInfo {
+    state.timers.dismiss();
+    timers_info_of(&state)
+}
+
 fn emit_flash(app: &AppHandle, event: FlashEvent) {
     let _ = app.emit("flash", &event);
 }
@@ -949,8 +998,8 @@ fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
     let handle = app.clone();
     let state = app.state::<AppState>();
     let (faces, rotation, hub, voice) = (state.faces.clone(), state.rotation.clone(), state.hub.clone(), state.voice.clone());
-    let claude_alerts = state.claude_alerts.clone();
-    Bridge::spawn(BridgeConfig { port, faces, rotation, hub, voice, claude_alerts, ..Default::default() }, move |event| {
+    let (claude_alerts, timers) = (state.claude_alerts.clone(), state.timers.clone());
+    Bridge::spawn(BridgeConfig { port, faces, rotation, hub, voice, claude_alerts, timers, ..Default::default() }, move |event| {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
             if let BridgeEvent::VoiceError { message } = &event {
@@ -1074,6 +1123,7 @@ pub fn run() {
                 esptool_dir,
                 voice: Arc::default(),
                 claude_alerts,
+                timers: Arc::new(Timers::open(timers::default_file())),
                 stt_state: Arc::new(Mutex::new(("off", None))),
                 tts_state: Arc::new(Mutex::new(("off", None))),
                 llm_state: Arc::new(Mutex::new(("off", None))),
@@ -1101,7 +1151,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

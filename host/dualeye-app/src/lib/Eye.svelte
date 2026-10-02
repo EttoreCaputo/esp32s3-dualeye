@@ -114,6 +114,8 @@
         {@render arc(USAGE_ARC_SIZE, screen.disk.color, COLOR.memTrack, screen.disk.pct)}
       {:else if screen.battery}
         {@render arc(USAGE_ARC_SIZE, screen.battery.color, COLOR.greenTrack, screen.battery.pct)}
+      {:else if screen.face === "timer"}
+        {@render arc(USAGE_ARC_SIZE, screen.timer?.color ?? COLOR.timerTrack, screen.timer?.track ?? COLOR.timerTrack, screen.timer?.pct ?? 0)}
       {:else if screen.face !== "image"}
         {@render arc(USAGE_ARC_SIZE, dev.accent, dev.track, screen.usagePct)}
         {#if screen.face === "rings"}
@@ -140,24 +142,44 @@
         </div>
       {/if}
     {:else if screen.net}
-      <div class="col" style:--y="2px">
-        {@render title(6)}
+      <div class="col" style:--y="4px">
+        {@render title(8)}
         <div class="value" style:color={screen.valueColor}>{screen.value}</div>
-        <div class="row" style:color={COLOR.cyan} style:margin-bottom="4px">↓ {screen.net.unit}</div>
-        <div class="row" style:color={COLOR.green}>↑ {screen.net.tx}</div>
+        <div class="row" style:color={COLOR.cyan} style:gap="5px" style:margin-top="6px"><span class="icon">↓</span>{screen.net.unit}</div>
+        <div class="divider"></div>
+        <div class="row big" style:color={COLOR.green} style:gap="5px"><span class="icon">↑</span>{screen.net.tx}</div>
       </div>
     {:else if screen.disk}
-      <div class="col" style:--y="2px">
-        {@render title(6)}
+      <div class="col" style:--y="4px">
+        {@render title(8)}
         <div class="value" style:color={screen.valueColor}>{screen.value}</div>
-        <div class="row dim" style:margin-bottom="4px">{screen.disk.space}</div>
+        <div class="row dim" style:margin-top="6px">{screen.disk.space}</div>
         {#if screen.disk.read !== null}
-          <div class="row" style:gap="10px">
-            {@render pair("R", COLOR.mem, screen.disk.read)}
-            {@render pair("W", COLOR.warm, screen.disk.write ?? "--")}
-          </div>
+          <div class="divider"></div>
+          {#each [["R", COLOR.mem, screen.disk.read], ["W", COLOR.warm, screen.disk.write ?? "--"]] as [name, color, value] (name)}
+            <div class="row io" style:gap="6px">
+              <span class="title io-name" style:color={color}>{name}</span>
+              <span class="io-value">{value}</span>
+            </div>
+          {/each}
         {/if}
       </div>
+    {:else if screen.face === "timer"}
+      {@const t = screen.timer}
+      {#if t}
+        <div class="col" style:--y="2px">
+          <span class="title" style:color={t.titleColor} style:margin-bottom="8px">{t.title}</span>
+          <div class="value" class:small={t.small} style:color={t.valueColor} style:opacity={t.dim ? 0.3 : 1}>{t.value}</div>
+          {#if t.label}<span class="title timer-label" style:margin-top="8px">{t.label}</span>{/if}
+          <div class="row" style:color={t.infoColor} style:margin-top="4px">{t.info}</div>
+        </div>
+        {#if t.more}<span class="more">{t.more}</span>{/if}
+      {:else}
+        <div class="col" style:--y="0px">
+          <span class="title" style:color={COLOR.textDim} style:margin-bottom="6px">NO TIMERS</span>
+          <div class="row dim hint">Say "Alexa, set a<br />timer for 10 minutes"</div>
+        </div>
+      {/if}
     {:else if screen.battery}
       <div class="col" style:--y="2px">
         {@render title(6)}
@@ -298,6 +320,46 @@
     font: 700 48px/35px "Montserrat", sans-serif;
     /* LVGL has no tracking; Montserrat's default is already a touch wide at 48 px. */
     letter-spacing: -0.5px;
+  }
+  /* The bold 32 font, for a timer over an hour. */
+  .value.small {
+    font: 700 32px/23px "Montserrat", sans-serif;
+  }
+  .divider {
+    width: 56px;
+    height: 1px;
+    margin: 7px 0;
+    background: #3a3a3c;
+  }
+  .icon {
+    font: 700 12px/13px "Montserrat", sans-serif;
+  }
+  .row.big {
+    font: 500 16px/18px "Montserrat", sans-serif;
+  }
+  .row.io + .row.io {
+    margin-top: 2px;
+  }
+  .io-name {
+    width: 10px;
+  }
+  .io-value {
+    min-width: 72px;
+    text-align: left;
+  }
+  .timer-label {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #fff;
+  }
+  .more {
+    position: absolute;
+    left: 50%;
+    bottom: 40px;
+    transform: translateX(-50%);
+    font: 500 12px/14px "Montserrat", sans-serif;
+    color: #9a9a9c;
   }
   .bar {
     border-radius: 999px;
