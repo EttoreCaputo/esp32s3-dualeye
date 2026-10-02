@@ -1,5 +1,7 @@
 #include "ui_voice.h"
 
+#include "ui_eyes.h"
+
 #define RING_WIDTH 8
 #define SPINNER_ARC_DEG 70
 #define SPINNER_PERIOD_MS 1200
@@ -27,6 +29,8 @@ typedef struct {
 
 static ui_voice_t s_voice[BOARD_LCD_COUNT];
 static int s_level_step;
+static bool s_eyes = true;
+static voice_state_t s_state = VOICE_IDLE;
 
 static void style_arc(lv_obj_t *arc)
 {
@@ -61,9 +65,11 @@ void ui_voice_create(lv_display_t *const displays[BOARD_LCD_COUNT])
         lv_obj_set_style_arc_color(v->spinner, lv_color_hex(THINKING_COLOR), LV_PART_INDICATOR);
         lv_spinner_set_anim_params(v->spinner, SPINNER_PERIOD_MS, SPINNER_ARC_DEG);
     }
+    // Over the ring: when the eyes are open they cover the whole screen.
+    ui_eyes_create(displays);
 }
 
-void ui_voice_show(voice_state_t state)
+static void show_ring(voice_state_t state)
 {
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
         ui_voice_t *v = &s_voice[i];
@@ -89,8 +95,37 @@ void ui_voice_show(voice_state_t state)
     }
 }
 
+void ui_voice_show(voice_state_t state)
+{
+    s_state = state;
+    if (s_eyes) {
+        ui_eyes_show(state);
+    } else {
+        show_ring(state);
+    }
+}
+
+void ui_voice_set_eyes(bool on)
+{
+    if (on == s_eyes) {
+        return;
+    }
+    s_eyes = on;
+    if (on) {
+        show_ring(VOICE_IDLE);
+        ui_eyes_show(s_state);
+    } else {
+        ui_eyes_show(VOICE_IDLE);
+        show_ring(s_state);
+    }
+}
+
 void ui_voice_set_level(float level)
 {
+    if (s_eyes) {
+        ui_eyes_set_level(level);
+        return;
+    }
     int step = (int) (level * LEVEL_STEPS + 0.5f);
     if (step == s_level_step) {
         return;

@@ -105,19 +105,38 @@
     };
   });
 
-  // The speaker's volume lives on the board: read it when the tab opens.
+  // The speaker's volume and the eyes live on the board: read them when the tab opens.
   let volume = $state<number | null>(null);
+  let eyes = $state<boolean | null>(null);
   $effect(() => {
     if (!open || tab !== "voice" || monitor.link !== "connected") return;
     let alive = true;
     monitor
-      .boardVolume()
-      .then((v) => alive && (volume = v))
-      .catch(() => alive && (volume = null));
+      .boardVoice()
+      .then((b) => {
+        if (!alive) return;
+        volume = b.volume;
+        eyes = b.eyes;
+      })
+      .catch(() => {
+        if (!alive) return;
+        volume = null;
+        eyes = null;
+      });
     return () => {
       alive = false;
     };
   });
+
+  async function setEyes(on: boolean) {
+    eyes = on;
+    try {
+      await monitor.setBoardEyes(on);
+    } catch (e) {
+      eyes = !on;
+      voiceError = String(e);
+    }
+  }
 
   async function setVolume(percent: number) {
     volume = percent;
@@ -565,6 +584,11 @@
               <input type="checkbox" checked={voice.settings.llm} onchange={(e) => setVoice({ llm: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
               <span class="slabel">Understand with a language model</span>
+            </label>
+            <label class="switch" title={eyes === null ? "Needs the board connected, with firmware 1.0.1 or newer" : ""}>
+              <input type="checkbox" checked={eyes ?? true} disabled={eyes === null} onchange={(e) => setEyes(e.currentTarget.checked)} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Show animated eyes while talking, instead of the ring</span>
             </label>
             <dl class="facts">
               <div>

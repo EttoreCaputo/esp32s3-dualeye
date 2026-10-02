@@ -532,25 +532,46 @@ fn board() -> Board {
     Board::new(None, &format!("dualeye-app/{}", env!("CARGO_PKG_VERSION")))
 }
 
-/// The speaker's volume as the board has it (it keeps it in NVS).
+/// The board's own voice settings (it keeps them in NVS); `None` where it
+/// doesn't say (`eyes`: a firmware before 1.0.1).
+#[derive(serde::Serialize)]
+struct BoardVoice {
+    volume: Option<u8>,
+    eyes: Option<bool>,
+}
+
 #[tauri::command]
-async fn board_volume() -> Result<Option<u8>, String> {
+async fn board_voice() -> Result<BoardVoice, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let state = board().call_tool("get_state", serde_json::json!({})).map_err(|e| e.to_string())?;
-        Ok(state.structured_content.and_then(|s| s.pointer("/audio/volume")?.as_u64()).map(|v| v as u8))
+        let s = state.structured_content.unwrap_or_default();
+        Ok(BoardVoice {
+            volume: s.pointer("/audio/volume").and_then(|v| v.as_u64()).map(|v| v as u8),
+            eyes: s.pointer("/voice/eyes").and_then(|v| v.as_bool()),
+        })
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
+fn call_board(name: &'static str, args: serde_json::Value) -> Result<(), String> {
+    let result = board().call_tool(name, args).map_err(|e| e.to_string())?;
+    if result.is_error { Err(result.text()) } else { Ok(()) }
+}
+
 #[tauri::command]
 async fn set_board_volume(percent: u8) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let result = board().call_tool("set_volume", serde_json::json!({"percent": percent})).map_err(|e| e.to_string())?;
-        if result.is_error { Err(result.text()) } else { Ok(()) }
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || call_board("set_volume", serde_json::json!({"percent": percent})))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Animated eyes (or the ring) while the board talks with you.
+#[tauri::command]
+async fn set_board_eyes(on: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || call_board("set_eyes", serde_json::json!({"on": on})))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Say a test sentence through the board, with the voice of `language`.
@@ -922,7 +943,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_volume, set_board_volume, test_voice])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, test_voice])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

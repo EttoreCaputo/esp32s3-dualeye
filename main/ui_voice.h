@@ -1,7 +1,8 @@
 #pragma once
 
-/* The "eyes" overlay: a ring round the edge of both screens that shows the
- * voice state (listening, thinking, speaking, error) over the watch face. */
+/* What the screens show of the voice state (listening, thinking, speaking,
+ * error): animated eyes over the whole screen (ui_eyes.h), or else a ring
+ * round the edge over the watch face. */
 
 #include "board_display.h"
 #include "lvgl.h"
@@ -18,8 +19,11 @@ void ui_voice_create(lv_display_t *const displays[BOARD_LCD_COUNT]);
 /** With the LVGL lock held. */
 void ui_voice_show(voice_state_t state);
 
+/** Eyes (true, the default) or the ring. With the LVGL lock held. */
+void ui_voice_set_eyes(bool on);
+
 /** Mic level while listening, speaker level while speaking, 0..1: a brighter arc at the top of the ring
- * that grows with it. With the LVGL lock held. */
+ * that grows with it, or eyes that move with it. With the LVGL lock held. */
 void ui_voice_set_level(float level);
 
 #ifdef __cplusplus

@@ -62,7 +62,7 @@
 
   <section class="hero" bind:clientWidth={heroW}>
     <div class="board" class:off={board === "off"}>
-      <Board cpu={screen("cpu")} gpu={screen("gpu")} {board} {size} cpuGlow={glow("cpu")} gpuGlow={glow("gpu")} {pixels} {rotation} voice={monitor.voice} />
+      <Board cpu={screen("cpu")} gpu={screen("gpu")} {board} {size} cpuGlow={glow("cpu")} gpuGlow={glow("gpu")} {pixels} {rotation} voice={monitor.voice} eyes={monitor.eyes} />
     </div>
 
     <div class="caption">

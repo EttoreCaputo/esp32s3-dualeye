@@ -77,18 +77,20 @@ In the app, open Settings → **Voice**:
 1. Turn on **Transcribe what the board hears**.
 2. Under **This computer** the app says what it found (processor, memory, GPU) and which models suit it; **Use …** picks them and downloads what's missing (about 3 GB for the default pair, once).
 3. Press **Install Piper**, the program that speaks the answers (about 100 MB, once), and download a voice for each language (the defaults are ticked).
-4. Say "Alexa", wait for the cyan ring, and talk.
+4. Say "Alexa", wait for the cyan eyes, and talk.
 
 ### Talking to it
 
-The ring round both screens (and round the app's mirror) shows what the board is doing:
+After the wake word the screens turn into two animated eyes (the app's mirror shows them too) that tell you what the board is doing:
 
-| Ring | Meaning |
+| Eyes | Meaning |
 |------|---------|
-| Cyan, with an arc that follows your voice | Listening: after the wake word, and for 4 s after each answer |
-| Amber, turning | Thinking: your words are being transcribed and understood |
-| Green, with the speaker's level | Speaking |
-| Red, with two falling notes | Something failed, or no words were heard; say "Alexa" again |
+| Cyan, wide open, glancing around and growing with your voice | Listening: after the wake word, and for 4 s after each answer |
+| Amber, looking up from side to side, one eye squinting | Thinking: your words are being transcribed and understood |
+| Green, smiling and bobbing with the speaker's level | Speaking |
+| Red and sad, with a shake and two falling notes | Something failed, or no words were heard; say "Alexa" again |
+
+They close and the watch faces come back when the conversation ends. Turn off **Show animated eyes while talking** in the Voice tab (firmware 1.0.1) for a ring round the faces instead, in the same colours: cyan with an arc that follows your voice, amber turning, green with the speaker's level, red.
 
 - **Follow-ups.** After an answer the board keeps listening for 4 s, so *"e anche a destra"* or *"a bit more"* works straight away; the last exchanges are remembered for 3 minutes. Turn it off with **Keep listening after an answer**.
 - **Interrupting.** Say "Alexa" while the board talks: it stops and listens.
@@ -125,8 +127,8 @@ Nothing you say leaves your computer. There is no account, no cloud service and 
 
 | Problem | What to do |
 |---------|------------|
-| The ring doesn't light when you say "Alexa" | Check the mic isn't muted, and speak from 1–2 m, towards the board. The Voice tab's Board status shows `idle` when it's listening for the wake word |
-| The ring lights, then goes red | No words were heard (too far, too quiet), or a helper failed: the Voice tab shows the error under the status |
+| The eyes (or the ring) don't appear when you say "Alexa" | Check the mic isn't muted, and speak from 1–2 m, towards the board. The Voice tab's Board status shows `idle` when it's listening for the wake word |
+| The eyes appear, then turn red | No words were heard (too far, too quiet), or a helper failed: the Voice tab shows the error under the status |
 | "Speech-to-text: Not working" | The Whisper model isn't downloaded, or whisper-server couldn't start: see `whisper-server.log` in the [data folder](#where-the-app-keeps-its-files)'s `models/` |
 | "Language model: Not working" | The model isn't downloaded, or doesn't fit in memory: pick the recommended one, or a smaller one. `llama-server.log` is next to the models. Meanwhile the fixed phrases answer |
 | "Text-to-speech: Not working" | Piper isn't installed, or no voice is downloaded for a language. Reinstall it from the Voice tab |
@@ -152,7 +154,7 @@ For Claude Desktop, add the same command to `claude_desktop_config.json` (Settin
 
 | Tool | From | Does |
 |------|------|------|
-| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `set_mic`, `set_wake_word`, `set_volume`, `get_state` | Board | Passed through as the firmware describes them ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
+| `set_face`, `set_rotation`, `set_brightness`, `show_text`, `set_mic`, `set_wake_word`, `set_volume`, `set_eyes`, `get_state` | Board | Passed through as the firmware describes them ([docs/protocol.md](docs/protocol.md#board-tools)); a newer firmware's tools show up without a host update |
 | `get_metrics` | Host | CPU and GPU temperature, load, clock, power, memory, fans |
 | `get_claude_usage` | Host | Claude Code tokens in the 5-hour window and today, plan limits used, time to reset, working or idle |
 | `speak` | Host | Says a short text out loud through the board, in Italian or English; needs the app with spoken replies on, or `dualeye --tts`, running |

@@ -12,6 +12,7 @@
 #include "metrics_model.h"
 #include "playback.h"
 #include "ui_toast.h"
+#include "ui_voice.h"
 #include "voice.h"
 
 #define TEXT_MAX 160
@@ -218,6 +219,22 @@ static bool tool_set_volume(const cJSON *args, char *text, cJSON **structured)
     return true;
 }
 
+static bool tool_set_eyes(const cJSON *args, char *text, cJSON **structured)
+{
+    const cJSON *on = cJSON_GetObjectItemCaseSensitive(args, "on");
+    if (!cJSON_IsBool(on)) {
+        snprintf(text, TEXT_MAX, "on must be true or false");
+        return false;
+    }
+    bool eyes = cJSON_IsTrue(on);
+    board_settings_set_eyes(eyes);
+    lvgl_port_lock();
+    ui_voice_set_eyes(eyes);
+    lvgl_port_unlock();
+    snprintf(text, TEXT_MAX, eyes ? "talking shows animated eyes" : "talking shows a ring round the screens");
+    return true;
+}
+
 static const char *metrics_state_name(metrics_ui_state_t state)
 {
     switch (state) {
@@ -254,6 +271,7 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
     }
     cJSON *voice = cJSON_AddObjectToObject(st, "voice");
     cJSON_AddBoolToObject(voice, "available", voice_available());
+    cJSON_AddBoolToObject(voice, "eyes", settings.eyes);
     if (voice_available()) {
         cJSON_AddStringToObject(voice, "wake_word", voice_wake_word());
         cJSON_AddStringToObject(voice, "wake_word_id", voice_wake_word_id());
@@ -346,6 +364,13 @@ static const tool_t TOOLS[] = {
         .schema = "{\"type\":\"object\",\"properties\":{"
                   "\"percent\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}},\"required\":[\"percent\"]}",
         .fn = tool_set_volume,
+    },
+    {
+        .name = "set_eyes",
+        .description = "Choose what the screens show during a voice conversation: animated eyes (on, the default) "
+                       "or a coloured ring round the watch face (off). The board remembers it.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"on\":{\"type\":\"boolean\"}},\"required\":[\"on\"]}",
+        .fn = tool_set_eyes,
     },
     {
         .name = "get_state",

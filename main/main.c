@@ -93,6 +93,7 @@ void app_main(void)
     lvgl_port_lock();
     ui_watch_create(s_displays[UI_SCREEN_CPU], s_displays[UI_SCREEN_GPU]);
     ui_voice_create(s_displays);
+    ui_voice_set_eyes(settings.eyes);
     ui_toast_create(s_displays);
 
     metrics_snapshot_t snap;

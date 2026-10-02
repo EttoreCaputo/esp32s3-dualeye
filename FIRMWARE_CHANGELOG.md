@@ -7,6 +7,10 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.0.1
+
+- Animated eyes: after "Alexa" the screens become two cartoon eyes that open, watch you while you talk, look up and think, smile and bob along as the board answers, and close when it's done. Turn them off in the app's Voice tab to get the ring back.
+
 ## 1.0.0
 
 - Voice, finished: with voice on in the app, a small language model on your computer understands what you say, in Italian or English, and the board answers out loud.

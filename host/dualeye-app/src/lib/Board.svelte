@@ -4,10 +4,11 @@
 -->
 <script lang="ts">
   import Eye from "./Eye.svelte";
+  import VoiceEyes from "./VoiceEyes.svelte";
   import type { Rotations, Screen } from "./firmware";
   import type { BoardState, VoiceState } from "./monitor.svelte";
 
-  let { cpu, gpu, board, size, cpuGlow, gpuGlow, pixels = false, rotation = { cpu: 0, gpu: 0 }, voice = "idle" }: {
+  let { cpu, gpu, board, size, cpuGlow, gpuGlow, pixels = false, rotation = { cpu: 0, gpu: 0 }, voice = "idle", eyes = true }: {
     cpu: Screen;
     gpu: Screen;
     /** How the board has turned each screen: shown as a badge, the mirror stays upright to stay readable. */
@@ -17,8 +18,10 @@
     cpuGlow: { color: string; level: number };
     gpuGlow: { color: string; level: number };
     pixels?: boolean;
-    /** The board's voice overlay: a ring round both screens, as the firmware draws it (ui_voice.c). */
+    /** The board's voice overlay, as the firmware draws it (ui_voice.c). */
     voice?: VoiceState;
+    /** The board draws eyes over the whole screens instead of the ring (ui_eyes.c). */
+    eyes?: boolean;
   } = $props();
 
   let tiltX = $state(0);
@@ -83,7 +86,7 @@
       <div class="bezel">
         <div class="well" class:inspect={pixels} role="presentation" onpointermove={(e) => inspect("cpu", e)} onpointerleave={() => (loupe = null)}>
           <Eye id="cpu" screen={cpu} {board} size={lcd} />
-          {#if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
+          {#if lit && eyes}<VoiceEyes eye={0} size={lcd} {voice} />{:else if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
           <div class="glass"></div>
           {#if pixels && loupe?.id === "cpu"}
             <div class="loupe" style:left="{loupe.x}px" style:top="{loupe.y}px" style:--l="{LOUPE}px">
@@ -143,7 +146,7 @@
       <div class="bezel">
         <div class="well" class:inspect={pixels} role="presentation" onpointermove={(e) => inspect("gpu", e)} onpointerleave={() => (loupe = null)}>
           <Eye id="gpu" screen={gpu} {board} size={lcd} />
-          {#if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
+          {#if lit && eyes}<VoiceEyes eye={1} size={lcd} {voice} />{:else if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
           <div class="glass"></div>
           {#if pixels && loupe?.id === "gpu"}
             <div class="loupe" style:left="{loupe.x}px" style:top="{loupe.y}px" style:--l="{LOUPE}px">

@@ -158,6 +158,8 @@ type Status = {
 };
 
 export type Link = "searching" | "connected" | "offline";
+/** The voice settings the board keeps; null where it doesn't say. */
+export type BoardVoice = { volume: number | null; eyes: boolean | null };
 /** Mirrors `metrics_ui_state_t` plus the moments the firmware is not running the UI. */
 export type BoardState = "off" | "boot" | "waiting" | "live" | "stale";
 export type Sample = { t: number; cpuT?: number; cpuL?: number; gpuT?: number; gpuL?: number };
@@ -192,6 +194,8 @@ class Monitor {
   rotation = $state<Rotations>({ ...DEFAULT_ROTATIONS });
   /** The board's voice overlay, mirrored. */
   voice = $state<VoiceState>("idle");
+  /** Whether the board shows eyes for its voice (else the ring); read once it's connected. */
+  eyes = $state(true);
   /** Transcribed utterances, oldest first. */
   transcripts = $state<TranscriptEntry[]>([]);
 
@@ -248,6 +252,7 @@ class Monitor {
     this.logs = s.logs;
     this.voice = s.voice ?? "idle";
     this.transcripts = s.transcripts;
+    if (s.link === "connected") this.boardVoice().catch(() => {});
   }
 
   #apply(e: BridgeEvent) {
@@ -266,6 +271,7 @@ class Monitor {
         this.shown = null;
         this.boardFirmware = null;
         this.voice = "idle";
+        if (!this.preview) setTimeout(() => this.boardVoice().catch(() => {}), BOOT_MS + 500);
         break;
       case "snapshot":
         this.last = e.snapshot;
@@ -477,10 +483,12 @@ class Monitor {
     await invoke("install_piper");
   }
 
-  /** The board's speaker volume; null when the board can't be asked. */
-  async boardVolume(): Promise<number | null> {
-    if (this.preview) return previewVolume;
-    return invoke<number | null>("board_volume");
+  /** The board's speaker volume and eyes; null where the board doesn't say. */
+  async boardVoice(): Promise<BoardVoice> {
+    if (this.preview) return { volume: previewVolume, eyes: previewEyes };
+    const b = await invoke<BoardVoice>("board_voice");
+    this.eyes = b.eyes ?? false;
+    return b;
   }
 
   async setBoardVolume(percent: number) {
@@ -489,6 +497,16 @@ class Monitor {
       return;
     }
     await invoke("set_board_volume", { percent });
+  }
+
+  async setBoardEyes(on: boolean) {
+    if (this.preview) {
+      previewEyes = on;
+      this.eyes = on;
+      return;
+    }
+    await invoke("set_board_eyes", { on });
+    this.eyes = on;
   }
 
   async testVoice(language: string) {
@@ -520,6 +538,7 @@ const previewMcp: McpInfo = {
 let previewClaudeLink: ClaudeLink = { connected: false, chained: null, last_update_s: null, settings_path: "~/.claude/settings.json" };
 
 let previewVolume = 60;
+let previewEyes = true;
 
 const previewVoice: VoiceInfo = {
   settings: {

@@ -386,8 +386,9 @@ fn rules(link: &Link, session: &Session, text: &str, language: &str) -> (String,
 }
 
 /// Board tools the voice agent doesn't get: muted by voice, the board
-/// couldn't be unmuted by voice.
-const NOT_BY_VOICE: &[&str] = &["set_mic"];
+/// couldn't be unmuted by voice; the eyes are a setting for the app, not
+/// worth a tool in a small model's prompt.
+const NOT_BY_VOICE: &[&str] = &["set_mic", "set_eyes"];
 
 /// The board's tools as the voice agent gets them: without those in
 /// [`NOT_BY_VOICE`], plus the host's `get_metrics`.
