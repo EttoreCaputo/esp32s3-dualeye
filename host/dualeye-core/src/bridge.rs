@@ -14,17 +14,25 @@
 //! board through this connection. When one of them changes a face or a
 //! rotation, the bridge reads the board's state back into `faces` and
 //! `rotation` and raises [`BridgeEvent::Settings`], so the frontend follows.
+//!
+//! The hub also brings Claude Code's hook events (`host/claude_hook`). With
+//! the Claude usage of each snapshot they go to a thread of their own, which
+//! tells the person on the board when Claude needs them, finished a long turn
+//! or is running out of its limits ([`crate::claude::alerts`]), once the board
+//! is out of any voice conversation.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::json;
 
-use crate::claude::ClaudeUsage;
+use crate::claude::alerts::{self, Alert, AlertSettings, Alerts, HookEvent};
+use crate::claude::{ClaudeMetrics, ClaudeUsage};
 use crate::firmware::{self, BoardFirmware};
 use crate::hub::Hub;
 use crate::link::{CallError, Link, LinkEvent};
@@ -56,6 +64,8 @@ pub struct BridgeConfig {
     /// a frontend can turn transcription on or change the model while the
     /// bridge runs; each utterance uses the config of the moment it ends.
     pub voice: Arc<Mutex<VoiceConfig>>,
+    /// Which Claude Code alerts to give, and how. Shared like `voice`.
+    pub claude_alerts: Arc<Mutex<AlertSettings>>,
 }
 
 impl Default for BridgeConfig {
@@ -68,6 +78,7 @@ impl Default for BridgeConfig {
             hub: None,
             adopt_board_settings: true,
             voice: Arc::default(),
+            claude_alerts: Arc::default(),
         }
     }
 }
@@ -111,6 +122,9 @@ pub enum BridgeEvent {
     /// hub client changed them. `faces` and `rotation` in the config hold the
     /// new values already.
     Settings { faces: Faces, rotation: Rotations },
+    /// An alert about Claude Code, and how it went: `error` says why it
+    /// didn't reach the board (or wasn't spoken).
+    ClaudeAlert { alert: Alert, text: String, error: Option<String> },
     Disconnected { port: String, reason: String, permission_denied: bool },
 }
 
@@ -191,6 +205,29 @@ pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
             Err(e) => sink(BridgeEvent::VoiceError { message: e.to_string() }),
         });
     }
+    let (alert_tx, alert_rx) = mpsc::channel::<AlertInput>();
+    let target = Mutex::new(None::<AlertTarget>);
+    if let Some(hub) = &config.hub {
+        let tx = Mutex::new(alert_tx.clone());
+        hub.set_claude_hook(Some(Arc::new(move |json| {
+            if let Some(event) = alerts::parse_hook(&json) {
+                let _ = tx.lock().unwrap().send(AlertInput::Hook(event, Instant::now()));
+            }
+        })));
+    }
+    thread::scope(|scope| {
+        let _ = thread::Builder::new()
+            .name("dualeye-alerts".into())
+            .spawn_scoped(scope, || alert_loop(config, stop, &target, alert_rx, &on_event));
+        connect_loop(config, stop, &alert_tx, &target, &on_event);
+    });
+    if let Some(hub) = &config.hub {
+        hub.set_claude_hook(None);
+    }
+}
+
+/// Connect to the board, run a session, and again when it ends, until `stop`.
+fn connect_loop(config: &BridgeConfig, stop: &AtomicBool, alert_tx: &Sender<AlertInput>, target: &Mutex<Option<AlertTarget>>, on_event: &EventSink) {
     let mut collector = Collector::new();
     let mut claude = ClaudeUsage::new();
     let mut delay = Duration::from_secs(1);
@@ -206,7 +243,8 @@ pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
             continue;
         };
         let started = Instant::now();
-        let result = session(&port, config, stop, &mut collector, &mut claude, &on_event);
+        let result = session(&port, config, stop, &mut collector, &mut claude, alert_tx, target, on_event);
+        *target.lock().unwrap() = None;
         if let Some(hub) = &config.hub {
             let why = result.as_ref().err().map_or_else(|| "the bridge stopped".to_string(), |e| format!("board disconnected: {e}"));
             hub.set_unavailable(&why);
@@ -236,16 +274,20 @@ struct Heard {
     old_firmware: Mutex<Option<BoardFirmware>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn session(
     port: &str,
     config: &BridgeConfig,
     stop: &AtomicBool,
     collector: &mut Collector,
     claude: &mut ClaudeUsage,
+    alert_tx: &Sender<AlertInput>,
+    target: &Mutex<Option<AlertTarget>>,
     on_event: &EventSink,
 ) -> io::Result<()> {
     let heard = Arc::new(Heard::default());
     let speaker = Arc::new(Speaker::default());
+    let voice_state = Arc::new(Mutex::new("idle".to_string()));
     let latest = Arc::new(Mutex::new(None::<Snapshot>));
     let voice_changed_settings = Arc::new(AtomicBool::new(false));
     // The pipeline needs the link to answer the board; it gets it once open.
@@ -266,6 +308,7 @@ fn session(
         let heard = heard.clone();
         let sink = on_event.clone();
         let speaker = speaker.clone();
+        let voice_state = voice_state.clone();
         Link::open(port, move |event| match event {
             LinkEvent::Log(line) => sink(BridgeEvent::BoardLog { line }),
             LinkEvent::Text(line) => {
@@ -283,6 +326,7 @@ fn session(
             }),
             LinkEvent::Notification { method, params } if method == "voice_state" => {
                 if let Some(state) = params["state"].as_str() {
+                    *voice_state.lock().unwrap() = state.to_string();
                     sink(BridgeEvent::VoiceState { state: state.to_string() });
                 }
             }
@@ -343,6 +387,8 @@ fn session(
                         hub.attach(link.clone(), hello.clone(), port);
                         hub.set_say(Some(say_fn(&link, &speaker, config)));
                     }
+                    *target.lock().unwrap() =
+                        Some(AlertTarget { link: Arc::downgrade(&link), speaker: speaker.clone(), voice_state: voice_state.clone() });
                     report(BoardFirmware::Version { version: hello.firmware, idf: hello.idf, protocol: hello.protocol });
                     if config.adopt_board_settings {
                         // Otherwise `pushed` stays empty and ours are pushed below.
@@ -387,6 +433,9 @@ fn session(
         snapshot.face = Some(*config.faces.lock().unwrap());
         snapshot.rot = Some(*config.rotation.lock().unwrap()).filter(|r| !r.is_upright());
         snapshot.claude = claude.sample();
+        if let Some(metrics) = &snapshot.claude {
+            let _ = alert_tx.send(AlertInput::Metrics(metrics.clone()));
+        }
         if let Some(hub) = &config.hub {
             hub.set_snapshot(&snapshot);
         }
@@ -405,6 +454,60 @@ fn session(
         sleep_unless_stopped(next - now, stop);
     }
     Ok(())
+}
+
+/// What the alerts thread gets: a hook event (with when it came) or the
+/// Claude usage of a snapshot.
+enum AlertInput {
+    Hook(HookEvent, Instant),
+    Metrics(ClaudeMetrics),
+}
+
+/// The board the alerts go to, while a session has one.
+struct AlertTarget {
+    link: Weak<Link>,
+    speaker: Arc<Speaker>,
+    /// What the board's voice overlay shows, from its `voice_state`.
+    voice_state: Arc<Mutex<String>>,
+}
+
+/// An alert waits this long at most for a voice conversation to end.
+const CONVERSATION_WAIT: Duration = Duration::from_secs(20);
+
+fn alert_loop(config: &BridgeConfig, stop: &AtomicBool, target: &Mutex<Option<AlertTarget>>, rx: Receiver<AlertInput>, on_event: &EventSink) {
+    let mut alerts = Alerts::default();
+    while !stop.load(Ordering::Relaxed) {
+        let input = match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(input) => input,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let settings = config.claude_alerts.lock().unwrap().clone();
+        let alert = match &input {
+            AlertInput::Hook(event, at) => alerts.on_hook(event, &settings, *at),
+            AlertInput::Metrics(metrics) => alerts.on_metrics(metrics, &settings),
+        };
+        let Some(alert) = alert else { continue };
+        let error = give_alert(config, stop, target, &settings, &alert).err();
+        let text = alert.words(&settings.language).spoken;
+        on_event(BridgeEvent::ClaudeAlert { alert, text, error });
+    }
+}
+
+/// Wait for the board to be out of a conversation, then show and say `alert`.
+fn give_alert(config: &BridgeConfig, stop: &AtomicBool, target: &Mutex<Option<AlertTarget>>, settings: &AlertSettings, alert: &Alert) -> Result<(), String> {
+    let board = || {
+        let target = target.lock().unwrap();
+        let t = target.as_ref()?;
+        Some((t.link.upgrade()?, t.speaker.clone(), t.voice_state.clone()))
+    };
+    let (link, speaker, voice_state) = board().ok_or("the board isn't connected")?;
+    let until = Instant::now() + CONVERSATION_WAIT;
+    while *voice_state.lock().unwrap() != "idle" && Instant::now() < until && !stop.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(250));
+    }
+    let tts = if settings.speak { config.voice.lock().unwrap().tts.clone() } else { None };
+    alerts::deliver(&link, &speaker, tts.as_deref(), alert, &settings.language)
 }
 
 /// `host/say` for the hub: speak with the voice config of the moment.

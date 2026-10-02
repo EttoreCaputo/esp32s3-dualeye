@@ -30,6 +30,21 @@ export type HubStatus = { clients: number; calls: number; last_tool: string | nu
 /** How MCP clients start the server (this app with `--mcp`), and who is using it. */
 export type McpInfo = { command: string | null; args: string[]; hub: HubStatus | null; hub_error: string | null };
 export type ClaudeLink = { connected: boolean; chained: string | null; last_update_s: number | null; settings_path: string | null };
+/** `AlertSettings` in dualeye-core: which Claude Code alerts the board gives. */
+export type ClaudeAlertSettings = {
+  needs_you: boolean;
+  done: boolean;
+  done_after_s: number;
+  usage: boolean;
+  speak: boolean;
+  language: string;
+};
+export type ClaudeAlertsInfo = {
+  settings: ClaudeAlertSettings;
+  hooks: { connected: boolean; last_event_s: number | null; settings_path: string | null };
+  can_speak: boolean;
+  last: { text: string; error: string | null; age_s: number } | null;
+};
 export type Snapshot = { v: number; ts: number; cpu?: Metrics; gpu?: Metrics; fans?: Fan[]; face?: Faces; rot?: Rotations; claude?: ClaudeMetrics };
 export type PortInfo = { name: string; vid: number; pid: number; product: string | null; is_board: boolean };
 export type Reading = { source: string; label: string; value: number; unit: string };
@@ -421,6 +436,30 @@ class Monitor {
     return invoke<ClaudeLink>(connect ? "claude_connect" : "claude_disconnect");
   }
 
+  async claudeAlerts(): Promise<ClaudeAlertsInfo> {
+    if (this.preview) return previewAlerts;
+    return invoke<ClaudeAlertsInfo>("claude_alerts_info");
+  }
+
+  async setClaudeAlerts(settings: ClaudeAlertSettings): Promise<ClaudeAlertsInfo> {
+    if (this.preview) return (previewAlerts = { ...previewAlerts, settings });
+    return invoke<ClaudeAlertsInfo>("set_claude_alerts", { settings });
+  }
+
+  /** Add the app to Claude Code's hooks, or take it out. */
+  async claudeHooks(connect: boolean): Promise<ClaudeAlertsInfo> {
+    if (this.preview) return (previewAlerts = { ...previewAlerts, hooks: { ...previewAlerts.hooks, connected: connect } });
+    return invoke<ClaudeAlertsInfo>("claude_hooks", { connect });
+  }
+
+  async testClaudeAlert() {
+    if (this.preview) {
+      previewAlerts = { ...previewAlerts, last: { text: "Claude needs you in DualEye.", error: null, age_s: 0 } };
+      return;
+    }
+    await invoke("test_claude_alert");
+  }
+
   /** The newest log line for utterance `id` (ids wrap at 256). */
   private latestTranscript(id: number): TranscriptEntry | undefined {
     for (let i = this.transcripts.length - 1; i >= 0; i--) if (this.transcripts[i].id === id) return this.transcripts[i];
@@ -562,6 +601,13 @@ const previewMcp: McpInfo = {
 };
 
 let previewClaudeLink: ClaudeLink = { connected: false, chained: null, last_update_s: null, settings_path: "~/.claude/settings.json" };
+
+let previewAlerts: ClaudeAlertsInfo = {
+  settings: { needs_you: true, done: true, done_after_s: 30, usage: true, speak: true, language: "en" },
+  hooks: { connected: false, last_event_s: null, settings_path: "~/.claude/settings.json" },
+  can_speak: true,
+  last: null,
+};
 
 let previewVolume = 60;
 let previewEyes = true;

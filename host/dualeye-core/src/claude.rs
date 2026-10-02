@@ -8,7 +8,12 @@
 //!   its documented status JSON to `dualeye-app --claude-statusline`, which
 //!   keeps the latest copy in [`status_file`]. It carries the plan's 5-hour and
 //!   weekly usage, which the transcripts can't tell.
+//!
+//! [`alerts`] tells the person at the desk when Claude needs them, finished
+//! or is running out of its limits, with Claude Code's [`hooks`].
 
+pub mod alerts;
+pub mod hooks;
 pub mod statusline;
 
 use std::collections::{HashMap, HashSet};

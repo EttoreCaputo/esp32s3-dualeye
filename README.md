@@ -66,6 +66,18 @@ In the same tab you can turn each screen by 0°, 90°, 180° or 270° if the boa
 
 The Claude faces work out of the box: the app counts the tokens in Claude Code's transcripts on this computer (`~/.claude/projects`) and notices when Claude is working. To see your plan's 5-hour and weekly limits too (Pro and Max), press **Connect status line** in Settings → **Display**. It points Claude Code's status line at the app, keeping a backup of your settings (`settings.json.dualeye-backup`) and still printing your previous status line; **Disconnect** puts it back.
 
+### Claude alerts
+
+The board can also tell you what Claude Code is up to, so you can leave it working and step away from the screen:
+
+- **Claude needs you**: it's waiting for a permission or has asked you a question.
+- **Claude is done**: it finished a task that took at least 30 s (or 1, 2, 5 min).
+- **Limits**: your 5-hour or weekly limit passed 80 % or 95 % (needs the status line above). The 5-hour one also says when it resets.
+
+The eyes react (surprised, happy, suspicious), the message shows over the watch face for 10 s and, with voice on and **Answer out loud**, the board says it in Italian or English. An alert waits for a voice conversation to end before it plays.
+
+Press **Connect hooks** in Settings → **Display** → **Claude alerts**. It adds the app to Claude Code's hooks (`UserPromptSubmit`, `Stop` and `Notification`) in `~/.claude/settings.json`, keeping your own hooks and a backup. The hooks run in the background, so Claude never waits on them, and they do nothing while the app is closed. **Try it** plays a sample alert; **Disconnect** removes only DualEye's hooks. Claude Code sessions that were already open may need a restart to pick the hooks up.
+
 ## Voice assistant
 
 Say **"Alexa"** to the board, then a command in Italian or English: *"metti la faccia rings a sinistra"*, *"put classic on the right screen"*, *"abbassa la luminosità al 30 per cento"*, *"make your voice louder"*, *"gira gli schermi sottosopra"*, *"scrivi ciao a tutti"*, *"how hot is the GPU?"*, *"che ore sono?"*. The board does it and answers out loud, in the language you spoke.

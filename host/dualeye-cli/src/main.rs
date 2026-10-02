@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
-use dualeye_core::claude::statusline;
+use dualeye_core::claude::{hooks, statusline};
 use dualeye_core::hardware::{self, Hardware};
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::tts::{self, Tts, TtsConfig};
@@ -80,6 +80,10 @@ struct Args {
     /// Claude faces and print a short status line
     #[arg(long = "claude-statusline", hide = true)]
     claude_statusline: bool,
+    /// Act as a Claude Code hook: pass its JSON to the running bridge for
+    /// the Claude alerts; prints nothing
+    #[arg(long = "claude-hook", hide = true)]
+    claude_hook: bool,
     /// Do not print a line per snapshot
     #[arg(long, short)]
     quiet: bool,
@@ -267,6 +271,10 @@ fn main() -> ExitCode {
         statusline::run(std::io::stdin().lock(), std::io::stdout().lock());
         return ExitCode::SUCCESS;
     }
+    if args.claude_hook {
+        hooks::run(std::io::stdin().lock());
+        return ExitCode::SUCCESS;
+    }
     if args.list_ports {
         for p in serial::list_ports() {
             let mark = if p.is_board { "  <- DualEye" } else { "" };
@@ -336,6 +344,8 @@ fn main() -> ExitCode {
             agent,
             follow_up: !args.no_follow_up,
         })),
+        // The alerts need the hooks in Claude Code's settings (the app's Display tab adds them).
+        claude_alerts: Arc::default(),
     };
     let stop = Arc::new(AtomicBool::new(false));
     // Ctrl-C ends the loop, so the whisper-server sidecar is stopped too.
@@ -395,6 +405,8 @@ fn main() -> ExitCode {
                     (n, Some(w)) => format!(", {n} frames lost -> {w}"),
                 }
             ),
+            BridgeEvent::ClaudeAlert { text, error: None, .. } => println!("claude: {text}"),
+            BridgeEvent::ClaudeAlert { text, error: Some(e), .. } => eprintln!("claude: {text} (not given: {e})"),
             BridgeEvent::Settings { faces, rotation } => println!(
                 "board settings: faces {}/{}, rotation {}/{}",
                 faces.cpu.name(),

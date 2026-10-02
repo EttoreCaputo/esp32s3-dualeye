@@ -12,6 +12,8 @@
 //!
 //! For the Claude faces the app can also point Claude Code's status line at
 //! itself (`main.rs` handles that invocation); see `dualeye_core::claude`.
+//! Likewise Claude Code's hooks, for the alerts: Claude needs you, it's done,
+//! the limits are running out (`dualeye_core::claude::alerts`).
 //!
 //! Voice (opt-in, off by default): with it on, what the board hears after its
 //! wake word is transcribed by a whisper.cpp `whisper-server` sidecar with a
@@ -42,6 +44,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use dualeye_core::claude::alerts::AlertSettings;
+use dualeye_core::claude::hooks::{self, HooksStatus};
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
 use dualeye_core::hardware::{self, Hardware, Recommendation};
@@ -75,6 +79,8 @@ struct Settings {
     rotation: Rotations,
     #[serde(default)]
     voice: VoiceSettings,
+    #[serde(default)]
+    claude_alerts: AlertSettings,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -170,6 +176,8 @@ struct Link {
     /// What the board said it runs, since it connected.
     firmware: Option<BoardFirmware>,
     logs: VecDeque<String>,
+    /// The latest Claude alert: what it said, why it didn't reach the board, when (Unix ms).
+    last_alert: Option<(String, Option<String>, u64)>,
     /// What the board's voice overlay shows (`idle` until it says otherwise).
     voice: Option<String>,
     transcripts: VecDeque<TranscriptEntry>,
@@ -227,6 +235,10 @@ impl Link {
             // `AppState::stt_error` keeps the last error.
             BridgeEvent::Listening { .. } | BridgeEvent::Utterance { .. } | BridgeEvent::VoiceError { .. } => {}
             BridgeEvent::VoiceState { state } => self.voice = Some(state.clone()),
+            BridgeEvent::ClaudeAlert { text, error, .. } => {
+                let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                self.last_alert = Some((text.clone(), error.clone(), at));
+            }
             BridgeEvent::Disconnected { reason, .. } => {
                 self.kind = "offline";
                 self.message = Some(reason.clone());
@@ -255,6 +267,8 @@ struct AppState {
     esptool_dir: PathBuf,
     /// Handed to every bridge; `apply_voice` swaps what's in it.
     voice: Arc<Mutex<VoiceConfig>>,
+    /// Handed to every bridge, like `faces`.
+    claude_alerts: Arc<Mutex<AlertSettings>>,
     /// Speech-to-text: `off`, `starting`, `ready` or `error`, and why.
     stt_state: Arc<Mutex<(&'static str, Option<String>)>>,
     /// Text-to-speech, likewise.
@@ -776,6 +790,76 @@ fn claude_disconnect() -> Result<LinkStatus, String> {
     statusline::disconnect().map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+struct LastAlert {
+    text: String,
+    error: Option<String>,
+    age_s: u64,
+}
+
+#[derive(Serialize)]
+struct ClaudeAlertsInfo {
+    settings: AlertSettings,
+    hooks: HooksStatus,
+    /// The bridge can speak (voice on with spoken replies, and Piper ready).
+    can_speak: bool,
+    last: Option<LastAlert>,
+}
+
+fn claude_alerts_info_of(state: &AppState) -> ClaudeAlertsInfo {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let last = state.link.lock().unwrap().last_alert.clone();
+    ClaudeAlertsInfo {
+        settings: state.claude_alerts.lock().unwrap().clone(),
+        hooks: hooks::status(),
+        can_speak: state.voice.lock().unwrap().tts.is_some(),
+        last: last.map(|(text, error, at)| LastAlert { text, error, age_s: now.saturating_sub(at) / 1000 }),
+    }
+}
+
+#[tauri::command]
+fn claude_alerts_info(state: State<AppState>) -> ClaudeAlertsInfo {
+    claude_alerts_info_of(&state)
+}
+
+#[tauri::command]
+fn set_claude_alerts(state: State<AppState>, settings: AlertSettings) -> ClaudeAlertsInfo {
+    *state.claude_alerts.lock().unwrap() = settings.clone();
+    state.settings.lock().unwrap().claude_alerts = settings;
+    state.save_settings();
+    claude_alerts_info_of(&state)
+}
+
+/// Add this binary to Claude Code's hooks, or take it out.
+#[tauri::command]
+fn claude_hooks(state: State<AppState>, connect: bool) -> Result<ClaudeAlertsInfo, String> {
+    if connect {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        hooks::connect(&exe).map_err(|e| e.to_string())?;
+    } else {
+        hooks::disconnect().map_err(|e| e.to_string())?;
+    }
+    Ok(claude_alerts_info_of(&state))
+}
+
+/// Give a sample "Claude needs you" the way a hook would.
+#[tauri::command]
+async fn test_claude_alert() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        // A session of its own, so it isn't taken for a repeat.
+        let event = serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "session_id": format!("dualeye-test-{now}"),
+            "cwd": "/DualEye",
+        });
+        board().claude_hook(event).map(drop).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn emit_flash(app: &AppHandle, event: FlashEvent) {
     let _ = app.emit("flash", &event);
 }
@@ -826,7 +910,8 @@ fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
     let handle = app.clone();
     let state = app.state::<AppState>();
     let (faces, rotation, hub, voice) = (state.faces.clone(), state.rotation.clone(), state.hub.clone(), state.voice.clone());
-    Bridge::spawn(BridgeConfig { port, faces, rotation, hub, voice, ..Default::default() }, move |event| {
+    let claude_alerts = state.claude_alerts.clone();
+    Bridge::spawn(BridgeConfig { port, faces, rotation, hub, voice, claude_alerts, ..Default::default() }, move |event| {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
             if let BridgeEvent::VoiceError { message } = &event {
@@ -931,6 +1016,7 @@ pub fn run() {
             let port = settings.port.clone();
             let faces = Arc::new(Mutex::new(settings.faces));
             let rotation = Arc::new(Mutex::new(settings.rotation));
+            let claude_alerts = Arc::new(Mutex::new(settings.claude_alerts.clone()));
             let (hub, hub_error) = match Hub::start() {
                 Ok(hub) => (Some(hub), None),
                 Err(e) => (None, Some(e.to_string())),
@@ -948,6 +1034,7 @@ pub fn run() {
                 device_busy: AtomicBool::new(false),
                 esptool_dir,
                 voice: Arc::default(),
+                claude_alerts,
                 stt_state: Arc::new(Mutex::new(("off", None))),
                 tts_state: Arc::new(Mutex::new(("off", None))),
                 llm_state: Arc::new(Mutex::new(("off", None))),
@@ -975,7 +1062,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, power_helper_status, set_power_helper, open_power_helper_settings])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, power_helper_status, set_power_helper, open_power_helper_settings])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

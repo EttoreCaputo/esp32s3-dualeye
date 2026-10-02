@@ -190,11 +190,11 @@ fn is_ours(line: Option<&Value>) -> bool {
     line.and_then(|l| l.get("command")).and_then(Value::as_str).is_some_and(|c| c.contains(FLAG))
 }
 
-fn read_settings(path: &Path) -> Option<Map<String, Value>> {
+pub(super) fn read_settings(path: &Path) -> Option<Map<String, Value>> {
     parse_object(&fs::read_to_string(path).ok()?).ok()
 }
 
-fn parse_object(text: &str) -> io::Result<Map<String, Value>> {
+pub(super) fn parse_object(text: &str) -> io::Result<Map<String, Value>> {
     if text.trim().is_empty() {
         return Ok(Map::new());
     }
@@ -205,14 +205,14 @@ fn parse_object(text: &str) -> io::Result<Map<String, Value>> {
     }
 }
 
-fn write_settings(path: &Path, settings: &Map<String, Value>) -> io::Result<()> {
+pub(super) fn write_settings(path: &Path, settings: &Map<String, Value>) -> io::Result<()> {
     let mut text = serde_json::to_string_pretty(settings)?;
     text.push('\n');
     write_atomic(path, text.as_bytes())
 }
 
 /// settings.json as it was before DualEye first touched it.
-fn backup(path: &Path) -> io::Result<()> {
+pub(super) fn backup(path: &Path) -> io::Result<()> {
     let backup = path.with_extension("json.dualeye-backup");
     if path.exists() && !backup.exists() {
         fs::copy(path, backup)?;
@@ -220,7 +220,7 @@ fn backup(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }

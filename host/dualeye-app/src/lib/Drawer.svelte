@@ -6,6 +6,8 @@
   import {
     fanRpm,
     monitor,
+    type ClaudeAlertSettings,
+    type ClaudeAlertsInfo,
     type ClaudeLink,
     type FirmwareInfo,
     type Hardware,
@@ -41,6 +43,9 @@
   let claudeLink = $state<ClaudeLink | null>(null);
   let claudeError = $state("");
   let claudeBusy = $state(false);
+  let alerts = $state<ClaudeAlertsInfo | null>(null);
+  let alertsError = $state("");
+  let alertsBusy = $state(false);
   let mcp = $state<McpInfo | null>(null);
   let copied = $state<"code" | "desktop" | null>(null);
   let follow = $state(true);
@@ -86,6 +91,7 @@
     let alive = true;
     const load = () => {
       monitor.claudeLink().then((l) => alive && (claudeLink = l));
+      monitor.claudeAlerts().then((a) => alive && (alerts = a));
       monitor.mcpInfo().then((m) => alive && (mcp = m));
     };
     load();
@@ -263,6 +269,40 @@
       claudeError = String(e);
     } finally {
       claudeBusy = false;
+    }
+  }
+
+  async function linkHooks(connect: boolean) {
+    alertsBusy = true;
+    alertsError = "";
+    try {
+      alerts = await monitor.claudeHooks(connect);
+    } catch (e) {
+      alertsError = String(e);
+    } finally {
+      alertsBusy = false;
+    }
+  }
+
+  async function setAlerts(change: Partial<ClaudeAlertSettings>) {
+    if (!alerts) return;
+    alertsError = "";
+    alerts = await monitor.setClaudeAlerts({ ...alerts.settings, ...change });
+  }
+
+  const DONE_AFTER = [30, 60, 120, 300];
+
+  async function testAlert() {
+    alertsBusy = true;
+    alertsError = "";
+    try {
+      await monitor.testClaudeAlert();
+      // The bridge gives it in a second or two (longer while it speaks).
+      setTimeout(() => monitor.claudeAlerts().then((a) => (alerts = a)), 1500);
+    } catch (e) {
+      alertsError = String(e);
+    } finally {
+      alertsBusy = false;
     }
   }
 
@@ -544,6 +584,103 @@
           {/if}
           {#if claudeError}
             <p class="hint error">{claudeError}</p>
+          {/if}
+        </section>
+
+        <section class="alerts">
+          <h3>Claude alerts</h3>
+          <p class="hint">
+            The board tells you when Claude Code needs you (a permission or a question), when it finishes a long task and when your plan's
+            limits pass 80 % and 95 %: the eyes react, a message shows over the watch face and, with spoken replies on, it says so out loud.
+          </p>
+          {#if alerts}
+            {#if alerts.hooks.connected}
+              <dl class="facts">
+                <div><dt>Hooks</dt><dd>Connected</dd></div>
+                <div>
+                  <dt>Last event</dt>
+                  <dd>{alerts.hooks.last_event_s === null ? "Waiting" : ago(alerts.hooks.last_event_s)}</dd>
+                </div>
+                {#if alerts.last}
+                  <div class="wide">
+                    <dt>Last alert, {ago(alerts.last.age_s)}</dt>
+                    <dd class="small">{alerts.last.text}{alerts.last.error ? ` (not given: ${alerts.last.error})` : ""}</dd>
+                  </div>
+                {/if}
+              </dl>
+              {#if alerts.hooks.last_event_s === null}
+                <p class="hint">Claude Code sessions that were already open may need a restart to pick the hooks up.</p>
+              {/if}
+            {:else}
+              <p class="hint">
+                This adds hooks to <code>{alerts.hooks.settings_path ?? "~/.claude/settings.json"}</code> that run in the background and
+                never slow Claude down; yours stay as they are. The limit alerts need the status line above.
+              </p>
+            {/if}
+            <label class="switch">
+              <input type="checkbox" checked={alerts.settings.needs_you} onchange={(e) => setAlerts({ needs_you: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">When Claude needs you</span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" checked={alerts.settings.done} onchange={(e) => setAlerts({ done: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">When Claude finishes a long task</span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" checked={alerts.settings.usage} onchange={(e) => setAlerts({ usage: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">When a limit passes 80 % or 95 %</span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" checked={alerts.settings.speak} onchange={(e) => setAlerts({ speak: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Say them out loud</span>
+            </label>
+            <div class="rotation">
+              <span class="rlabel">Long task</span>
+              <div class="rots" role="radiogroup" aria-label="Long task">
+                {#each DONE_AFTER as secs (secs)}
+                  <button
+                    class="rot"
+                    class:checked={alerts.settings.done_after_s === secs}
+                    role="radio"
+                    aria-checked={alerts.settings.done_after_s === secs}
+                    disabled={!alerts.settings.done}
+                    title="Tell me when a task took at least this long"
+                    onclick={() => setAlerts({ done_after_s: secs })}>{secs < 60 ? `${secs} s` : `${secs / 60} min`}</button
+                  >
+                {/each}
+              </div>
+            </div>
+            <div class="rotation">
+              <span class="rlabel">Language</span>
+              <div class="rots langs" role="radiogroup" aria-label="Language of the alerts">
+                {#each VOICE_LANGUAGES as [code, label] (code)}
+                  <button
+                    class="rot"
+                    class:checked={alerts.settings.language === code}
+                    role="radio"
+                    aria-checked={alerts.settings.language === code}
+                    onclick={() => setAlerts({ language: code })}>{label}</button
+                  >
+                {/each}
+              </div>
+            </div>
+            {#if alerts.settings.speak && !alerts.can_speak}
+              <p class="hint">Speaking needs voice on, with “Answer out loud” and a voice, in the Voice tab; until then they're only shown.</p>
+            {/if}
+            <div class="actions">
+              {#if alerts.hooks.connected}
+                <button class="btn" disabled={alertsBusy || monitor.link !== "connected"} onclick={testAlert}>Try it</button>
+                <button class="btn" disabled={alertsBusy} onclick={() => linkHooks(false)}>Disconnect</button>
+              {:else}
+                <button class="btn primary" disabled={alertsBusy} onclick={() => linkHooks(true)}>Connect hooks</button>
+              {/if}
+            </div>
+          {/if}
+          {#if alertsError}
+            <p class="hint error">{alertsError}</p>
           {/if}
         </section>
 
@@ -1556,8 +1693,20 @@
   .hint.error {
     color: var(--hot);
   }
-  .mcp .facts {
+  .mcp .facts,
+  .alerts .facts {
     margin-bottom: 12px;
+  }
+  .alerts {
+    /* Claude's orange, as on the claude face. */
+    --accent: #d97757;
+  }
+  .alerts .rotation {
+    margin-bottom: 12px;
+  }
+  .alerts .rot:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
   .mcp .hint + .snippet {
     margin-top: 8px;

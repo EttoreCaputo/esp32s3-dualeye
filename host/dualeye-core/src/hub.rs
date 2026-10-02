@@ -15,6 +15,8 @@
 //! | `hello` `{"token","client"}` | `{"bridge", "board": Hello or null, "port"}` |
 //! | `tools/list`, `tools/call` | Passed to the board as they are |
 //! | `host/snapshot` | `{"snapshot": Snapshot or null, "age_ms"}`: the bridge's latest sample |
+//! | `host/say` `{"text","language"?}` | How it was spoken, once played |
+//! | `host/claude_hook` (a Claude Code hook's JSON) | `{"taken"}`: whether a bridge takes alerts |
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -88,6 +90,8 @@ struct Shared {
     settings_changed: AtomicBool,
     /// Speaks through the board, when the bridge has text-to-speech.
     say: Mutex<Option<SayFn>>,
+    /// Takes Claude Code's hook events, while a bridge runs.
+    claude_hook: Mutex<Option<HookFn>>,
     clients: AtomicUsize,
     calls: AtomicU64,
     last_call: Mutex<Option<(String, Instant)>>,
@@ -133,6 +137,7 @@ impl Hub {
             snapshot: Mutex::default(),
             settings_changed: AtomicBool::new(false),
             say: Mutex::default(),
+            claude_hook: Mutex::default(),
             clients: AtomicUsize::new(0),
             calls: AtomicU64::new(0),
             last_call: Mutex::default(),
@@ -166,6 +171,11 @@ impl Hub {
     /// What `host/say` runs; `None` while the bridge can't speak.
     pub(crate) fn set_say(&self, say: Option<SayFn>) {
         *self.shared.say.lock().unwrap() = say;
+    }
+
+    /// What `host/claude_hook` hands its event to; `None` without a bridge.
+    pub(crate) fn set_claude_hook(&self, hook: Option<HookFn>) {
+        *self.shared.claude_hook.lock().unwrap() = hook;
     }
 
     pub(crate) fn set_snapshot(&self, snapshot: &Snapshot) {
@@ -289,6 +299,9 @@ fn hello(shared: &Shared) -> Value {
 /// Speak `text` (in `language`, or the one it looks like) and return how it went.
 pub(crate) type SayFn = Arc<dyn Fn(&str, Option<&str>) -> Result<Value, String> + Send + Sync>;
 
+/// Take a Claude Code hook's JSON; it must not wait on the board.
+pub(crate) type HookFn = Arc<dyn Fn(Value) + Send + Sync>;
+
 fn handle(shared: &Shared, method: &str, params: Value) -> Result<Value, (i64, String)> {
     match method {
         "tools/list" | "tools/call" => {}
@@ -298,6 +311,14 @@ fn handle(shared: &Shared, method: &str, params: Value) -> Result<Value, (i64, S
             let say = shared.say.lock().unwrap().clone();
             let say = say.ok_or((NO_BOARD, "the bridge isn't speaking: turn on spoken replies in the app, or run dualeye --tts".to_string()))?;
             return say(text, params.get("language").and_then(Value::as_str)).map_err(|e| (NO_BOARD, e));
+        }
+        "host/claude_hook" => {
+            let hook = shared.claude_hook.lock().unwrap().clone();
+            let taken = hook.is_some();
+            if let Some(hook) = hook {
+                hook(params);
+            }
+            return Ok(json!({"taken": taken}));
         }
         "host/snapshot" => {
             let snapshot = shared.snapshot.lock().unwrap();
@@ -477,6 +498,15 @@ impl Board {
         reply
     }
 
+    /// Hand a Claude Code hook's JSON to the running bridge, for its alerts.
+    /// Only through the hub: without a bridge there is nobody to tell.
+    pub fn claude_hook(&self, event: Value) -> Result<Value, CallError> {
+        let mut slot = self.hub.lock().unwrap();
+        let hub = self.hub_client(&mut slot).ok_or_else(|| CallError::Unavailable("the DualEye app isn't running".into()))?;
+        *self.route.lock().unwrap() = Some(Route::Hub);
+        hub.request("host/claude_hook", event)
+    }
+
     /// The bridge's latest sample and its age; `None` without a bridge, or
     /// before it has sampled.
     pub fn bridge_snapshot(&self) -> Option<(Snapshot, Duration)> {
@@ -577,6 +607,18 @@ mod tests {
         let (got, age) = board.bridge_snapshot().unwrap();
         assert_eq!(got, snap);
         assert!(age < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn claude_hooks_reach_the_bridge() {
+        let (dir, hub) = hub();
+        let board = Board::with_hub_file(None, "test", Some(dir.path().join("hub.json")));
+        assert_eq!(board.claude_hook(json!({"hook_event_name": "Stop"})).unwrap()["taken"], false);
+        let got = Arc::new(Mutex::new(None));
+        let sink = got.clone();
+        hub.set_claude_hook(Some(Arc::new(move |v| *sink.lock().unwrap() = Some(v))));
+        assert_eq!(board.claude_hook(json!({"hook_event_name": "Stop"})).unwrap()["taken"], true);
+        assert_eq!(got.lock().unwrap().as_ref().unwrap()["hook_event_name"], "Stop");
     }
 
     #[test]
