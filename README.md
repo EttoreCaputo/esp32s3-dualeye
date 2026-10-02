@@ -41,7 +41,7 @@ Then plug the board in by USB and open the app. It finds the board on its own, a
 
 **First launch.** The app isn't code-signed yet, so the system warns the first time:
 
-- **macOS:** right-click the app and choose **Open**, or run `xattr -cr /Applications/DualEye.app`.
+- **macOS:** open the app once, then allow it in **System Settings → Privacy & Security → Open Anyway**, or run `xattr -cr /Applications/DualEye.app`.
 - **Windows:** on "Windows protected your PC", click **More info** → **Run anyway**.
 - **Linux:** to reach the board, add yourself to the `dialout` group once: `sudo usermod -aG dialout "$USER"`, then log out and back in.
 

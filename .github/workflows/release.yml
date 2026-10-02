@@ -7,12 +7,16 @@
 # Bump it for a new release; until then each merge refreshes the assets of
 # the current one. The firmware's own version is version.txt, and
 # FIRMWARE_CHANGELOG.md must have a section for it.
+#
+# A push to develop builds the same assets for the pre-release
+# `v<app version>-develop`, recreated on that commit every time, so it never
+# touches the stable release.
 
 name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
 
 permissions:
@@ -98,7 +102,16 @@ jobs:
         run: |
           app="$(jq -r .version host/dualeye-app/src-tauri/tauri.conf.json)"
           tag="v$app"
+          title="DualEye $app"
+          if [ "$GITHUB_REF_NAME" = develop ]; then
+            tag="v$app-develop"
+            title="DualEye $app (develop)"
+          fi
           {
+            if [ "$GITHUB_REF_NAME" = develop ]; then
+              echo "> Development build from \`develop\`, rebuilt on every push. For the stable app, use the latest release."
+              echo
+            fi
             echo "Desktop app $app with DualEye firmware **$FIRMWARE** inside. Plug the board in, open the app, and it offers to flash the firmware when the board runs an older one."
             echo
             echo "### Firmware $FIRMWARE"
@@ -108,7 +121,7 @@ jobs:
             echo "- **Windows**: \`DualEye_${app}_windows-x64-setup.exe\` or \`.msi\`."
             echo "- **macOS Apple Silicon** (M1 and later): \`DualEye_${app}_macos-apple-silicon.dmg\`."
             echo "- **macOS Intel**: \`DualEye_${app}_macos-intel.dmg\`."
-            echo "  The app isn't signed: the first time, right-click it and choose Open, or run \`xattr -cr /Applications/DualEye.app\`."
+            echo "  The app isn't notarized: the first time, open it, then allow it in System Settings → Privacy & Security (Open Anyway), or run \`xattr -cr /Applications/DualEye.app\`."
             echo "- **Linux**: \`DualEye_${app}_linux-x64\` as \`.AppImage\`, \`.deb\` or \`.rpm\`."
             echo "- \`dualeye-firmware-$FIRMWARE.bin\`: the merged image alone, to flash at 0x0 with esptool."
             echo
@@ -116,10 +129,14 @@ jobs:
             echo
             echo "Built from ${GITHUB_SHA::7}."
           } > notes.md
-          if gh release view "$tag" > /dev/null 2>&1; then
-            gh release edit "$tag" --title "DualEye $app" --notes-file notes.md
+          if [ "$GITHUB_REF_NAME" = develop ]; then
+            # Move the tag to this commit: drop the old pre-release and its tag.
+            gh release delete "$tag" --cleanup-tag --yes > /dev/null 2>&1 || true
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$title" --notes-file notes.md --prerelease --latest=false
+          elif gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes-file notes.md
           else
-            gh release create "$tag" --target "$GITHUB_SHA" --title "DualEye $app" --notes-file notes.md
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$title" --notes-file notes.md
           fi
           cp build/merged-binary.bin "dualeye-firmware-$FIRMWARE.bin"
           gh release upload "$tag" "dualeye-firmware-$FIRMWARE.bin" --clobber
@@ -209,3 +226,16 @@ jobs:
           # e.g. DualEye_1.0.0_macos-apple-silicon.dmg, DualEye_1.0.0_windows-x64-setup.exe
           assetNamePattern: "[name]_[version]_${{ matrix.platform }}[setup][ext]"
           args: ${{ matrix.args }} --config src-tauri/tauri.sidecars.conf.json
+
+      # tauri-action always uploads the macOS .app as .app.tar.gz too; the
+      # .dmg is the only download macOS needs.
+      - name: Drop the .app.tar.gz
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ needs.release.outputs.tag }}" --json assets \
+            --jq '.assets[].name | select(endswith("_${{ matrix.platform }}.app.tar.gz"))' |
+            while read -r asset; do
+              gh release delete-asset "${{ needs.release.outputs.tag }}" "$asset" --yes
+            done
