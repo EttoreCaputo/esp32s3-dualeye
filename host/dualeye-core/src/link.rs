@@ -200,6 +200,12 @@ impl Link {
         reply
     }
 
+    /// Send a JSON-RPC notification: no `id`, so the board doesn't answer.
+    pub fn notify(&self, method: &str, params: Value) -> io::Result<()> {
+        let message = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        self.send(Channel::Ctrl, message.to_string().as_bytes())
+    }
+
     /// One `hello`; the handshake retries it while the board boots.
     pub fn hello(&self, timeout: Duration) -> Result<Hello, CallError> {
         let client = format!("dualeye-core/{}", env!("CARGO_PKG_VERSION"));

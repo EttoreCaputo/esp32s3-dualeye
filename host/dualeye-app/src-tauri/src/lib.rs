@@ -57,6 +57,8 @@ use dualeye_core::flasher::setup;
 use dualeye_core::hardware::{self, Hardware, Recommendation};
 use dualeye_core::llm::{self, Llm, LlmConfig};
 use dualeye_core::models::{self, Kind, Model};
+use dualeye_core::music::{self, Music};
+use dualeye_core::pointer;
 use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage, Transcript};
 use dualeye_core::tts::{self, Engine, Tts, TtsConfig};
 use dualeye_core::timers::{self, Pomodoro, ShowOn, TimerInfo, Timers};
@@ -88,6 +90,9 @@ struct Settings {
     voice: VoiceSettings,
     #[serde(default)]
     claude_alerts: AlertSettings,
+    /// The eyes face looks about on its own instead of at the mouse pointer.
+    #[serde(default)]
+    ignore_pointer: bool,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -278,6 +283,10 @@ struct AppState {
     claude_alerts: Arc<Mutex<AlertSettings>>,
     /// Handed to every bridge; kept in their own file.
     timers: Arc<Timers>,
+    /// Handed to every bridge: what's playing, and its cover for the mirror.
+    music: Arc<Music>,
+    /// Handed to every bridge, like `faces`.
+    follow_pointer: Arc<AtomicBool>,
     /// Speech-to-text: `off`, `starting`, `ready` or `error`, and why.
     stt_state: Arc<Mutex<(&'static str, Option<String>)>>,
     /// Text-to-speech, likewise.
@@ -695,6 +704,7 @@ struct Status {
     port_setting: Option<String>,
     faces: Faces,
     rotation: Rotations,
+    follow_pointer: bool,
 }
 
 #[tauri::command]
@@ -716,6 +726,7 @@ fn status(state: State<AppState>) -> Status {
         port_setting: state.settings.lock().unwrap().port.clone(),
         faces: *state.faces.lock().unwrap(),
         rotation: *state.rotation.lock().unwrap(),
+        follow_pointer: state.follow_pointer.load(Ordering::Relaxed),
     }
 }
 
@@ -757,6 +768,34 @@ fn set_rotation(state: State<AppState>, rotation: Rotations) {
     *state.rotation.lock().unwrap() = rotation;
     state.settings.lock().unwrap().rotation = rotation;
     state.save_settings();
+}
+
+/// The eyes face looks at the mouse pointer, or about on its own.
+#[tauri::command]
+fn set_follow_pointer(state: State<AppState>, on: bool) {
+    state.follow_pointer.store(on, Ordering::Relaxed);
+    state.settings.lock().unwrap().ignore_pointer = !on;
+    state.save_settings();
+}
+
+/// Where the pointer is, as the board gets it: the mirror's eyes look there too.
+#[tauri::command]
+fn pointer_gaze() -> Option<(f32, f32)> {
+    pointer::gaze()
+}
+
+/// The cover the snapshots name `id`, as a data URL, once the bridge has it.
+#[tauri::command]
+fn music_cover(state: State<AppState>, id: u32) -> Option<String> {
+    state.music.cover().filter(|c| c.id == id).map(|c| c.data_url.to_string())
+}
+
+/// Play, pause or skip the music playing on this computer.
+#[tauri::command]
+async fn music_control(state: State<'_, AppState>, action: String) -> Result<String, String> {
+    let music = state.music.clone();
+    let action: music::Control = action.parse()?;
+    tauri::async_runtime::spawn_blocking(move || music.control(action)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1020,7 +1059,9 @@ fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
     let state = app.state::<AppState>();
     let (faces, rotation, hub, voice) = (state.faces.clone(), state.rotation.clone(), state.hub.clone(), state.voice.clone());
     let (claude_alerts, timers) = (state.claude_alerts.clone(), state.timers.clone());
-    Bridge::spawn(BridgeConfig { port, faces, rotation, hub, voice, claude_alerts, timers, ..Default::default() }, move |event| {
+    let (music, follow_pointer) = (state.music.clone(), state.follow_pointer.clone());
+    let config = BridgeConfig { port, faces, rotation, hub, voice, claude_alerts, timers, music, follow_pointer, ..Default::default() };
+    Bridge::spawn(config, move |event| {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
             if let BridgeEvent::VoiceError { message } = &event {
@@ -1126,6 +1167,7 @@ pub fn run() {
             let faces = Arc::new(Mutex::new(settings.faces));
             let rotation = Arc::new(Mutex::new(settings.rotation));
             let claude_alerts = Arc::new(Mutex::new(settings.claude_alerts.clone()));
+            let follow_pointer = Arc::new(AtomicBool::new(!settings.ignore_pointer));
             let (hub, hub_error) = match Hub::start() {
                 Ok(hub) => (Some(hub), None),
                 Err(e) => (None, Some(e.to_string())),
@@ -1145,6 +1187,8 @@ pub fn run() {
                 voice: Arc::default(),
                 claude_alerts,
                 timers: Arc::new(Timers::open(timers::default_file())),
+                music: Arc::default(),
+                follow_pointer,
                 stt_state: Arc::new(Mutex::new(("off", None))),
                 tts_state: Arc::new(Mutex::new(("off", None))),
                 llm_state: Arc::new(Mutex::new(("off", None))),
@@ -1172,7 +1216,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

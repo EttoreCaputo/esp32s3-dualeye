@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::claude::ClaudeMetrics;
+use crate::music::BoardMusic;
 use crate::timers::BoardTimer;
 
 /// The snapshot format's version, the `v` field.
@@ -75,10 +76,14 @@ pub enum Face {
     Image,
     /// The host's timers and reminders counting down (firmware 1.2).
     Timer,
+    /// What's playing on the computer, with its cover (firmware 1.3).
+    Music,
+    /// A pair of eyes that follow the mouse pointer (firmware 1.3).
+    Eyes,
 }
 
 impl Face {
-    pub const ALL: [Face; 11] = [
+    pub const ALL: [Face; 13] = [
         Face::Classic,
         Face::Rings,
         Face::Plus,
@@ -90,6 +95,8 @@ impl Face {
         Face::Battery,
         Face::Image,
         Face::Timer,
+        Face::Music,
+        Face::Eyes,
     ];
 
     pub fn name(self) -> &'static str {
@@ -105,12 +112,24 @@ impl Face {
             Face::Battery => "battery",
             Face::Image => "image",
             Face::Timer => "timer",
+            Face::Music => "music",
+            Face::Eyes => "eyes",
         }
     }
 
     /// Shows a CPU's or a GPU's metrics, as its screen's [`Source`] says.
     pub fn has_source(self) -> bool {
         matches!(self, Face::Classic | Face::Rings | Face::Plus | Face::Bar)
+    }
+
+    /// The firmware that has this face first.
+    pub fn since(self) -> &'static str {
+        match self {
+            Face::Classic | Face::Rings | Face::Plus | Face::Bar | Face::Claude | Face::Clawd => "0.2.0",
+            Face::Net | Face::Disk | Face::Battery | Face::Image => "1.1.0",
+            Face::Timer => "1.2.0",
+            Face::Music | Face::Eyes => "1.3.0",
+        }
     }
 }
 
@@ -193,6 +212,11 @@ pub struct Faces {
 impl Faces {
     pub fn new(cpu: Face, gpu: Face) -> Self {
         Self { cpu, gpu, src: Sources::default() }
+    }
+
+    /// Either screen shows `face`.
+    pub fn shows(&self, face: Face) -> bool {
+        self.cpu == face || self.gpu == face
     }
 }
 
@@ -347,6 +371,10 @@ pub struct Snapshot {
     /// the bridge from its [`crate::Timers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timer: Option<BoardTimer>,
+    /// What's playing, for the music face (firmware 1.3), set by the bridge
+    /// from its [`crate::Music`] while a screen shows the face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music: Option<BoardMusic>,
 }
 
 impl Snapshot {
@@ -419,6 +447,7 @@ mod tests {
             rot: None,
             claude: None,
             timer: None,
+            music: None,
         };
         assert_eq!(
             payload(&snap),
@@ -444,6 +473,7 @@ mod tests {
             rot: None,
             claude: None,
             timer: None,
+            music: None,
         };
         assert_eq!(payload(&snap), "{\"v\":1,\"ts\":0}");
         assert!(!snap.is_sendable());
@@ -472,6 +502,7 @@ mod tests {
                 model: Some("OPUS 5.5".into()),
             }),
             timer: None,
+            music: None,
         };
         assert_eq!(
             payload(&snap),
@@ -510,6 +541,7 @@ mod tests {
             rot: Some(Rotations { cpu: Rotation::R180, gpu: Rotation::R0 }),
             claude: None,
             timer: None,
+            music: None,
         };
         assert_eq!(payload(&snap), "{\"v\":1,\"ts\":0,\"cpu\":{\"temp_c\":40.0}}");
         // Frontends still see it on the snapshot.

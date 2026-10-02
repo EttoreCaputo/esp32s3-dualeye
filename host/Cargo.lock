@@ -1114,6 +1114,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "ureq",
+ "windows 0.61.3",
+ "x11-dl",
 ]
 
 [[package]]

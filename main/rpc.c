@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "art.h"
 #include "audio_selftest.h"
 #include "board_tools.h"
 #include "cJSON.h"
@@ -12,6 +13,7 @@
 #include "link.h"
 #include "media.h"
 #include "playback.h"
+#include "ui_eyes.h"
 #include "voice.h"
 
 #define RPC_PROTOCOL 2
@@ -86,6 +88,9 @@ static cJSON *identity(void)
     }
     cJSON_AddItemToArray(caps, cJSON_CreateString("tools"));
     cJSON_AddItemToArray(caps, cJSON_CreateString("media"));
+    // Firmware 1.3: the music face's cover art, and eyes that follow the host's pointer.
+    cJSON_AddItemToArray(caps, cJSON_CreateString("music"));
+    cJSON_AddItemToArray(caps, cJSON_CreateString("gaze"));
     if (voice_available()) {
         cJSON_AddItemToArray(channels, cJSON_CreateString("audio_up"));
         cJSON_AddItemToArray(caps, cJSON_CreateString("voice"));
@@ -193,6 +198,25 @@ void rpc_handle(uint8_t *payload, size_t len)
         code = RPC_INVALID_PARAMS;
         if (result == NULL && strcmp(message, "method not found") == 0) {
             code = RPC_METHOD_NOT_FOUND;
+        }
+    } else if (strncmp(name, "music/", 6) == 0) {
+        // Cover art for the music face.
+        result = art_rpc(name, params, &message);
+        code = RPC_INVALID_PARAMS;
+        if (result == NULL && strcmp(message, "method not found") == 0) {
+            code = RPC_METHOD_NOT_FOUND;
+        }
+    } else if (strcmp(name, "eyes/gaze") == 0) {
+        // Where the host's pointer is, -1..1 each way; sent as a notification
+        // many times a second while it moves.
+        const cJSON *x = cJSON_GetObjectItemCaseSensitive(params, "x");
+        const cJSON *y = cJSON_GetObjectItemCaseSensitive(params, "y");
+        if (!cJSON_IsNumber(x) || !cJSON_IsNumber(y)) {
+            code = RPC_INVALID_PARAMS;
+            message = "expected {\"x\": -1..1, \"y\": -1..1}";
+        } else {
+            ui_eyes_set_gaze((float) x->valuedouble, (float) y->valuedouble);
+            result = cJSON_CreateObject();
         }
     } else if (strcmp(name, "debug/audio") == 0) {
         const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(params, "cmd");

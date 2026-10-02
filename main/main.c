@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "art.h"
 #include "audio_selftest.h"
 #include "board_display.h"
 #include "board_settings.h"
@@ -103,6 +104,7 @@ void app_main(void)
     ESP_ERROR_CHECK(link_init());
     board_settings_init();
     media_init();
+    art_init();
     board_settings_t settings;
     board_settings_get(&settings);
 

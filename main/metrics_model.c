@@ -21,6 +21,8 @@ static const char *const FACE_NAMES[METRICS_FACE_COUNT] = {
     [METRICS_FACE_BATTERY] = "battery",
     [METRICS_FACE_IMAGE] = "image",
     [METRICS_FACE_TIMER] = "timer",
+    [METRICS_FACE_MUSIC] = "music",
+    [METRICS_FACE_EYES] = "eyes",
 };
 
 static const char *const SOURCE_NAMES[METRICS_SOURCE_COUNT] = {

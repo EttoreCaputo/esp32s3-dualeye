@@ -30,6 +30,14 @@ ureq = { version = "3.4.2", optional = true }
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 nvml-wrapper = "0.13.0"
 
+# The system's media session (the music face) on Windows.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Foundation", "Media_Control", "Storage_Streams"] }
+
+# The mouse pointer (the eyes face) on X11, loaded at run time.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = "2.21"
+
 # SMC and IOAccelerator for the Mac's GPU; already in the tree through serialport.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10.1"

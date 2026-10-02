@@ -1,7 +1,7 @@
 // Constants and formatting copied from main/ui_watch.c, so the mirror shows the
 // same pixels the board does. Keep in sync when the firmware UI changes.
 
-import type { Battery, BoardTimer, ClaudeMetrics, ClaudeState, Disk, Metrics, Net } from "./monitor.svelte";
+import type { Battery, BoardMusic, BoardTimer, ClaudeMetrics, ClaudeState, Disk, Gaze, Metrics, Net } from "./monitor.svelte";
 
 export const LCD = 240;
 export const USAGE_ARC_SIZE = 216;
@@ -37,6 +37,11 @@ export const COLOR = {
   tomatoTrack: "#3A1512",
   divider: "#3A3A3C",
   error: "#FF453A",
+  music: "#FF4F7B",
+  musicTrack: "#3A1420",
+  artist: "#C8C8CC",
+  disc: "#141416",
+  groove: "#26262A",
 } as const;
 /** The net rings are logarithmic: log10 of the speed, 100 B/s (empty) to 1 GB/s (full). */
 export const NET_LOG_MIN = 2;
@@ -45,6 +50,19 @@ export const TIMER_BLINK_MS = 500;
 export const DISK_FULL_PCT = 90;
 export const BATTERY_LOW_PCT = 20;
 export const BATTERY_EMPTY_PCT = 10;
+/** The music face's position ring round the very edge, and the record shown without a cover. */
+export const MUSIC_RING_SIZE = 234;
+export const MUSIC_RING_WIDTH = 6;
+export const MUSIC_DISC_SIZE = 124;
+/** The eyes face (main/ui_eyes.c): its colours, how far the pointer moves it, when it dozes. */
+export const AMBIENT_COLOR = "#E6F2FF";
+export const ASLEEP_COLOR = "#34507A";
+export const LOOK_X = 36;
+export const LOOK_Y = 26;
+export const LOOK_Y_BIAS = -8;
+export const POINTER_FRESH_MS = 6000;
+export const DOZE_AFTER_MS = 60000;
+export const DOZE_MS = 20000;
 
 export const DEVICES = {
   cpu: { title: "CPU", memTitle: "RAM", accent: "#C4F06A", track: "#163012" },
@@ -53,7 +71,7 @@ export const DEVICES = {
 export type DeviceId = keyof typeof DEVICES;
 
 /** `metrics_face_t`; the names are what goes on the wire. */
-export type Face = "classic" | "rings" | "plus" | "bar" | "claude" | "clawd" | "net" | "disk" | "battery" | "image" | "timer";
+export type Face = "classic" | "rings" | "plus" | "bar" | "claude" | "clawd" | "net" | "disk" | "battery" | "image" | "timer" | "music" | "eyes";
 /** `metrics_source_t`: whose metrics classic, rings, plus and bar show. */
 export type Source = DeviceId;
 /** Faces by screen (`cpu` is the left one, `gpu` the right one, as on the wire) and each screen's source. */
@@ -72,6 +90,8 @@ export const FACES: { id: Face; name: string; blurb: string }[] = [
   { id: "battery", name: "Battery", blurb: "The laptop's charge and time left" },
   { id: "image", name: "Image", blurb: "A picture or GIF of your own" },
   { id: "timer", name: "Timer", blurb: "Timers, reminders and the pomodoro counting down" },
+  { id: "music", name: "Music", blurb: "What's playing, with its cover; Alexa pauses and skips it" },
+  { id: "eyes", name: "Eyes", blurb: "A pair of eyes that follow your mouse pointer" },
 ];
 /** Faces that show the CPU's or the GPU's metrics, as the screen's source says. */
 export const hasSource = (face: Face) => face === "classic" || face === "rings" || face === "plus" || face === "bar";
@@ -124,7 +144,26 @@ export type Screen = {
   image?: string | null;
   /** The timer face; `null` without a timer (the hint). */
   timer?: TimerView | null;
+  /** The music face; `null` with nothing playing (the record and the hint). */
+  music?: MusicView | null;
+  /** The eyes face. */
+  eyes?: EyesView;
 };
+
+/** `update_music()` and `music_tick()`. */
+export type MusicView = {
+  /** The cover as a data URL, once the one for this track is in; else the record. */
+  cover: string | null;
+  playing: boolean;
+  title: string;
+  titleColor: string;
+  artist: string;
+  time: string;
+  /** The position ring, 0–100. */
+  pct: number;
+};
+/** `ambient_pose()`: where the eye looks, in panel pixels, and how far it has dozed off (0–1). */
+export type EyesView = { x: number; y: number; doze: number; color: string };
 
 /** `update_net()`: download outside and in large, upload inside and below a divider. */
 export type NetView = { rxPct: number; txPct: number; unit: string; tx: string };
@@ -163,6 +202,12 @@ export type Extras = {
   timerAgeMs?: number;
   /** For the blink while it rings. */
   nowMs?: number;
+  music?: BoardMusic;
+  cover?: { id: number; url: string } | null;
+  /** How long ago the snapshot with `music` came, in ms: the board counts the position on meanwhile. */
+  musicAgeMs?: number;
+  /** The mouse pointer, for the eyes face. */
+  gaze?: Gaze | null;
 };
 
 /** What `update_claude()` and `update_clawd_face()` put on screen. */
@@ -206,7 +251,50 @@ export function screenFor(
   if (face === "disk") return diskScreen(screen, extras.disk, stale, waiting);
   if (face === "battery") return batteryScreen(screen, extras.bat, stale, waiting);
   if (face === "image") return { ...screen, image: extras.image ?? null };
+  if (face === "music") return { ...screen, music: waiting ? null : musicView(extras, stale), title: waiting ? "WAITING" : "NOTHING PLAYING" };
+  if (face === "eyes") return { ...screen, eyes: eyesView(extras) };
   return screen;
+}
+
+/** `format_clock()`: "3:07", "1:02:45". */
+function clock(secs: number): string {
+  const s = Math.trunc(secs);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return s >= 3600 ? `${Math.trunc(s / 3600)}:${two(Math.trunc((s % 3600) / 60))}:${two(s % 60)}` : `${Math.trunc(s / 60)}:${two(s % 60)}`;
+}
+
+function musicView(x: Extras, stale: boolean): MusicView | null {
+  const m = x.music;
+  if (!m) return null;
+  const playing = m.state === "play";
+  const dur = m.dur_s ?? 0;
+  let pos = (m.pos_s ?? 0) + (playing ? (x.musicAgeMs ?? 0) / 1000 : 0);
+  if (dur > 0) pos = Math.min(pos, dur);
+  const time = m.pos_s === undefined ? "" : dur > 0 ? `${clock(pos)} / ${clock(dur + 0.5)}` : clock(pos);
+  return {
+    cover: m.art && x.cover?.id === m.art ? x.cover.url : null,
+    playing,
+    title: m.title,
+    titleColor: stale ? COLOR.textDim : COLOR.text,
+    artist: m.artist ?? "",
+    time,
+    pct: m.pos_s !== undefined && dur > 0 ? (pos / dur) * 100 : 0,
+  };
+}
+
+const mix = (a: string, b: string, t: number) =>
+  "#" + [1, 3, 5].map((i) => Math.round(parseInt(a.slice(i, i + 2), 16) * (1 - t) + parseInt(b.slice(i, i + 2), 16) * t).toString(16).padStart(2, "0")).join("");
+
+/** `ambient_step()` and `ambient_pose()` without the glances: at the pointer, or ahead. */
+function eyesView(x: Extras): EyesView {
+  const now = x.nowMs ?? Date.now();
+  const g = x.gaze;
+  const fresh = g && now - g.movedAt < POINTER_FRESH_MS;
+  const still = g ? now - g.movedAt : 0;
+  const doze = g && still > DOZE_AFTER_MS ? Math.min(1, (still - DOZE_AFTER_MS) / DOZE_MS) : 0;
+  const lx = fresh ? LOOK_X * g.x : 0;
+  const ly = fresh ? LOOK_Y_BIAS + LOOK_Y * g.y : LOOK_Y_BIAS / 2;
+  return { x: lx * (1 - doze), y: ly * (1 - doze) + 16 * doze, doze, color: mix(AMBIENT_COLOR, ASLEEP_COLOR, doze) };
 }
 
 /** `format_rate()`: three figures at most, the number and its unit. */

@@ -30,8 +30,8 @@ const MEMORY_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_TOKENS: u32 = 256;
 
 const SYSTEM_PROMPT: &str = "\
-You are DualEye, a voice assistant in a desk gadget with two round screens (left = CPU, right = GPU), a microphone and a speaker. \
-The user speaks Italian or English. Speech recognition makes mistakes: \"rinza\", \"rinusa\" or \"rinks\" mean the face rings, \"clod\" or \"clawed\" mean clawd, \"cloud\" means claude.
+You are DualEye, a cute desk pet with two round screens. \
+The user can speaks Italian or English.
 
 Rules:
 1. To do something, call a tool. Never say it is done without calling it.
@@ -41,14 +41,14 @@ Rules:
 - pomodoro: pomodoro
 - stop, cancel or pause a timer: control_timer
 - watch face: set_face
+- music: play, pause, next or previous song: media_control
+- what song is playing: now_playing
 - scrivi, write: show_text
 - temperature, load, fans, memory: get_metrics
 - time or date: get_time
 - louder, quieter, brighter, dimmer: get_state, then set the new value
-3. Sinistra, left, CPU: the left screen. Destra, right, GPU: the right screen. No screen named: both. \
-Sottosopra, upside down: 180. Dritto, upright: 0. Mute: volume 0.
-4. Call each tool once. Never make numbers up.
-5. Then reply with one short sentence in the user's language, plain words for speech: no markdown, no emoji. \
+3. Call each tool once. Never make numbers up.
+4. Then reply with one short sentence in the user's language, plain words for speech: no markdown, no emoji. \
 If you can't do it, say so.";
 
 /// Where the agent's tools come from, and what runs them.
@@ -106,7 +106,7 @@ impl std::fmt::Debug for Agent {
 
 /// Read-only tools: calling one isn't an action for [`Turn::first_action_ms`].
 pub fn is_read_only(tool: &str) -> bool {
-    tool.starts_with("get_")
+    tool.starts_with("get_") || tool == "now_playing"
 }
 
 impl Agent {

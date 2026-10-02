@@ -505,6 +505,8 @@
       image: monitor.images[side],
       // A sample one, so the thumbnail shows what the face looks like.
       timer: last?.timer ?? { kind: "timer", state: "run", left_s: 272, total_s: 600 },
+      music: last?.music ?? { state: "play", title: "Nothing playing", pos_s: 70, dur_s: 200 },
+      cover: monitor.cover,
     });
   };
   const pick = (id: DeviceId, face: Face) => monitor.setFaces({ ...monitor.faces, [id]: face });
@@ -647,6 +649,38 @@
                   {/each}
                 </div>
               </div>
+            {/if}
+            {#if current === "music"}
+              {@const playing = monitor.last?.music}
+              <div class="rotation">
+                <span class="rlabel">Music</span>
+                <div class="actions inline">
+                  <button class="btn" title="Previous track" onclick={() => monitor.musicControl("previous").catch(() => {})}>⏮</button>
+                  <button class="btn" title="Play or pause" onclick={() => monitor.musicControl("toggle").catch(() => {})}
+                    >{playing?.state === "play" ? "Pause" : "Play"}</button
+                  >
+                  <button class="btn" title="Next track" onclick={() => monitor.musicControl("next").catch(() => {})}>⏭</button>
+                </div>
+              </div>
+              <p class="hint">
+                {#if playing}
+                  {playing.title}{playing.artist ? ` · ${playing.artist}` : ""}.
+                {:else}
+                  Nothing playing right now.
+                {/if}
+                Spotify and Apple Music on a Mac, any app that shows its music in the system on Windows, MPRIS players (with
+                <code>playerctl</code>) on Linux. "Alexa, pausa", "next song" and "cosa sta suonando?" work too.
+              </p>
+            {/if}
+            {#if current === "eyes"}
+              <label class="check">
+                <input type="checkbox" checked={monitor.followPointer} onchange={(e) => monitor.setFollowPointer(e.currentTarget.checked)} />
+                <span>Follow the mouse pointer</span>
+              </label>
+              <p class="hint">
+                The eyes look where the pointer is, glance about when it stops, and doze off after a minute of stillness until it
+                moves again. Put the face on both screens for a pair.
+              </p>
             {/if}
             {#if current === "image"}
               {@const sending = monitor.sending?.side === side ? monitor.sending : null}

@@ -25,6 +25,7 @@
 //!   dualeye eval                  # run the voice commands' eval set against the language model
 //!   dualeye say "Ciao!"           # speak through a running bridge's speaker
 //!   dualeye timer 10m pasta       # a timer on the board (also: timer, timer cancel, timer remind 17:30 call Marco, timer pomodoro)
+//!   dualeye music                 # what's playing (also: music pause, play, next, previous)
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -61,7 +62,7 @@ struct Args {
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(200..))]
     interval_ms: u64,
     /// Watch face on the left screen: classic, rings, plus, bar, claude, clawd,
-    /// net, disk, battery, image or timer. Without any face, source or rotation flag
+    /// net, disk, battery, image, timer, music or eyes. Without any face, source or rotation flag
     /// the board keeps its own; with one, the others fall back to classic,
     /// the usual source and 0
     #[arg(long)]
@@ -101,6 +102,9 @@ struct Args {
     /// Do not print a line per snapshot
     #[arg(long, short)]
     quiet: bool,
+    /// Don't send the mouse pointer to the eyes face: its eyes look about on their own
+    #[arg(long)]
+    no_follow_pointer: bool,
     /// Save each utterance the board streams after its wake word as a WAV
     /// file, in DIR or in `voice/` in DualEye's data folder
     #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "")]
@@ -255,6 +259,11 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// What's playing on this computer, as the music face shows it; `music
+    /// play|pause|toggle|next|previous` controls it
+    Music {
+        action: Option<String>,
+    },
     /// Speak through the board's speaker. Needs the app with spoken replies
     /// on, or `dualeye --tts`, running
     Say {
@@ -308,6 +317,7 @@ fn main() -> ExitCode {
             };
         }
         Some(Command::Timer { language, args }) => return timer(language.as_deref(), &args),
+        Some(Command::Music { action }) => return music(action.as_deref()),
         Some(Command::Mcp { port }) => {
             return match mcp::serve_stdio(port) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -408,6 +418,8 @@ fn main() -> ExitCode {
         // The alerts need the hooks in Claude Code's settings (the app's Display tab adds them).
         claude_alerts: Arc::default(),
         timers: Arc::new(Timers::open(timers::default_file())),
+        music: Arc::default(),
+        follow_pointer: Arc::new(AtomicBool::new(!args.no_follow_pointer)),
     };
     let stop = Arc::new(AtomicBool::new(false));
     // Ctrl-C ends the loop, so the whisper-server sidecar is stopped too.
@@ -583,6 +595,35 @@ fn parse_span(s: &str) -> Option<u64> {
         }
     }
     (num.is_empty() && total > 0).then_some(total)
+}
+
+fn music(action: Option<&str>) -> ExitCode {
+    if let Some(action) = action {
+        let result = action.parse().and_then(|a| dualeye_core::music::control(a, dualeye_core::music::now_playing().as_ref()));
+        match result {
+            Ok(player) => println!("{player}: {action}"),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+        // The player takes a moment to move on.
+        thread::sleep(Duration::from_millis(600));
+    }
+    match dualeye_core::music::now_playing() {
+        Some(n) => {
+            let clock = |s: f64| format!("{}:{:02}", s as u64 / 60, s as u64 % 60);
+            let at = match (n.position_now(), n.duration_s) {
+                (Some(p), Some(d)) => format!("  {} / {}", clock(p), clock(d)),
+                (Some(p), None) => format!("  {}", clock(p)),
+                _ => String::new(),
+            };
+            let by = if n.artist.is_empty() { String::new() } else { format!(" - {}", n.artist) };
+            println!("{} {}{by}{at}  ({})", if n.playing { "▶" } else { "⏸" }, n.title, n.player);
+        }
+        None => println!("nothing playing"),
+    }
+    ExitCode::SUCCESS
 }
 
 fn timer(language: Option<&str>, args: &[String]) -> ExitCode {

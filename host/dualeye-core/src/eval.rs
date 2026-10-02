@@ -153,7 +153,7 @@ impl Toolbox for SimBoard {
         match name {
             "set_face" => {
                 let face = args["face"].as_str().filter(|f| f.parse::<crate::Face>().is_ok());
-                let face = face.ok_or("face must be one of classic, rings, plus, bar, claude, clawd, net, disk, battery, image")?;
+                let face = face.ok_or("face must be one of classic, rings, plus, bar, claude, clawd, net, disk, battery, image, timer, music, eyes")?;
                 let source = args.get("source").map(|s| s.as_str().filter(|s| ["cpu", "gpu"].contains(s)).ok_or("source must be cpu or gpu")).transpose()?;
                 let (on, which) = screens(args)?;
                 on.iter().for_each(|s| set(format!("{s}.face"), json!(face)));
@@ -211,6 +211,14 @@ impl Toolbox for SimBoard {
                 Ok(self.board_state().to_string())
             }
             "get_metrics" => Ok(self.metrics.metrics_json().to_string()),
+            // Like crate::Music, with Spotify playing a song.
+            "media_control" => {
+                let action = args["action"].as_str().filter(|a| a.parse::<crate::music::Control>().is_ok());
+                let action = action.ok_or("unknown action, expected play, pause, toggle, next or previous")?;
+                set("music".into(), json!(action));
+                Ok(format!("Spotify: {action}"))
+            }
+            "now_playing" => Ok(json!({"state": "playing", "title": "Zitti e buoni", "artist": "Måneskin", "album": "Teatro d'ira", "player": "Spotify"}).to_string()),
             other => Err(format!("unknown tool {other}")),
         }
     }
@@ -318,7 +326,13 @@ pub fn run_case(set: &EvalSet, case: &Case, responder: &Responder) -> Result<Cas
             Responder::Rules => {
                 let started = Instant::now();
                 let volume = board.get("volume").as_u64().map(|v| v as u8);
-                let plan = intents::understand(text, &case.lang, &Context { snapshot: Some(board.metrics.clone()), volume, timers: board.timers.list(), alarm: false });
+                let plan = intents::understand(text, &case.lang, &Context {
+                    snapshot: Some(board.metrics.clone()),
+                    volume,
+                    timers: board.timers.list(),
+                    alarm: false,
+                    music: None,
+                });
                 let mut ok = true;
                 for (tool, args) in &plan.calls {
                     let result = board.call(tool, args);

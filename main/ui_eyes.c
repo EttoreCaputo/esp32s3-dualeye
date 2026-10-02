@@ -44,6 +44,23 @@
 #define IDLE_MAX_S 120
 #define IDLE_CHECK_MS 1000
 
+/* The eyes face: a soft white, a dim blue as it dozes. The pointer leads the
+ * eyes for POINTER_FRESH_MS after it last moved, then they glance about on
+ * their own. They doze off once nothing has happened for DOZE_AFTER_MS (no
+ * pointer, no conversation), over DOZE_MS, and wake when the pointer moves;
+ * but only once the host has sent the pointer at all: without it they stay
+ * awake. */
+#define AMBIENT_COLOR 0xE6F2FF
+#define ASLEEP_COLOR 0x34507A
+#define POINTER_FRESH_MS 6000
+#define DOZE_AFTER_MS 60000
+#define DOZE_MS 20000
+/* How far the pointer moves the eyes, in pixels: up and down about a point a
+ * little above the middle, the board usually sitting below the screen. */
+#define LOOK_X 36.0f
+#define LOOK_Y 26.0f
+#define LOOK_Y_BIAS -8.0f
+
 typedef enum { P_W, P_H, P_X, P_Y, P_LID_IN, P_LID_OUT, P_HAPPY, P_COUNT } param_t;
 
 typedef struct {
@@ -68,10 +85,15 @@ typedef struct {
     spring_t p[P_COUNT];
     geom_t geom;
     bool drawn;
+    /* The stage is up (the watch face hidden under it), since `shown_ms`. */
+    bool shown;
+    uint32_t shown_ms;
 } eye_t;
 
 static eye_t s_eyes[BOARD_LCD_COUNT];
 static lv_timer_t *s_timer;
+/* A conversation or a scene is on both screens, or still closing on one
+ * that isn't showing the eyes face. */
 static bool s_open;
 static voice_state_t s_state = VOICE_IDLE;
 static uint32_t s_state_ms;
@@ -93,6 +115,21 @@ static uint32_t s_next_glance_ms;
 static float s_gaze_x;
 static float s_gaze_y;
 
+/* Screens showing the eyes face, and when it last had something to watch
+ * besides the pointer (it came on, a conversation). */
+static bool s_ambient[BOARD_LCD_COUNT];
+static uint32_t s_awake_ms;
+/* The host's pointer in thousandths of -1..1, from the link task; when it
+ * last moved (lv_tick, 0 for never). */
+static volatile int32_t s_ptr_x;
+static volatile int32_t s_ptr_y;
+static volatile uint32_t s_ptr_ms;
+/* Where the eyes face looks, and how far asleep it is (0..1). */
+static float s_look_x;
+static float s_look_y;
+static uint32_t s_next_look_ms;
+static float s_doze;
+
 /* A scene the eyes play on their own while idle: what each eye looks like
  * `t` seconds in, for `ms`, in `color`. */
 typedef struct {
@@ -113,11 +150,36 @@ static bool s_idle_on;
 static bool s_busy;
 static uint32_t s_next_idle_ms;
 
+static bool any_ambient(void)
+{
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        if (s_ambient[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* White awake, a dim blue asleep. */
+static uint32_t ambient_color(void)
+{
+    uint32_t c = 0;
+    for (int shift = 0; shift <= 16; shift += 8) {
+        float a = (float) ((AMBIENT_COLOR >> shift) & 0xFF);
+        float b = (float) ((ASLEEP_COLOR >> shift) & 0xFF);
+        c |= (uint32_t) (a + (b - a) * s_doze + 0.5f) << shift;
+    }
+    return c;
+}
+
 static uint32_t state_color(voice_state_t state)
 {
     const skit_t *skit = s_skit != NULL ? s_skit : s_closing;
     if (skit != NULL && state == VOICE_IDLE) {
         return skit->color;
+    }
+    if (state == VOICE_IDLE && any_ambient()) {
+        return ambient_color();
     }
     switch (state) {
     case VOICE_THINKING:
@@ -343,6 +405,18 @@ static const skit_t SKITS[] = {
 
 #define SKIT_COUNT (sizeof(SKITS) / sizeof(SKITS[0]))
 
+/* The eyes face between conversations: open, looking where s_look_* says,
+ * sinking into a flat, slowly breathing line as it dozes off. */
+static void ambient_pose(float t, float out[P_COUNT])
+{
+    float d = s_doze;
+    out[P_W] = 110.0f + 8.0f * d;
+    out[P_H] = 124.0f - 108.0f * d + 3.0f * d * sinf(PI2 * t / 4.0f);
+    out[P_X] = s_look_x * (1.0f - d);
+    out[P_Y] = s_look_y * (1.0f - d) + 16.0f * d;
+    out[P_LID_IN] = out[P_LID_OUT] = 0.3f * fminf(1.0f, 2.0f * d);
+}
+
 /** What eye `eye` should look like `t` seconds into `state`. The left eye is
  * screen 0, so its inner corner is on the right. */
 static void expression(voice_state_t state, int eye, float t, float out[P_COUNT])
@@ -387,6 +461,10 @@ static void expression(voice_state_t state, int eye, float t, float out[P_COUNT]
         out[P_LID_OUT] = 0.38f;
         break;
     default:
+        if (s_ambient[eye]) {
+            ambient_pose(t, out);
+            break;
+        }
         // Shut: a flat line.
         out[P_W] = 124.0f;
         out[P_H] = 6.0f;
@@ -410,7 +488,9 @@ static void spring_step(spring_t *s, float target, float k, float zeta, float dt
 static void blink_step(uint32_t now)
 {
     bool skit = s_state == VOICE_IDLE && s_skit != NULL;
-    if (skit ? !s_skit->blinks : s_state == VOICE_IDLE || s_state == VOICE_ERROR) {
+    // The eyes face blinks too, until it dozes.
+    bool awake = s_state == VOICE_IDLE && !skit && any_ambient() && s_doze < 0.3f;
+    if (skit ? !s_skit->blinks : !awake && (s_state == VOICE_IDLE || s_state == VOICE_ERROR)) {
         s_blinking = false;
         s_blink = 1.0f;
         return;
@@ -463,6 +543,62 @@ static void glance_step(uint32_t now)
     s_next_glance_ms = now + lv_rand(900, 2800);
 }
 
+/* The pointer moved within `ms`. A move stamped after `now` counts too. */
+static bool pointer_within(uint32_t now, uint32_t ms)
+{
+    uint32_t moved = s_ptr_ms;
+    return moved != 0 && (int32_t) (now - moved) < (int32_t) ms;
+}
+
+/** The eyes face: look at the pointer while it moves, about the room when
+ * it doesn't, doze off when it has been still a long while, wake with a
+ * start when it moves again. */
+static void ambient_step(uint32_t now)
+{
+    if (!any_ambient()) {
+        s_doze = 0;
+        return;
+    }
+    if (pointer_within(now, POINTER_FRESH_MS)) {
+        s_look_x = LOOK_X * (float) s_ptr_x / 1000.0f;
+        s_look_y = LOOK_Y_BIAS + LOOK_Y * (float) s_ptr_y / 1000.0f;
+    } else if ((int32_t) (now - s_next_look_ms) >= 0) {
+        if (lv_rand(0, 9) < 4) {
+            s_look_x = 0;
+            s_look_y = LOOK_Y_BIAS / 2;
+        } else {
+            s_look_x = (float) lv_rand(0, 48) - 24.0f;
+            s_look_y = (float) lv_rand(0, 28) - 16.0f;
+        }
+        s_next_look_ms = now + lv_rand(1500, 4500);
+    }
+
+    if (s_state != VOICE_IDLE) {
+        s_awake_ms = now;
+    }
+    float doze = 0;
+    if (s_ptr_ms != 0) {
+        uint32_t since = s_ptr_ms;
+        if ((int32_t) (s_awake_ms - since) > 0) {
+            since = s_awake_ms;
+        }
+        int32_t still = (int32_t) (now - since);
+        if (still > DOZE_AFTER_MS) {
+            doze = fminf(1.0f, (float) (still - DOZE_AFTER_MS) / DOZE_MS);
+        }
+    }
+    if (doze == 0 && s_doze > 0.3f && s_state == VOICE_IDLE && s_skit == NULL) {
+        // Woken up: eyes wide for a moment.
+        for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+            if (s_ambient[i]) {
+                s_eyes[i].p[P_H].vel += 420.0f;
+            }
+        }
+        s_next_blink_ms = now + lv_rand(300, 700);
+    }
+    s_doze = doze;
+}
+
 static void color_step(void)
 {
     lv_color_t target = lv_color_hex(state_color(s_state));
@@ -493,15 +629,41 @@ static void compute_geom(int eye, geom_t *g)
     g->happy_top = happy > 0.02f ? lroundf(cy + h / 2 - happy * h * 0.8f) : 0;
 }
 
+static void hide_eye(eye_t *e)
+{
+    e->shown = false;
+    lv_obj_add_flag(e->stage, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_local_style_prop(e->screen, LV_STYLE_OPA_LAYERED, LV_PART_MAIN);
+}
+
+/* Settle s_open once something changed; stop drawing when no eye is up. */
+static void eyes_settle(void)
+{
+    bool talking = s_state != VOICE_IDLE || s_skit != NULL;
+    bool any = false;
+    bool others = false;
+    for (int i = 0; i < BOARD_LCD_COUNT; i++) {
+        any = any || s_eyes[i].shown;
+        others = others || (s_eyes[i].shown && !s_ambient[i]);
+    }
+    s_open = talking || others;
+    if (!s_open) {
+        s_closing = NULL;
+    }
+    if (!any) {
+        lv_timer_pause(s_timer);
+    }
+}
+
+/* The eyes off the screens that don't show the eyes face. */
 static void hide_eyes(void)
 {
-    s_open = false;
-    s_closing = NULL;
-    lv_timer_pause(s_timer);
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
-        lv_obj_add_flag(s_eyes[i].stage, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_local_style_prop(s_eyes[i].screen, LV_STYLE_OPA_LAYERED, LV_PART_MAIN);
+        if (s_eyes[i].shown && !s_ambient[i]) {
+            hide_eye(&s_eyes[i]);
+        }
     }
+    eyes_settle();
 }
 
 static void frame(lv_timer_t *timer)
@@ -519,31 +681,46 @@ static void frame(lv_timer_t *timer)
     float t = (float) ((s_skit != NULL ? now - s_skit_ms : now - s_state_ms)) / 1000.0f;
 
     s_level += (s_level_in - s_level) * fminf(1.0f, dt * 12.0f);
+    ambient_step(now);
     blink_step(now);
     glance_step(now);
     lv_color_t was = s_color;
     color_step();
     bool recolored = !lv_color_eq(was, s_color);
 
-    bool shut = true;
+    bool talking = s_state != VOICE_IDLE || s_skit != NULL;
+    bool hid = false;
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
         eye_t *e = &s_eyes[i];
+        if (!e->shown) {
+            continue;
+        }
         float target[P_COUNT];
         expression(s_state, i, t, target);
         for (int k = 0; k < P_COUNT; k++) {
             bool gaze = k == P_X || k == P_Y;
             spring_step(&e->p[k], target[k], gaze ? GAZE_K : SHAPE_K, gaze ? GAZE_ZETA : SHAPE_ZETA, dt);
         }
-        shut = shut && e->p[P_H].v < CLOSED_H;
+        // Shut and not wanted: the watch face comes back on this screen.
+        bool shut = e->p[P_H].v < CLOSED_H;
+        if (!talking && !s_ambient[i] && shut && now - s_state_ms >= CLOSE_MIN_MS && now - e->shown_ms >= CLOSE_MIN_MS) {
+            hide_eye(e);
+            hid = true;
+        }
     }
-    if (s_state == VOICE_IDLE && s_skit == NULL && shut && now - s_state_ms >= CLOSE_MIN_MS) {
-        hide_eyes();
-        return;
+    if (hid || (!talking && s_open)) {
+        eyes_settle();
+        if (lv_timer_get_paused(s_timer)) {
+            return;
+        }
     }
 
     // Repaint only the box the eye was in and the one it's in now.
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
         eye_t *e = &s_eyes[i];
+        if (!e->shown) {
+            continue;
+        }
         geom_t g;
         compute_geom(i, &g);
         if (e->drawn && !recolored && memcmp(&g, &e->geom, sizeof(g)) == 0) {
@@ -626,6 +803,8 @@ void ui_eyes_create(lv_display_t *const displays[BOARD_LCD_COUNT])
         lv_obj_remove_flag(e->stage, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(e->stage, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_event_cb(e->stage, draw_eye, LV_EVENT_DRAW_MAIN_END, e);
+        // Under the voice ring, which may go round an eyes face.
+        lv_obj_move_to_index(e->stage, 0);
     }
     s_timer = lv_timer_create(frame, FRAME_MS, NULL);
     lv_timer_pause(s_timer);
@@ -634,32 +813,52 @@ void ui_eyes_create(lv_display_t *const displays[BOARD_LCD_COUNT])
     s_idle_timer = lv_timer_create(idle_check, IDLE_CHECK_MS, NULL);
 }
 
+/* Put eye `e` up, shut, so it opens on its springs. When it's the first,
+ * start drawing in the colour of the moment. */
+static void show_eye(eye_t *e, uint32_t now)
+{
+    if (!s_eyes[0].shown && !s_eyes[1].shown) {
+        lv_color_t c = lv_color_hex(state_color(s_state));
+        s_rgb[0] = c.red;
+        s_rgb[1] = c.green;
+        s_rgb[2] = c.blue;
+        s_color = c;
+        s_last_ms = now;
+        lv_timer_resume(s_timer);
+    }
+    float shut[P_COUNT] = {0};
+    shut[P_W] = 124.0f;
+    shut[P_H] = 6.0f;
+    for (int k = 0; k < P_COUNT; k++) {
+        e->p[k] = (spring_t) {.v = shut[k]};
+    }
+    e->drawn = false;
+    e->shown = true;
+    e->shown_ms = now;
+    // Not LV_OBJ_FLAG_HIDDEN: un-hiding a screen makes LVGL mark its
+    // (missing) parent's layout dirty and crash. Fully transparent, the
+    // screen and the faces on it aren't drawn at all.
+    lv_obj_set_style_opa_layered(e->screen, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_remove_flag(e->stage, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Both eyes up for a conversation or a scene; one already open on an eyes
+ * face carries on from where it is. */
 static void open_eyes(uint32_t now)
 {
-    lv_color_t c = lv_color_hex(state_color(s_state));
-    s_rgb[0] = c.red;
-    s_rgb[1] = c.green;
-    s_rgb[2] = c.blue;
-    s_color = c;
-    float shut[P_COUNT];
-    expression(VOICE_IDLE, 0, 0, shut);
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
-        eye_t *e = &s_eyes[i];
-        for (int k = 0; k < P_COUNT; k++) {
-            e->p[k] = (spring_t) {.v = shut[k]};
+        if (!s_eyes[i].shown) {
+            show_eye(&s_eyes[i], now);
         }
-        e->drawn = false;
-        // Not LV_OBJ_FLAG_HIDDEN: un-hiding a screen makes LVGL mark its
-        // (missing) parent's layout dirty and crash. Fully transparent, the
-        // screen and the faces on it aren't drawn at all.
-        lv_obj_set_style_opa_layered(e->screen, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_remove_flag(e->stage, LV_OBJ_FLAG_HIDDEN);
     }
     s_level = s_level_in = 0;
     s_gaze_x = s_gaze_y = 0;
-    s_last_ms = now;
     s_open = true;
-    lv_timer_resume(s_timer);
+}
+
+static bool both_shown(void)
+{
+    return s_eyes[0].shown && s_eyes[1].shown;
 }
 
 void ui_eyes_show(voice_state_t state)
@@ -677,7 +876,7 @@ void ui_eyes_show(voice_state_t state)
     // A conversation takes over a scene from where the eyes are.
     s_skit = NULL;
     s_closing = NULL;
-    if (!s_open) {
+    if (!s_open || !both_shown()) {
         open_eyes(now);
     } else if (state == VOICE_LISTENING && was != VOICE_IDLE) {
         // Listening again (a follow-up): perk up.
@@ -703,7 +902,7 @@ static void play(const skit_t *skit)
     s_skit = s_last_skit = skit;
     s_closing = NULL;
     s_skit_ms = now;
-    if (!s_open) {
+    if (!s_open || !both_shown()) {
         open_eyes(now);
     }
     s_blinking = false;
@@ -722,7 +921,8 @@ static uint32_t idle_gap_ms(void)
 static void idle_check(lv_timer_t *timer)
 {
     uint32_t now = lv_tick_get();
-    if (!s_idle_on || s_busy || s_open || s_state != VOICE_IDLE) {
+    // Not over an eyes face that has dozed off.
+    if (!s_idle_on || s_busy || s_open || s_state != VOICE_IDLE || s_doze > 0) {
         s_next_idle_ms = now + idle_gap_ms();
         return;
     }
@@ -752,10 +952,39 @@ void ui_eyes_set_busy(bool busy)
 {
     s_busy = busy;
     if (busy && s_open && s_state == VOICE_IDLE) {
-        // The ring goes over the watch face: no eyes left on top of it.
+        // The ring goes over the watch face: no eyes left on top of it (but
+        // an eyes face keeps its own, under the ring).
         s_skit = NULL;
         hide_eyes();
     }
+}
+
+void ui_eyes_set_ambient(int screen, bool on)
+{
+    if (screen < 0 || screen >= BOARD_LCD_COUNT || s_ambient[screen] == on) {
+        return;
+    }
+    s_ambient[screen] = on;
+    // Off: the eye closes in frame(), unless a conversation holds it open.
+    if (!on) {
+        return;
+    }
+    uint32_t now = lv_tick_get();
+    s_awake_ms = now;
+    s_doze = 0;
+    s_next_look_ms = now + lv_rand(800, 2000);
+    if (!s_eyes[screen].shown) {
+        show_eye(&s_eyes[screen], now);
+    }
+}
+
+void ui_eyes_set_gaze(float x, float y)
+{
+    x = x < -1.0f ? -1.0f : x > 1.0f ? 1.0f : x;
+    y = y < -1.0f ? -1.0f : y > 1.0f ? 1.0f : y;
+    s_ptr_x = (int32_t) (x * 1000.0f);
+    s_ptr_y = (int32_t) (y * 1000.0f);
+    s_ptr_ms = lv_tick_get() | 1;
 }
 
 bool ui_eyes_play(const char *name)

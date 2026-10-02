@@ -22,7 +22,7 @@ typedef enum {
 } metrics_ui_state_t;
 
 /** Watch face of one screen. Names on the wire: classic, rings, plus, bar,
- * claude, clawd, net, disk, battery, image, timer. New ones go at the end:
+ * claude, clawd, net, disk, battery, image, timer, music, eyes. New ones go at the end:
  * NVS keeps the number. */
 typedef enum {
     METRICS_FACE_CLASSIC = 0,
@@ -36,6 +36,8 @@ typedef enum {
     METRICS_FACE_BATTERY,
     METRICS_FACE_IMAGE,
     METRICS_FACE_TIMER,
+    METRICS_FACE_MUSIC,
+    METRICS_FACE_EYES,
     METRICS_FACE_COUNT,
 } metrics_face_t;
 
@@ -147,6 +149,21 @@ typedef struct {
     char label[28];
 } metrics_timer_t;
 
+/* What's playing on the host, for the music face. The host sends the cover
+ * art apart (music/art, see art.h) and names it here by `art`; the board
+ * counts the position on from `pos_s` between snapshots while it plays. */
+typedef struct {
+    bool valid;
+    bool playing;
+    bool has_pos;
+    float pos_s;
+    float dur_s;
+    /* The cover the host sent for this track; 0 for none. */
+    uint32_t art;
+    char title[64];
+    char artist[48];
+} metrics_music_t;
+
 typedef struct {
     uint32_t ts;
     uint32_t updated_ms;
@@ -158,6 +175,7 @@ typedef struct {
     metrics_disk_t disk;
     metrics_battery_t battery;
     metrics_timer_t timer;
+    metrics_music_t music;
     /* Board settings, not from the host's snapshot: filled in before drawing. */
     metrics_face_t cpu_face;
     metrics_face_t gpu_face;

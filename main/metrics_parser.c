@@ -594,6 +594,54 @@ static bool parse_timer_object(js_t *j, metrics_timer_t *timer)
     }
 }
 
+/* {"state": "play" | "pause", "title"?: s, "artist"?: s, "pos_s"?: n,
+ *  "dur_s"?: n, "art"?: n} */
+static bool parse_music_object(js_t *j, metrics_music_t *music)
+{
+    if (!consume(j, '{')) {
+        return false;
+    }
+    bool got_state = false;
+    for (;;) {
+        char key[32];
+        bool done = false;
+        if (!object_key(j, key, sizeof(key), &done)) {
+            return false;
+        }
+        if (done) {
+            music->valid = got_state;
+            return true;
+        }
+        bool ok = true;
+        if (strcmp(key, "state") == 0) {
+            char name[8];
+            ok = parse_string(j, name, sizeof(name));
+            music->playing = strcmp(name, "play") == 0;
+            got_state = ok;
+        } else if (strcmp(key, "title") == 0) {
+            ok = parse_string(j, music->title, sizeof(music->title));
+        } else if (strcmp(key, "artist") == 0) {
+            ok = parse_string(j, music->artist, sizeof(music->artist));
+        } else if (strcmp(key, "pos_s") == 0) {
+            ok = read_number_field(j, &music->pos_s);
+            music->has_pos = ok;
+        } else if (strcmp(key, "dur_s") == 0) {
+            ok = read_number_field(j, &music->dur_s);
+        } else if (strcmp(key, "art") == 0) {
+            // A double: a float would round ids past 2^24.
+            double id = 0.0;
+            ok = parse_number(j, &id);
+            music->art = (uint32_t) id;
+        } else {
+            ok = skip_value(j, 1);
+        }
+        if (!ok) {
+            return false;
+        }
+        object_sep(j);
+    }
+}
+
 esp_err_t metrics_parse_line(const char *line, metrics_snapshot_t *out)
 {
     if (line == NULL || out == NULL) {
@@ -633,6 +681,8 @@ esp_err_t metrics_parse_line(const char *line, metrics_snapshot_t *out)
             ok = parse_battery_object(&j, &out->battery);
         } else if (strcmp(key, "timer") == 0) {
             ok = parse_timer_object(&j, &out->timer);
+        } else if (strcmp(key, "music") == 0) {
+            ok = parse_music_object(&j, &out->music);
         } else if (strcmp(key, "ts") == 0) {
             double value = 0.0;
             ok = parse_number(&j, &value);

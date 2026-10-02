@@ -104,7 +104,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<(RgbaImage, u32)>, String> {
 }
 
 /// The middle square, scaled to the screen.
-fn square(img: &RgbaImage) -> RgbaImage {
+pub(crate) fn square(img: &RgbaImage) -> RgbaImage {
     let (w, h) = img.dimensions();
     let side = w.min(h);
     let cropped = imageops::crop_imm(img, (w - side) / 2, (h - side) / 2, side, side).to_image();
@@ -137,7 +137,7 @@ fn thin(frames: Vec<(RgbaImage, u32)>) -> Vec<(RgbaImage, u32)> {
 }
 
 /// RGB565, little-endian; transparency over black.
-fn rgb565(img: &RgbaImage) -> Vec<u16> {
+pub(crate) fn rgb565(img: &RgbaImage) -> Vec<u16> {
     img.pixels()
         .map(|p| {
             let [r, g, b, a] = p.0;

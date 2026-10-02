@@ -7,6 +7,11 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.3.0
+
+- **Music.** A new face shows what's playing on your computer: its cover over the whole screen, the position on a thin ring round the edge, the title and the artist. Paused, the cover dims and a pause sign shows; a track without a cover gets a record instead. "Alexa, pausa", "next song", "cosa sta suonando?" work too.
+- **Eyes.** A new face is one big eye per screen that follows your mouse pointer. It blinks, glances about when the pointer stops, dozes off after a minute of stillness and wakes with a start when you move the mouse. Put it on both screens for a pair.
+
 ## 1.2.0
 
 - **Timers, reminders and a pomodoro.** "Alexa, timer 10 minuti", "ricordami alle 17 di chiamare Marco", "start a pomodoro": the right screen shows a ring that empties and the time left, and the board chimes when it's up until you say "Alexa". A new **Timer** face keeps them on a screen all the time. Set them from the app's Timers tab too.

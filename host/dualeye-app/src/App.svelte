@@ -44,6 +44,10 @@
         timer: shown?.timer,
         timerAgeMs: monitor.now - monitor.sentAt,
         nowMs: monitor.now,
+        music: shown?.music,
+        cover: monitor.cover,
+        musicAgeMs: monitor.now - monitor.sentAt,
+        gaze: monitor.gaze,
       },
     );
   };

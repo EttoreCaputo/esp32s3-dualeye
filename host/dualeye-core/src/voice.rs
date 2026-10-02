@@ -38,6 +38,7 @@ use crate::link::{Link, Tool};
 use crate::protocol::Channel;
 use crate::snapshot::Snapshot;
 use crate::stt::Stt;
+use crate::music::Music;
 use crate::timers::Timers;
 use crate::tts::{self, Tts};
 
@@ -237,6 +238,8 @@ pub(crate) struct Session {
     pub tools: Mutex<Option<Vec<Tool>>>,
     /// The host's timers, which the voice sets and silences.
     pub timers: Arc<Timers>,
+    /// What's playing, which the voice pauses and skips.
+    pub music: Arc<Music>,
 }
 
 /// What the link's reader hands the pipeline.
@@ -379,7 +382,13 @@ fn rules(link: &Link, session: &Session, text: &str, language: &str) -> (String,
     };
     let timers = &session.timers;
     let alarm = timers.is_ringing() || timers.dismissed_within(ALARM_FOLLOW_UP);
-    let ctx = Context { snapshot: session.snapshot.lock().unwrap().clone(), volume: volume(), timers: timers.list(), alarm };
+    let ctx = Context {
+        snapshot: session.snapshot.lock().unwrap().clone(),
+        volume: volume(),
+        timers: timers.list(),
+        alarm,
+        music: intents::asks_music(text).then(|| session.music.refresh()).flatten(),
+    };
     let plan = intents::understand(text, language, &ctx);
     let toolbox = BoardToolbox { link, session, language };
     let mut actions = Vec::new();
@@ -403,14 +412,21 @@ const ALARM_FOLLOW_UP: Duration = Duration::from_secs(20);
 const NOT_BY_VOICE: &[&str] = &["set_mic", "set_eyes", "play_eyes"];
 
 /// The board's tools as the voice agent gets them: without those in
-/// [`NOT_BY_VOICE`], plus the host's `get_metrics` and timers ([`Timers::tools`]).
+/// [`NOT_BY_VOICE`], plus the host's `get_metrics`, timers ([`Timers::tools`])
+/// and music ([`Music::tools`]).
 pub fn voice_tools(board: Vec<Tool>) -> Vec<Tool> {
     let metrics = Tool {
         name: "get_metrics".into(),
         description: "Current CPU and GPU temperature, load, clock, power and memory of this computer, and its fan speeds.".into(),
         input_schema: json!({"type": "object", "properties": {}}),
     };
-    board.into_iter().filter(|t| !NOT_BY_VOICE.contains(&t.name.as_str())).chain([metrics]).chain(Timers::tools()).collect()
+    board
+        .into_iter()
+        .filter(|t| !NOT_BY_VOICE.contains(&t.name.as_str()))
+        .chain([metrics])
+        .chain(Timers::tools())
+        .chain(Music::tools())
+        .collect()
 }
 
 /// `get_state` without what only a developer wants (memory, link and UI
@@ -463,6 +479,9 @@ impl Toolbox for BoardToolbox<'_> {
             return Ok(snapshot.metrics_json().to_string());
         }
         if let Some(result) = self.session.timers.call_tool(name, arguments, self.language) {
+            return result;
+        }
+        if let Some(result) = self.session.music.call_tool(name, arguments) {
             return result;
         }
         if NOT_BY_VOICE.contains(&name) {

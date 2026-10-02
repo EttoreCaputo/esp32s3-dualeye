@@ -24,6 +24,11 @@
 //! Timers ([`Timers`]) tick with the snapshots, which carry the one ending
 //! first to the board's timer face. When one is up the board rings and the
 //! same thread says what it was for; the wake word silences it.
+//!
+//! While a screen shows the music face, [`Music`] polls what's playing; its
+//! cover goes to the board (`music/art`) before the snapshot that names it.
+//! While one shows the eyes face, a thread of the session sends where the
+//! mouse pointer is (`eyes/gaze`), a few dozen times a second as it moves.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +45,8 @@ use crate::claude::{ClaudeMetrics, ClaudeUsage};
 use crate::firmware::{self, BoardFirmware};
 use crate::hub::Hub;
 use crate::link::{CallError, Link, LinkEvent};
+use crate::music::{self, Music};
+use crate::pointer;
 use crate::protocol::Channel;
 use crate::sensors::Collector;
 use crate::serial;
@@ -74,6 +81,11 @@ pub struct BridgeConfig {
     /// Timers, pomodoro and reminders: the board shows and rings them, the
     /// voice and hub clients set them.
     pub timers: Arc<Timers>,
+    /// What's playing, for the music face; the voice plays, pauses and skips.
+    pub music: Arc<Music>,
+    /// Send the mouse pointer to the eyes face. Shared, so a frontend can
+    /// turn it off while the bridge runs.
+    pub follow_pointer: Arc<AtomicBool>,
 }
 
 impl Default for BridgeConfig {
@@ -88,6 +100,8 @@ impl Default for BridgeConfig {
             voice: Arc::default(),
             claude_alerts: Arc::default(),
             timers: Arc::default(),
+            music: Arc::default(),
+            follow_pointer: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -368,6 +382,7 @@ fn session(
         settings_changed: voice_changed_settings.clone(),
         tools: Mutex::default(),
         timers: config.timers.clone(),
+        music: config.music.clone(),
     });
     on_event(BridgeEvent::Connected { port: port.to_string() });
 
@@ -379,6 +394,20 @@ fn session(
         }
     };
     let closed = |link: &Link| io::Error::new(io::ErrorKind::BrokenPipe, link.closed_reason().unwrap_or_else(|| "port closed".into()));
+
+    // The eyes face follows the pointer: a thread of its own, at its own pace.
+    let board_ready = Arc::new(AtomicBool::new(false));
+    let session_over = Arc::new(AtomicBool::new(false));
+    let _gaze = {
+        let (link, ready, over) = (Arc::downgrade(&link), board_ready.clone(), session_over.clone());
+        let (faces, follow) = (config.faces.clone(), config.follow_pointer.clone());
+        thread::Builder::new().name("dualeye-gaze".into()).spawn(move || gaze_loop(&link, &ready, &over, &faces, &follow))?;
+        OnGone(session_over)
+    };
+    // The cover the board has (it forgets them when it reboots), and one it refused.
+    let mut cover_on_board: Option<u32> = None;
+    let mut cover_refused: Option<u32> = None;
+    let mut has_music = false;
 
     let mut ready = false;
     let mut unanswered = 0u32;
@@ -394,13 +423,18 @@ fn session(
                 hub.set_unavailable("the board is restarting");
             }
             ready = false;
+            board_ready.store(false, Ordering::Relaxed);
             pushed = None;
+            cover_on_board = None;
             next_hello = Instant::now();
         }
         if !ready && Instant::now() >= next_hello {
             match link.hello(HELLO_TIMEOUT) {
                 Ok(hello) => {
                     ready = true;
+                    board_ready.store(true, Ordering::Relaxed);
+                    has_music = hello.capabilities.iter().any(|c| c == "music");
+                    cover_on_board = None;
                     unanswered = 0;
                     if let Some(hub) = &config.hub {
                         hub.attach(link.clone(), hello.clone(), port);
@@ -459,6 +493,28 @@ fn session(
             let _ = alert_tx.send(AlertInput::Timer(fired));
         }
         snapshot.timer = config.timers.board_view();
+        if snapshot.face.is_some_and(|f| f.shows(Face::Music)) {
+            config.music.want();
+        }
+        snapshot.music = config.music.board_view();
+        if let Some(view) = snapshot.music.as_mut().filter(|_| ready && has_music) {
+            // The cover first, so the snapshot naming it finds it there.
+            match config.music.cover().filter(|c| Some(c.id) == view.art) {
+                Some(cover) if cover_on_board != Some(cover.id) && cover_refused != Some(cover.id) => {
+                    match music::upload_cover(|m, p, t| link.call(m, p, t), &cover) {
+                        Ok(()) => cover_on_board = Some(cover.id),
+                        Err(CallError::Io(e)) => return Err(e),
+                        Err(e) => {
+                            cover_refused = Some(cover.id);
+                            view.art = None;
+                            on_event(BridgeEvent::BoardLog { line: format!("host: cover not sent: {e}") });
+                        }
+                    }
+                }
+                Some(cover) if cover_on_board != Some(cover.id) => view.art = None,
+                _ => {}
+            }
+        }
         if let Some(hub) = &config.hub {
             hub.set_snapshot(&snapshot);
         }
@@ -477,6 +533,48 @@ fn session(
         sleep_unless_stopped(next - now, stop);
     }
     Ok(())
+}
+
+/// Sets its flag when dropped: the session is over, its threads stop.
+struct OnGone(Arc<AtomicBool>);
+
+impl Drop for OnGone {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// How often the pointer is looked at while the eyes face is on, and while not.
+const GAZE_EVERY: Duration = Duration::from_millis(50);
+const GAZE_IDLE: Duration = Duration::from_millis(400);
+/// Smaller moves than this (on the -1..1 scale) aren't sent.
+const GAZE_STEP: f32 = 0.004;
+
+/// While a screen shows the eyes face, send the pointer each time it moves.
+/// The board takes a pointer that stands still for someone gone, and dozes off.
+fn gaze_loop(link: &Weak<Link>, ready: &AtomicBool, over: &AtomicBool, faces: &Mutex<Faces>, follow: &AtomicBool) {
+    let mut sent: Option<(f32, f32)> = None;
+    while !over.load(Ordering::Relaxed) {
+        let eyes = faces.lock().unwrap().shows(Face::Eyes);
+        if !(ready.load(Ordering::Relaxed) && follow.load(Ordering::Relaxed) && eyes) {
+            sent = None;
+            thread::sleep(GAZE_IDLE);
+            continue;
+        }
+        let Some(link) = link.upgrade() else { return };
+        if let Some((x, y)) = pointer::gaze()
+            && sent.is_none_or(|(sx, sy)| (x - sx).abs() >= GAZE_STEP || (y - sy).abs() >= GAZE_STEP)
+        {
+            // The first one after a pause goes even if the pointer is still: it
+            // tells the board the host follows the pointer.
+            if link.notify("eyes/gaze", json!({"x": x, "y": y})).is_err() {
+                return;
+            }
+            sent = Some((x, y));
+        }
+        drop(link);
+        thread::sleep(GAZE_EVERY);
+    }
 }
 
 /// What the alerts thread gets: a hook event (with when it came) or the

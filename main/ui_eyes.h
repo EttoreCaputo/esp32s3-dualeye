@@ -4,7 +4,8 @@
  * watch face on the wake word, look and move differently while listening,
  * thinking and speaking, and close again when it's over. While nobody is
  * talking they also open now and then on their own for a short scene (a
- * wink, a yawn, a look around...). Rounded-rect eyes in the Cozmo/EMO style,
+ * wink, a yawn, a look around...), and stay open on a screen showing the
+ * eyes face, following the host's pointer. Rounded-rect eyes in the Cozmo/EMO style,
  * drawn by LVGL each frame. */
 
 #include "board_display.h"
@@ -37,6 +38,16 @@ void ui_eyes_set_busy(bool busy);
 /** Play the scene `name` now (NULL: any). False when it's unknown, or a
  * conversation is on. With the LVGL lock held. */
 bool ui_eyes_play(const char *name);
+
+/** The eyes face on screen `screen`: an eye stays open there while nobody
+ * talks, looking where the host's pointer is (ui_eyes_set_gaze), glancing
+ * about without it, and dozing off when the pointer has been still a while.
+ * With the LVGL lock held. */
+void ui_eyes_set_ambient(int screen, bool on);
+
+/** Where the host's pointer is: x from -1 (left) to 1 (right), y from -1
+ * (top) to 1 (bottom) of its screens. Safe from any task. */
+void ui_eyes_set_gaze(float x, float y);
 
 /** The scenes' names, up to `max`; returns how many. */
 int ui_eyes_animations(const char **names, int max);

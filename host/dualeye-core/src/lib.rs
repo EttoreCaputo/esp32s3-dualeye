@@ -8,7 +8,9 @@
 //! [`Board`] uses it (or the port, when no bridge runs), and [`Esptool`] identifies and flashes the board.
 //! [`firmware`] reads the version of a flash image and of the board's firmware.
 //! [`ClaudeUsage`] adds Claude Code's usage for the Claude faces, [`Timers`]
-//! the timers, pomodoro and reminders the timer face counts down. The CLI
+//! the timers, pomodoro and reminders the timer face counts down, [`Music`]
+//! what's playing for the music face, [`pointer`] where the mouse is for the
+//! eyes face. The CLI
 //! and a Tauri app are both thin shells over this.
 
 pub mod agent;
@@ -26,8 +28,10 @@ pub mod link;
 pub mod llm;
 pub mod media;
 pub mod models;
+pub mod music;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+pub mod pointer;
 pub mod protocol;
 pub mod sensors;
 pub mod serial;
@@ -50,6 +54,7 @@ pub use llm::{Llm, LlmConfig};
 pub use sensors::{Collector, Reading};
 pub use serial::PortInfo;
 pub use stt::{Stt, SttConfig, SttLanguage, Transcript};
+pub use music::{BoardMusic, Music, NowPlaying};
 pub use timers::{BoardTimer, ShowOn, TimerInfo, Timers};
 pub use tts::{Tts, TtsConfig};
 pub use voice::{Speaker, Spoken, Utterance, VoiceConfig};

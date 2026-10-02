@@ -12,6 +12,9 @@
     FAN_PATH,
     CLASSIC_LAYOUT,
     LCD,
+    MUSIC_DISC_SIZE,
+    MUSIC_RING_SIZE,
+    MUSIC_RING_WIDTH,
     RING_GAP,
     USAGE_ARC_SIZE,
     WARN_PATH,
@@ -40,8 +43,8 @@
 </script>
 
 <!-- lv_arc: `value` 0–100 over `sweep` degrees, starting `rotation` degrees clockwise from 3 o'clock. -->
-{#snippet arc(diameter: number, color: string, track: string, value: number, sweep = 360, rotation = 270)}
-  {@const r = (diameter - ARC_WIDTH) / 2}
+{#snippet arc(diameter: number, color: string, track: string, value: number, sweep = 360, rotation = 270, width = ARC_WIDTH, trackOpacity = 1)}
+  {@const r = (diameter - width) / 2}
   {@const span = (sweep / 360) * 100}
   <g transform="rotate({rotation} {C} {C})">
     <circle
@@ -50,7 +53,8 @@
       {r}
       fill="none"
       stroke={track}
-      stroke-width={ARC_WIDTH}
+      stroke-opacity={trackOpacity}
+      stroke-width={width}
       stroke-linecap="round"
       pathLength="100"
       stroke-dasharray={sweep === 360 ? undefined : `${span} 100`}
@@ -63,7 +67,7 @@
         {r}
         fill="none"
         stroke={color}
-        stroke-width={ARC_WIDTH}
+        stroke-width={width}
         stroke-linecap="round"
         pathLength="100"
         stroke-dasharray="{(value / 100) * span} 100"
@@ -116,7 +120,7 @@
         {@render arc(USAGE_ARC_SIZE, screen.battery.color, COLOR.greenTrack, screen.battery.pct)}
       {:else if screen.face === "timer"}
         {@render arc(USAGE_ARC_SIZE, screen.timer?.color ?? COLOR.timerTrack, screen.timer?.track ?? COLOR.timerTrack, screen.timer?.pct ?? 0)}
-      {:else if screen.face !== "image"}
+      {:else if screen.face !== "image" && screen.face !== "music" && screen.face !== "eyes"}
         {@render arc(USAGE_ARC_SIZE, dev.accent, dev.track, screen.usagePct)}
         {#if screen.face === "rings"}
           {@render arc(USAGE_ARC_SIZE - RING_GAP, screen.tempRing, COLOR.tempTrack, screen.tempPct)}
@@ -188,6 +192,62 @@
           {screen.battery.status === "CHARGING" ? "⚡ " : ""}{screen.battery.status}
         </span>
         <div class="row dim">{screen.battery.time}</div>
+      </div>
+    {:else if screen.face === "music"}
+      <!-- create_music(): the cover (or a record), a shade, the ring, then the text. -->
+      {@const m = screen.music}
+      {#if m?.cover}
+        <img class="picture" src={m.cover} alt="" style:opacity={m.playing ? 1 : 0.5} />
+        <div class="scrim"></div>
+      {:else}
+        <div class="disc" style:width="{MUSIC_DISC_SIZE}px" style:height="{MUSIC_DISC_SIZE}px" style:opacity={m ? 1 : 0.4}>
+          <div class="groove" style:width="92px" style:height="92px"></div>
+          <div class="groove" style:width="66px" style:height="66px"></div>
+          <div class="label" style:background={COLOR.music}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2.5v8.1a2.4 2.4 0 1 0 1.4 2.2V5.6l5.2-1.3v4.9a2.4 2.4 0 1 0 1.4 2.2V1z" fill="#000" /></svg>
+          </div>
+        </div>
+      {/if}
+      <svg class="rings" viewBox="0 0 {LCD} {LCD}" aria-hidden="true">
+        {@render arc(
+          MUSIC_RING_SIZE,
+          m?.cover ? COLOR.text : COLOR.music,
+          m?.cover ? "#000" : COLOR.musicTrack,
+          m?.pct ?? 0,
+          360,
+          270,
+          MUSIC_RING_WIDTH,
+          m?.cover ? 0.5 : 1,
+        )}
+      </svg>
+      {#if m && !m.playing}
+        <div class="paused"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2h3v12H4zM9 2h3v12H9z" fill="#fff" /></svg></div>
+      {/if}
+      {#if m}
+        <div class="music-col">
+          <div class="m-title" style:color={m.titleColor}>{m.title}</div>
+          {#if m.artist}<div class="m-artist">{m.artist}</div>{/if}
+          <div class="m-time">{m.time}</div>
+        </div>
+      {:else}
+        <span class="title music-hint" style:color={COLOR.textDim}>{screen.title}</span>
+      {/if}
+    {:else if screen.face === "eyes" && screen.eyes}
+      <!-- ui_eyes.c's ambient_pose(): one eye per screen, where the pointer is. -->
+      {@const e = screen.eyes}
+      {@const w = 110 + 8 * e.doze}
+      {@const h = 124 - 108 * e.doze}
+      <div
+        class="ambient-eye"
+        class:blinks={e.doze < 0.3}
+        style:width="{w}px"
+        style:height="{h}px"
+        style:left="{LCD / 2 + e.x - w / 2}px"
+        style:top="{LCD / 2 + e.y - h / 2}px"
+        style:background={e.color}
+        style:border-radius="{Math.min(w, h) * 0.3}px"
+      >
+        <div class="lid" style:height="{0.3 * Math.min(1, 2 * e.doze) * 100}%"></div>
       </div>
     {:else if screen.face === "image"}
       {#if screen.image}
@@ -395,6 +455,119 @@
   .hint {
     text-align: center;
     white-space: normal;
+  }
+  /* The music face: a shade from clear to 90 % black over the bottom 130 px. */
+  .scrim {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 130px;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.9) 59%, rgba(0, 0, 0, 0.9) 100%);
+  }
+  .disc,
+  .groove,
+  .disc .label,
+  .paused {
+    position: absolute;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+  }
+  .disc {
+    left: 50%;
+    top: calc(50% - 30px);
+    transform: translate(-50%, -50%);
+    background: #141416;
+    border: 1px solid #26262a;
+    box-sizing: border-box;
+  }
+  .groove {
+    border: 1px solid #26262a;
+    box-sizing: border-box;
+  }
+  .disc .label {
+    width: 38px;
+    height: 38px;
+  }
+  .disc .label svg,
+  .paused svg {
+    width: 14px;
+    height: 14px;
+  }
+  .paused {
+    left: 96px;
+    top: 66px;
+    width: 48px;
+    height: 48px;
+    background: rgba(0, 0, 0, 0.6);
+  }
+  .music-col {
+    position: absolute;
+    left: 50%;
+    bottom: 26px;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-family: "Montserrat", sans-serif;
+    white-space: nowrap;
+  }
+  .m-title,
+  .m-artist {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+  }
+  .m-title {
+    width: 168px;
+    font: 500 16px/18px "Montserrat", sans-serif;
+  }
+  .m-artist {
+    width: 150px;
+    margin-top: 2px;
+    font: 500 14px/16px "Montserrat", sans-serif;
+    color: #c8c8cc;
+  }
+  .m-time {
+    margin-top: 4px;
+    font: 500 12px/14px "Montserrat", sans-serif;
+    color: #9a9a9c;
+  }
+  .music-hint {
+    position: absolute;
+    left: 50%;
+    top: calc(50% + 58px);
+    transform: translate(-50%, -50%);
+    white-space: nowrap;
+  }
+  /* The eyes face: springs on the board, a short ease here. */
+  .ambient-eye {
+    position: absolute;
+    overflow: hidden;
+    transition:
+      left 140ms ease-out,
+      top 140ms ease-out,
+      width 400ms ease,
+      height 400ms ease,
+      background 600ms ease;
+  }
+  .ambient-eye.blinks {
+    animation: blink 4.2s infinite;
+  }
+  .lid {
+    background: #000;
+    transition: height 400ms ease;
+  }
+  @keyframes blink {
+    0%,
+    95%,
+    100% {
+      transform: scaleY(1);
+    }
+    97% {
+      transform: scaleY(0.07);
+    }
   }
   .clawd {
     display: block;

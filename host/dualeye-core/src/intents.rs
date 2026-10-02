@@ -5,13 +5,15 @@
 //! [`understand`] looks for a few keywords in what Whisper wrote: a face
 //! name, a screen, "luminosità"/"brightness", "volume", "ruota"/"rotate",
 //! "scrivi"/"write", "temperatura"/"temperature", "che ore"/"what time",
-//! "timer", "ricordami"/"remind me", "pomodoro".
+//! "timer", "ricordami"/"remind me", "pomodoro", "pausa la musica"/"next song",
+//! "cosa sta suonando"/"what's playing".
 //! It returns the board tools to call and what to answer; anything else is
 //! answered with "Non ho capito" / "Sorry, I didn't get that".
 
 use chrono::{Local, NaiveTime, Timelike};
 use serde_json::{Value, json};
 
+use crate::music::NowPlaying;
 use crate::snapshot::{Face, Snapshot};
 use crate::timers::{self, TimerInfo};
 
@@ -26,6 +28,8 @@ pub struct Context {
     pub timers: Vec<TimerInfo>,
     /// A timer rings, or rang until the wake word a moment ago: "stop" is for it.
     pub alarm: bool,
+    /// What's playing, when the words are about music ([`asks_music`]).
+    pub music: Option<NowPlaying>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,6 +134,8 @@ fn face(words: &[String]) -> Option<Face> {
         (&["disk", "disco", "dischi"], Face::Disk),
         (&["battery", "batteria"], Face::Battery),
         (&["image", "immagine", "foto", "picture", "photo", "gif"], Face::Image),
+        (&["music*", "musica", "canzon*", "song*"], Face::Music),
+        (&["occhi", "occhio", "eyes", "eye"], Face::Eyes),
     ];
     table.iter().find(|(names, _)| has(words, names)).map(|&(_, f)| f)
 }
@@ -150,6 +156,10 @@ pub fn understand(text: &str, language: &str, ctx: &Context) -> Plan {
     let screen = Screen::of(&w);
 
     if let Some(plan) = timer_plan(text, &w, it, ctx) {
+        return plan;
+    }
+
+    if let Some(plan) = music_plan(&w, it, ctx) {
         return plan;
     }
 
@@ -248,10 +258,10 @@ pub fn understand(text: &str, language: &str, ctx: &Context) -> Plan {
     if has_pair(&w, &[("cosa", "sai"), ("what", "can")]) || has(&w, &["aiuto", "help"]) {
         let reply = if it {
             "Posso cambiare faccia, luminosità, rotazione e volume, scrivere un messaggio, dirti le temperature e l'ora, \
-             e impostare timer, promemoria e un pomodoro."
+             impostare timer, promemoria e un pomodoro, e mettere in pausa o cambiare la musica."
         } else {
             "I can change the face, brightness, rotation and volume, write a message, tell you the temperatures and the time, \
-             and set timers, reminders and a pomodoro."
+             set timers, reminders and a pomodoro, and pause or skip the music."
         };
         return plan(vec![], it, reply.into());
     }
@@ -606,6 +616,55 @@ fn timer_plan(text: &str, w: &[String], it: bool, ctx: &Context) -> Option<Plan>
     Some(plan(vec![tool("set_timer", args)], it, reply))
 }
 
+const MUSIC_WORDS: &[&str] = &["music*", "musica", "canzon*", "brano", "brani", "song*", "track*", "traccia", "spotify", "pezzo"];
+
+/// Words about the music playing, so the voice looks at what plays first.
+pub fn asks_music(text: &str) -> bool {
+    let w = words(text);
+    has(&w, MUSIC_WORDS) || has(&w, &["suonando", "playing", "ascoltando", "listening", "pausa", "pause", "skip", "salta"])
+}
+
+/// "Metti in pausa la musica", "prossima canzone", "next song", "cosa sta
+/// suonando": media_control, or the answer from what plays.
+fn music_plan(w: &[String], it: bool, ctx: &Context) -> Option<Plan> {
+    // A face: "metti la faccia musica".
+    if has(w, &["faccia", "face", "quadrante"]) {
+        return None;
+    }
+    let about = has(w, MUSIC_WORDS);
+    let asks = has(w, &["suonando", "playing", "ascoltando", "listening", "canta", "sings", "singing"])
+        && (has(w, &["cosa", "che", "what", "chi", "who", "quale", "which"]) || about);
+    if asks {
+        let reply = match (&ctx.music, it) {
+            (Some(n), true) if !n.artist.is_empty() => format!("{} di {}.", n.title, n.artist),
+            (Some(n), false) if !n.artist.is_empty() => format!("{} by {}.", n.title, n.artist),
+            (Some(n), _) => format!("{}.", n.title),
+            (None, true) => "Non sta suonando niente.".into(),
+            (None, false) => "Nothing is playing.".into(),
+        };
+        return Some(plan(vec![], it, reply));
+    }
+    // Without a word about music, "pausa" alone is for it only while it plays.
+    let playing = ctx.music.as_ref().is_some_and(|m| m.playing);
+    if !about && !(playing && w.len() <= 3) && !has(w, &["skip", "salta"]) {
+        return None;
+    }
+    let (action, reply) = if has(w, &["prossim*", "successiv*", "next", "skip", "salta", "avanti"]) {
+        ("next", if it { "Prossima canzone." } else { "Next song." })
+    } else if has(w, &["precedent*", "previous", "indietro", "back", "prima"]) {
+        ("previous", if it { "Canzone precedente." } else { "Previous song." })
+    } else if has(w, &["pausa", "pause", "ferma", "fermala", "stop", "stoppa", "basta"]) {
+        ("pause", if it { "In pausa." } else { "Paused." })
+    } else if has(w, &["riprendi", "play", "resume", "continua", "suona", "riproduci", "fai", "metti", "avvia", "start"]) {
+        ("play", if it { "Ecco la musica." } else { "Playing." })
+    } else {
+        return None;
+    };
+    let mut p = plan(vec![tool("media_control", json!({"action": action}))], it, reply.into());
+    p.failure = if it { "Non trovo nessun lettore musicale aperto.".into() } else { "I can't find a music player open.".into() };
+    Some(p)
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
@@ -792,6 +851,31 @@ mod tests {
         assert_eq!(number_word("trentotto"), Some(38));
         assert_eq!(number_word("quarantacinque"), Some(45));
         assert_eq!(number_word("sei"), Some(6));
+    }
+
+    #[test]
+    fn music_by_rules() {
+        let media = |a: &str| vec![tool("media_control", json!({"action": a}))];
+        assert_eq!(calls("Metti in pausa la musica", "it"), media("pause"));
+        assert_eq!(calls("Prossima canzone", "it"), media("next"));
+        assert_eq!(calls("Next song please", "en"), media("next"));
+        assert_eq!(calls("Play the previous track", "en"), media("previous"));
+        assert_eq!(calls("Riprendi la musica", "it"), media("play"));
+        assert_eq!(calls("Skip", "en"), media("next"));
+        // The timer's pause stays the timer's; a face stays a face.
+        assert_eq!(calls("Metti in pausa il timer", "it"), [tool("control_timer", json!({"action": "pause"}))]);
+        assert_eq!(calls("Metti la faccia musica a destra", "it"), [tool("set_face", json!({"face": "music", "screen": "right"}))]);
+        assert_eq!(calls("Show the eyes on both screens", "en"), [tool("set_face", json!({"face": "eyes", "screen": "both"}))]);
+        // "Pausa" alone is the music's only while it plays.
+        assert!(!understand("Pausa", "it", &Context::default()).understood);
+        let track = crate::music::tests_track();
+        let playing = Context { music: Some(track), ..Context::default() };
+        assert_eq!(understand("Pausa", "it", &playing).calls, media("pause"));
+        let asked = understand("Cosa sta suonando?", "it", &playing);
+        assert!(asked.calls.is_empty());
+        assert_eq!(asked.reply, "Zitti e buoni di Måneskin.");
+        assert_eq!(understand("What's playing?", "en", &Context::default()).reply, "Nothing is playing.");
+        assert!(asks_music("che canzone è questa"));
     }
 
     #[test]

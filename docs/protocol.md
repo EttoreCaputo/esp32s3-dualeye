@@ -57,6 +57,9 @@ Receivers ignore channels they don't know.
 | `media/write` | `{"offset":n,"data":base64}` | `{"written":n}`; the next `chunk` bytes at most, in order. The flash is erased as the data arrives |
 | `media/end` | none | `{"frames":n}` once the CRC-32 (the zlib one) matches and the picture checks out; then the `image` face shows it and it survives a reboot |
 | `media/clear` | `{"screen":"right"}` | `{}`; remove that screen's picture |
+| `music/info` | none | `{"size":240,"chunk":2880,"art":n}` (firmware 1.3): the cover's side, the most it takes per `music/art`, the id of the cover it has (0: none) |
+| `music/art` | `{"id":n,"offset":n,"data":base64}` | `{"received":n}`, plus `"done":true` with the last chunk; the cover of what's playing, for the `music` face (firmware 1.3): 240 × 240 RGB565, little-endian, raw (115200 bytes), at most `chunk` bytes at a time and in order from offset 0. `id` (1 to 2^30) names it: the last chunk puts it on screen wherever the snapshot's `music.art` says that id. Kept in PSRAM, not across a reboot |
+| `eyes/gaze` | `{"x":-0.42,"y":0.1}` | Sent as a notification (no `id`, no answer), up to 20 times a second while the host's mouse pointer moves (firmware 1.3): where it is, -1 (left, top) to 1 (right, bottom) of all the host's screens. The `eyes` face looks there for 6 s after the last one, then about on its own; once the host has sent any, a minute without one (nor a conversation) and the eyes doze off, until the next |
 | `debug/audio` | `{"cmd":"tone 440 500"}` | `{}`; the M0 audio self-test, its output comes as `log` lines (see `main/audio_selftest.h`) |
 
 `Tool` and `CallToolResult` have the shapes of the [MCP](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) `tools/list` and `tools/call` results (`name`, `description`, `inputSchema`; `content`, `structuredContent`, `isError`), so the host's MCP server (M2) can pass them through unchanged. A tool that runs but fails (bad argument, out of range) returns `isError: true` with the reason as text. Protocol errors use the standard JSON-RPC codes: `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params (including an unknown tool).
@@ -81,6 +84,8 @@ The snapshot the host sends about once a second. Its shape is protocol 1's line 
 ```
 
 Firmware 1.2 also reads `"timer":{"kind":"timer","state":"run","left_s":272.4,"total_s":600,"label":"PASTA","more":1,"round":2,"rounds":4,"screen":"right"}`, the host's timer that ends first (absent when none runs), for the `timer` face: `kind` is `timer`, `work` or `break` (a pomodoro's, with its `round` of `rounds`) or `reminder`; `state` is `run`, `pause` or `ring`; `left_s` counts from the snapshot (the board counts down on its own between snapshots); `label` is ASCII capitals, up to 27 characters; `more` is how many other timers run; `screen` (`left` or `right`, optional) is the screen that shows the timer face instead of its own while the data is live. While `state` is `ring` the board plays a chime every 2.5 s, unless the voice overlay or the speaker is busy. The host keeps the timers, ends the ringing (after a minute, on the wake word, or when told) and says what the timer was for.
+
+Firmware 1.3 also reads `"music":{"state":"play","title":"Zitti e buoni","artist":"Maneskin","pos_s":61.2,"dur_s":195.0,"art":656393640}`, what's playing on the host (absent when nothing is), for the `music` face: `state` is `play` or `pause`; `title` (up to 63 characters) and `artist` (up to 47, optional) are ASCII; `pos_s` and `dur_s` are optional, and the board counts the position on between snapshots while it plays; `art` (optional) is the id of the cover sent with `music/art`, which the host sends before the snapshot that names it. Without the cover that `art` names, the face shows a record instead.
 
 Firmware 1.1 also reads `"net":{"rx_bps":…,"tx_bps":…}` (bytes per second, every interface but loopback), `"disk":{"used_gb":…,"total_gb":…,"read_bps":…,"write_bps":…}` (the system disk; the rates are optional) and `"bat":{"pct":…,"charging":…,"plugged":…,"mins":…}` (absent without a battery; `mins` to empty, or to full while charging, optional), for the `net`, `disk` and `battery` faces; older firmware skips them.
 
@@ -125,7 +130,7 @@ Every `ESP_LOG*` line after the link starts, one line per frame. The level lette
    {"protocol":2,"firmware":"1.0.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log","audio_up","audio_down"],"capabilities":["tools","voice","speaker"]}
    ```
 
-   `voice` (and `audio_up`) are there when the wake word runs (ESP-SR models found in the `model` partition), `speaker` (and `audio_down`) when the board can play speech.
+   Firmware 1.3 adds the capabilities `music` (`music/art`) and `gaze` (`eyes/gaze`). `voice` (and `audio_up`) are there when the wake word runs (ESP-SR models found in the `model` partition), `speaker` (and `audio_down`) when the board can play speech.
 
 3. The host reads faces and rotation with `get_state` and adopts them (the CLI pushes its own with `set_face` / `set_rotation` when given on the command line), then streams `metrics`. Later changes on the host are pushed with `tools/call`.
 
@@ -137,7 +142,7 @@ Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` i
 
 | Tool | Arguments | Effect |
 |------|-----------|--------|
-| `set_face` | `face`: `classic` · `rings` · `plus` · `bar` · `claude` · `clawd` · `net` · `disk` · `battery` · `image` (those four: firmware 1.1) · `timer` (firmware 1.2); `source`: `cpu` · `gpu` (firmware 1.1, optional); `screen` | Switch the watch face. `source` is whose metrics classic, rings, plus and bar show on that screen, kept until changed (by default the CPU on the left, the GPU on the right) |
+| `set_face` | `face`: `classic` · `rings` · `plus` · `bar` · `claude` · `clawd` · `net` · `disk` · `battery` · `image` (those four: firmware 1.1) · `timer` (firmware 1.2) · `music` · `eyes` (firmware 1.3); `source`: `cpu` · `gpu` (firmware 1.1, optional); `screen` | Switch the watch face. `source` is whose metrics classic, rings, plus and bar show on that screen, kept until changed (by default the CPU on the left, the GPU on the right) |
 | `set_rotation` | `degrees`: 0 · 90 · 180 · 270; `screen` | Turn the screen clockwise on top of the DualEye mounting |
 | `set_brightness` | `percent`: 0–100; `screen` | Backlight level (0 turns it off) |
 | `show_text` | `text` (up to 120 characters, ASCII); `screen`; `seconds`: 1–30, default 4 | Show a message over the face, then hide it |

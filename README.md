@@ -49,7 +49,7 @@ Closing the window keeps the app running in the tray, so the screens stay live.
 
 ## Watch faces
 
-Each screen shows one of eleven faces, chosen independently in Settings → **Display**; any face goes on either screen:
+Each screen shows one of thirteen faces, chosen independently in Settings → **Display**; any face goes on either screen:
 
 | Face | Shows |
 |------|-------|
@@ -64,6 +64,8 @@ Each screen shows one of eleven faces, chosen independently in Settings → **Di
 | `battery` | The laptop's charge on the ring (orange below 20 %, red below 10 % on battery), whether it's charging, and the time to empty or to full; "No battery" on a desktop (firmware 1.1) |
 | `image` | A picture or an animated GIF of your own (firmware 1.1, see below) |
 | `timer` | The timer, reminder or pomodoro that ends first, counting down on a ring that empties (firmware 1.2, see [Timers](#timers-reminders-and-a-pomodoro)) |
+| `music` | What's playing on the computer: its cover over the whole screen, the position on a ring round the edge, title and artist (firmware 1.3, see [Music](#music)) |
+| `eyes` | One big eye per screen that follows the mouse pointer, blinks, and dozes off when the mouse stays still (firmware 1.3, see [Eyes](#eyes)) |
 
 The first four show the CPU or the GPU: by default the CPU on the left screen and the GPU on the right one, but **Shows** under each screen switches it, so both screens can show the GPU, or the CPU can go on the right.
 
@@ -74,6 +76,22 @@ The first four show the CPU or the GPU: by default the CPU on the left screen an
 While a timer runs, the right screen (or the left, or neither: Settings → **Timers** → **Takes over**) shows it instead of its face: a ring that empties, the time left, its name, and "+1 more" when others are running. Timers are amber, a pomodoro's focus red and its breaks green, reminders cyan. When one is up the board chimes every few seconds for a minute; saying "Alexa" silences it ("Alexa, stop"), and with spoken replies on it says what it was for: *"Il timer pasta è finito"*, *"Promemoria: chiamare Marco."* A pomodoro is 25 minutes of focus and 5 of break, four times, unless you say otherwise; it moves on by itself with a short chime. Put the `timer` face on a screen to keep the timers there all the time.
 
 The timers live on the computer (`timers.json` in DualEye's data folder), so they run with the window closed and a reminder still comes after a restart; they ring while the app (or `dualeye`) runs.
+
+### Music
+
+The **Music** face shows what's playing: the cover over the whole screen, the position on a thin ring round the edge, the title and the artist at the bottom. Paused, the cover dims and a pause sign shows; a track without a cover gets a record instead. With the face on, Settings → **Display** has play, pause and skip buttons, and the voice works too: *"Alexa, metti in pausa la musica"*, *"prossima canzone"*, *"next song"*, *"riprendi"*, *"cosa sta suonando?"*.
+
+Where it comes from:
+
+- **macOS:** Spotify and Apple Music, asked over AppleScript while they're open (never started). The first time, macOS asks whether DualEye may control them: allow it, or later in System Settings → Privacy & Security → Automation.
+- **Windows:** whatever shows its music in the system's media controls: Spotify, a browser playing YouTube, Media Player...
+- **Linux:** any MPRIS player, through `playerctl` (`sudo apt install playerctl`).
+
+Only the screens showing the face make the app look, every 2 seconds. The cover goes to the board over USB (Spotify's from its own image server); nothing else leaves the computer.
+
+### Eyes
+
+The **Eyes** face is one big eye per screen: put it on both for a pair. It looks where the mouse pointer is, blinks, glances about when the pointer stops, and after a minute without the mouse (or a voice conversation) it dozes off, to wake with a start when you move it. *"Alexa, metti gli occhi su entrambi gli schermi"* puts it on. **Follow the mouse pointer** under the face turns the following off. The pointer is read on macOS, Windows and Linux under X11; under Wayland only while it's over an X11 window.
 
 ### Your own pictures
 
@@ -126,7 +144,7 @@ They close and the watch faces come back when the conversation ends. While nobod
 - **Follow-ups.** After an answer the board keeps listening for 4 s, so *"e anche a destra"* or *"a bit more"* works straight away; the last exchanges are remembered for 3 minutes. Turn it off with **Keep listening after an answer**.
 - **Interrupting.** Say "Alexa" while the board talks: it stops and listens.
 - **Wake word, mic and volume.** Choose "Alexa" or "Hi ESP", mute the mic, and set the speaker's volume; the board remembers all three.
-- **Without a language model** (turned off, or not downloaded) a few fixed phrases still work: faces, screens, brightness, rotation, volume, temperatures, the time, and timers, reminders and the pomodoro.
+- **Without a language model** (turned off, or not downloaded) a few fixed phrases still work: faces, screens, brightness, rotation, volume, temperatures, the time, timers, reminders and the pomodoro, and the music (pause, play, next, previous, what's playing).
 
 On an M1 Pro the answer starts about 1.5 s after you stop talking (2–3 s when something changes on the board).
 
@@ -190,6 +208,7 @@ For Claude Desktop, add the same command to `claude_desktop_config.json` (Settin
 | `get_claude_usage` | Host | Claude Code tokens in the 5-hour window and today, plan limits used, time to reset, working or idle |
 | `speak` | Host | Says a short text out loud through the board, in Italian or English; needs the app with spoken replies on, or `dualeye --tts`, running |
 | `set_timer`, `set_reminder`, `pomodoro`, `control_timer`, `get_timers` | Host | [Timers](#timers-reminders-and-a-pomodoro) the board counts down and rings; they ring while the app (or `dualeye`) runs |
+| `media_control`, `now_playing` | Host | Play, pause or skip the [music](#music) playing on the computer, and say what it is |
 
 Changes made this way show up in the app. It works with the app closed too: the server then opens the board's port for each call.
 
@@ -254,11 +273,13 @@ dualeye timer                                    # what's running
 dualeye timer cancel pasta                       # or pause / resume, a label or all
 dualeye timer remind 17:30 call Marco            # or remind 20m ...
 dualeye timer pomodoro                           # 25/5 x 4; pomodoro 50 10 2, pomodoro stop
+dualeye music                                    # what's playing; music pause, play, next, previous
+dualeye --cpu-face music --gpu-face eyes         # the cover on the left, an eye on the right
 dualeye call set_wake_word --word hiesp          # "Hi ESP" instead of "Alexa"
 dualeye call set_mic --muted true
 ```
 
-`--stt` takes a model from `dualeye models` or a ggml file, `--stt-language it|en` skips language detection, `--voice-dump` keeps each utterance as a WAV file, `--llm` takes a model or a GGUF file, `--llm-gpu-layers 0` keeps it on the CPU, `--tts-voice ID` picks another voice for its language, and `--no-follow-up` turns off listening after an answer.
+`--stt` takes a model from `dualeye models` or a ggml file, `--stt-language it|en` skips language detection, `--voice-dump` keeps each utterance as a WAV file, `--llm` takes a model or a GGUF file, `--llm-gpu-layers 0` keeps it on the CPU, `--tts-voice ID` picks another voice for its language, `--no-follow-up` turns off listening after an answer, and `--no-follow-pointer` keeps the eyes face from following the mouse.
 
 ### What each OS provides
 

@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 
 use crate::claude::ClaudeUsage;
 use crate::claude::alerts;
+use crate::music::Music;
 use crate::timers::Timers;
 use crate::hub::Board;
 use crate::link::{CallError, Tool, ToolResult};
@@ -41,12 +42,14 @@ pub const FLAG: &str = "--mcp";
 
 const INSTRUCTIONS: &str = "DualEye is a small USB display on the user's desk with two round screens: \
 `left` and `right`; any face goes on either one: the computer's CPU or GPU (set_face's source), network, disk, battery, \
-Claude Code usage (claude and clawd) or a picture the user uploaded in the DualEye app (image). \
+Claude Code usage (claude and clawd), a picture the user uploaded in the DualEye app (image), what's playing (music) \
+or a pair of eyes that follow the mouse (eyes). \
 The board's tools change what the screens show; show_text puts a short ASCII message on them. \
 get_metrics and get_claude_usage read this computer, and work without the board. \
 speak says a short sentence out loud through the board's speaker, in Italian or English. \
 set_timer, set_reminder, pomodoro, control_timer and get_timers run timers on the host: the board counts the first one down on a screen \
-and rings when it's up (they need the DualEye app or `dualeye` running to ring).";
+and rings when it's up (they need the DualEye app or `dualeye` running to ring). \
+media_control and now_playing play, pause or skip the music on this computer and say what's playing.";
 
 /// A bridge sample older than this is not "current"; sample here instead.
 const FRESH: Duration = Duration::from_secs(5);
@@ -145,6 +148,12 @@ impl DualEyeMcp {
                     Err(e) => text_result(&format!("The DualEye board can't speak: {e}."), true),
                 })
             }
+            name if Music::tools().iter().any(|t| t.name == name) => Ok(match Music::default().call_tool(name, &arguments) {
+                Some(Ok(text)) if name == "now_playing" => json_result(serde_json::from_str(&text).unwrap_or(Value::String(text))),
+                Some(Ok(text)) => text_result(&text, false),
+                Some(Err(e)) => text_result(&e, true),
+                None => text_result(&format!("unknown tool {name}"), true),
+            }),
             name if Timers::tools().iter().any(|t| t.name == name) => {
                 let language = arguments.get("language").and_then(Value::as_str).unwrap_or(alerts::system_language()).to_string();
                 Ok(match self.inner.board.timer_tool(name, &arguments, &language) {
@@ -198,6 +207,15 @@ fn host_tools() -> Vec<Value> {
             "annotations": {"readOnlyHint": read_only, "destructiveHint": false, "openWorldHint": false},
         })
     });
+    let music = Music::tools().into_iter().map(|t| {
+        let read_only = t.name == "now_playing";
+        json!({
+            "name": t.name,
+            "description": t.description,
+            "inputSchema": t.input_schema,
+            "annotations": {"readOnlyHint": read_only, "destructiveHint": false, "openWorldHint": false},
+        })
+    });
     let mut tools = vec![
         json!({
             "name": "get_metrics",
@@ -233,6 +251,7 @@ fn host_tools() -> Vec<Value> {
         }),
     ];
     tools.extend(timers);
+    tools.extend(music);
     tools
 }
 
@@ -301,8 +320,8 @@ mod tests {
     fn host_tools_convert_to_mcp() {
         for tool in host_tools() {
             let t: McpTool = serde_json::from_value(tool).expect("valid MCP tool");
-            // Only speak and the timers do something.
-            let reads = t.name.starts_with("get_");
+            // Only speak, the timers and media_control do something.
+            let reads = crate::agent::is_read_only(&t.name);
             assert_eq!(t.annotations.and_then(|a| a.read_only_hint), Some(reads), "{}", t.name);
         }
     }

@@ -6,7 +6,7 @@
     "left.brightness": 80, "right.brightness": 80,
     "volume": 60, "muted": false, "wake_word": "alexa",
     "text": "", "text.screen": "",
-    "timers": ""
+    "timers": "", "music": ""
   },
   "metrics": {"cpu": {"temp_c": 52.3, "load_pct": 23.0, "clock_mhz": 3228, "power_w": 18.4, "mem": {"used_mb": 11468, "total_mb": 32768}},
               "gpu": {"temp_c": 41.2, "load_pct": 7.0, "clock_mhz": 1296, "power_w": 6.1},
@@ -40,6 +40,10 @@
     {"lang": "it", "say": ["Usa Hi ESP come parola di attivazione."], "expect": {"wake_word": "hiesp"}},
     {"lang": "it", "say": ["Gira gli schermi sottosopra.", "Rimettili dritti."], "expect": {}},
     {"lang": "it", "say": ["Imposta un timer di 10 minuti."], "expect": {"timers": "timer:600"}},
+    {"lang": "it", "say": ["Metti in pausa la musica."], "expect": {"music": "pause"}},
+    {"lang": "en", "say": ["Skip this song."], "expect": {"music": "next"}},
+    {"lang": "it", "say": ["Torna alla canzone precedente."], "expect": {"music": "previous"}},
+    {"lang": "it", "say": ["Metti gli occhi su entrambi gli schermi."], "expect": {"left.face": "eyes", "right.face": "eyes"}},
     {"lang": "it", "say": ["Timer di mezz'ora per la pasta."], "expect": {"timers": "timer:1800"}},
     {"lang": "it", "say": ["Ricordami tra 20 minuti di chiamare Marco."], "expect": {"timers": "~reminder:chiam"}},
     {"lang": "it", "say": ["Avvia un pomodoro."], "expect": {"timers": "work:1500"}},

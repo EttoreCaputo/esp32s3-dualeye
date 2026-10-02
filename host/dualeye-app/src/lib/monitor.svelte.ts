@@ -64,6 +64,11 @@ export type BoardTimer = {
   /** The screen it takes over while it runs. */
   screen?: Side;
 };
+/** `BoardMusic` in dualeye-core: what the music face shows (firmware 1.3). */
+export type BoardMusic = { state: "play" | "pause"; title: string; artist?: string; pos_s?: number; dur_s?: number; art?: number };
+export type MusicAction = "play" | "pause" | "toggle" | "next" | "previous";
+/** Where the mouse pointer is, -1..1 each way across all screens, and when it last moved (ms). */
+export type Gaze = { x: number; y: number; movedAt: number };
 /** `TimerInfo` in dualeye-core: one timer as the Timers tab lists it. */
 export type TimerInfo = { id: number; kind: TimerKind; label?: string; total_s: number; left_s: number; state: "run" | "pause" | "ring"; ends_at?: string };
 export type ShowOn = "left" | "right" | "none";
@@ -86,6 +91,7 @@ export type Snapshot = {
   rot?: Rotations;
   claude?: ClaudeMetrics;
   timer?: BoardTimer;
+  music?: BoardMusic;
 };
 /** `Prepared` in dualeye-core: what went to the board. */
 export type ImageSent = { frames: number; source_frames: number; bytes: number; duration_ms: number };
@@ -225,6 +231,7 @@ type Status = {
   port_setting: string | null;
   faces: Faces;
   rotation: Rotations;
+  follow_pointer: boolean;
 };
 
 export type Link = "searching" | "connected" | "offline";
@@ -274,6 +281,13 @@ class Monitor {
   sending = $state<{ side: Side; progress: number } | null>(null);
   /** The timers, as the Timers tab last read them; null until it does. */
   timers = $state<TimersInfo | null>(null);
+  /** The cover the music face shows, by the id the board knows it by. */
+  cover = $state<{ id: number; url: string } | null>(null);
+  #coverWanted = 0;
+  /** The mouse pointer, for the eyes face; null until it's known. */
+  gaze = $state<Gaze | null>(null);
+  /** The eyes face follows the pointer (else its eyes look about on their own). */
+  followPointer = $state(true);
 
   job = $state<DeviceJob>("idle");
   /** Output of the last esptool run. */
@@ -306,6 +320,7 @@ class Monitor {
     setInterval(() => (this.now = Date.now()), 250);
     if (this.preview) startPreviewFeed((e) => this.#apply(e), () => this.faces, () => this.rotation);
     else void this.#connect();
+    this.#watchPointer();
     void this.firmwareInfo();
   }
 
@@ -323,6 +338,7 @@ class Monitor {
     this.portSetting = s.port_setting;
     this.faces = s.faces;
     this.rotation = s.rotation;
+    this.followPointer = s.follow_pointer ?? true;
     this.message = s.message ?? "";
     this.last = s.last;
     this.shown = s.sent;
@@ -359,6 +375,7 @@ class Monitor {
           this.shown = e.snapshot;
           this.sentAt = now;
         }
+        this.#fetchCover(e.snapshot.music?.art);
         this.#record(now, e.snapshot);
         break;
       case "board_log":
@@ -481,6 +498,49 @@ class Monitor {
   async setFaces(faces: Faces) {
     this.faces = faces;
     if (!this.preview) await invoke("set_faces", { faces });
+  }
+
+  /** The cover named by a snapshot, once: the bridge keeps it ready. */
+  #fetchCover(id: number | undefined) {
+    if (!id || this.cover?.id === id || this.#coverWanted === id) return;
+    this.#coverWanted = id;
+    const got = this.preview ? Promise.resolve(previewCover()) : invoke<string | null>("music_cover", { id });
+    got.then((url) => url && (this.cover = { id, url })).catch(() => {}).finally(() => (this.#coverWanted = 0));
+  }
+
+  /** Play, pause or skip the music on this computer. */
+  async musicControl(action: MusicAction) {
+    if (this.preview) return previewMusic.control(action);
+    await invoke("music_control", { action });
+  }
+
+  async setFollowPointer(on: boolean) {
+    this.followPointer = on;
+    if (!this.preview) await invoke("set_follow_pointer", { on });
+  }
+
+  /** While a screen shows the eyes face, where the pointer is: the mirror's eyes look there too. */
+  #watchPointer() {
+    const set = (x: number, y: number) => {
+      const g = this.gaze;
+      if (g && Math.abs(g.x - x) < 0.004 && Math.abs(g.y - y) < 0.004) return;
+      this.gaze = { x, y, movedAt: Date.now() };
+    };
+    if (this.preview) {
+      // The page stands in for the screens.
+      window.addEventListener("mousemove", (e) => set((e.clientX / innerWidth) * 2 - 1, (e.clientY / innerHeight) * 2 - 1));
+      return;
+    }
+    let busy = false;
+    setInterval(() => {
+      const wanted = this.faces.cpu === "eyes" || this.faces.gpu === "eyes";
+      if (!wanted || !this.followPointer || busy || document.hidden) return;
+      busy = true;
+      invoke<[number, number] | null>("pointer_gaze")
+        .then((g) => g && set(g[0], g[1]))
+        .catch(() => {})
+        .finally(() => (busy = false));
+    }, 50);
   }
 
   async setRotation(rotation: Rotations) {
@@ -855,6 +915,7 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
         bat: { pct: Math.max(5, Math.round(84 - t / 30)), charging: false, plugged: false, mins: Math.max(10, Math.round(312 - t / 6)) },
         face: { ...faces() },
         ...(previewTimers.board() ? { timer: previewTimers.board() } : {}),
+        music: previewMusic.board(),
         // Like the bridge: left out when both screens are upright.
         ...(rotation().cpu || rotation().gpu ? { rot: { ...rotation() } } : {}),
         // Claude works in bursts and naps between them.
@@ -872,6 +933,48 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
       emit({ kind: "board_log", line });
     }, 1000);
   }, 2600);
+}
+
+/** A song for the browser preview, and a cover drawn for it. */
+const previewMusic = {
+  playing: true,
+  start: Date.now(),
+  pos: 61,
+  track: 0,
+  tracks: [
+    { title: "Zitti e buoni", artist: "Maneskin", dur_s: 195, art: 1001, colors: ["#e8303a", "#2a0b10"] },
+    { title: "Bohemian Rhapsody", artist: "Queen", dur_s: 354, art: 1002, colors: ["#d9a441", "#1b1406"] },
+  ],
+  now() {
+    return this.pos + (this.playing ? (Date.now() - this.start) / 1000 : 0);
+  },
+  board(): BoardMusic {
+    const t = this.tracks[this.track];
+    let pos = this.now();
+    if (pos >= t.dur_s) {
+      this.control("next");
+      pos = 0;
+    }
+    return { state: this.playing ? "play" : "pause", title: t.title, artist: t.artist, pos_s: r1(pos), dur_s: t.dur_s, art: t.art };
+  },
+  control(action: MusicAction) {
+    this.pos = this.now();
+    this.start = Date.now();
+    if (action === "next" || action === "previous") {
+      this.track = (this.track + 1) % this.tracks.length;
+      this.pos = 0;
+    } else this.playing = action === "play" ? true : action === "pause" ? false : !this.playing;
+  },
+};
+
+function previewCover(): string {
+  const t = previewMusic.tracks[previewMusic.track];
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240"><defs><radialGradient id="g" cx="30%" cy="25%" r="90%">` +
+    `<stop offset="0" stop-color="${t.colors[0]}"/><stop offset="1" stop-color="${t.colors[1]}"/></radialGradient></defs>` +
+    `<rect width="240" height="240" fill="url(#g)"/><circle cx="170" cy="70" r="46" fill="white" opacity=".18"/>` +
+    `<text x="20" y="120" font-family="Georgia" font-size="34" fill="white" opacity=".9">${t.artist}</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 type PreviewTimer = { id: number; kind: TimerKind; label?: string; total_s: number; end: number; left: number; paused: boolean; rang?: number };

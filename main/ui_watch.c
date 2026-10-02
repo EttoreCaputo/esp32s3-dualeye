@@ -4,10 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "art.h"
 #include "board_display.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "media.h"
+#include "ui_eyes.h"
 
 LV_FONT_DECLARE(lv_font_montserrat_bold_12)
 LV_FONT_DECLARE(lv_font_montserrat_bold_48)
@@ -48,6 +50,12 @@ LV_FONT_DECLARE(lv_font_fan_16)
 #define COLOR_TOMATO 0xFF6347
 #define COLOR_TOMATO_TRACK 0x3A1512
 #define COLOR_DIVIDER 0x3A3A3C
+/* The music face: a raspberry record and ring without a cover, white over one. */
+#define COLOR_MUSIC 0xFF4F7B
+#define COLOR_MUSIC_TRACK 0x3A1420
+#define COLOR_ARTIST 0xC8C8CC
+#define COLOR_DISC 0x141416
+#define COLOR_GROOVE 0x26262A
 
 /* The net face's rings are logarithmic, 100 B/s (empty) to 1 GB/s (full):
  * a ring a sixth fuller is ten times the speed. */
@@ -61,6 +69,11 @@ LV_FONT_DECLARE(lv_font_fan_16)
 #define TIMER_TICK_MS 100
 #define TIMER_BLINK_MS 500
 #define TIMER_ARC_RANGE 1000
+/* The music face's position ring, round the very edge. */
+#define MUSIC_RING_SIZE 234
+#define MUSIC_RING_WIDTH 6
+#define MUSIC_ARC_RANGE 1000
+#define MUSIC_DISC_SIZE 124
 
 #define TEMP_WARM_C 80.0f
 #define TEMP_HOT_C 90.0f
@@ -192,6 +205,28 @@ typedef struct {
     uint32_t color;
 } ui_timer_face_t;
 
+/* What's playing: its cover over the whole screen (or a record without one),
+ * the position on a thin ring round the edge, title, artist and time at the
+ * bottom over a shade. Counts the position on between snapshots. */
+typedef struct {
+    lv_obj_t *root;
+    lv_obj_t *art;
+    lv_obj_t *disc;
+    lv_obj_t *scrim;
+    lv_obj_t *arc;
+    lv_obj_t *paused;
+    lv_obj_t *col;
+    lv_obj_t *title;
+    lv_obj_t *artist;
+    lv_obj_t *time;
+    lv_obj_t *hint;
+    metrics_music_t music;
+    bool cover;
+    uint32_t art_generation;
+    uint32_t updated_ms;
+    uint32_t base_ms;
+} ui_music_t;
+
 /* Charge on the ring, what the battery is doing and for how long. */
 typedef struct {
     lv_obj_t *root;
@@ -246,6 +281,9 @@ typedef struct {
     ui_battery_t battery;
     ui_image_face_t image;
     ui_timer_face_t timer;
+    ui_music_t music;
+    /* The eyes face is drawn by ui_eyes.c over an empty one. */
+    lv_obj_t *eyes;
 } ui_screen_t;
 
 /* How the classic-based faces differ: column offset, gap under the title and
@@ -764,6 +802,79 @@ static void create_timer_face(ui_screen_t *ui)
     lv_obj_add_flag(f->col, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* A plain circle, for the record. */
+static lv_obj_t *create_circle(lv_obj_t *parent, int size, uint32_t bg, uint32_t border)
+{
+    lv_obj_t *c = create_cell(parent, bg);
+    lv_obj_set_size(c, size, size);
+    lv_obj_set_style_radius(c, LV_RADIUS_CIRCLE, 0);
+    if (border != 0) {
+        lv_obj_set_style_border_color(c, lv_color_hex(border), 0);
+        lv_obj_set_style_border_width(c, 1, 0);
+    }
+    lv_obj_center(c);
+    return c;
+}
+
+static void create_music(ui_screen_t *ui)
+{
+    ui_music_t *f = &ui->music;
+    f->root = make_face(ui->screen);
+    f->art = lv_image_create(f->root);
+    lv_obj_center(f->art);
+    lv_obj_add_flag(f->art, LV_OBJ_FLAG_HIDDEN);
+
+    // Without a cover: a record with grooves and a raspberry label.
+    f->disc = create_circle(f->root, MUSIC_DISC_SIZE, COLOR_DISC, COLOR_GROOVE);
+    lv_obj_align(f->disc, LV_ALIGN_CENTER, 0, -30);
+    create_circle(f->disc, 92, COLOR_DISC, COLOR_GROOVE);
+    create_circle(f->disc, 66, COLOR_DISC, COLOR_GROOVE);
+    lv_obj_t *label = create_circle(f->disc, 38, COLOR_MUSIC, 0);
+    lv_obj_center(create_text(label, LV_SYMBOL_AUDIO, &lv_font_montserrat_16, COLOR_BG));
+
+    // Over a cover: a shade under the text, from clear to nearly black.
+    f->scrim = create_cell(f->root, COLOR_BG);
+    lv_obj_set_size(f->scrim, LV_PCT(100), 130);
+    lv_obj_align(f->scrim, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_grad_color(f->scrim, lv_color_hex(COLOR_BG), 0);
+    lv_obj_set_style_bg_grad_dir(f->scrim, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_main_opa(f->scrim, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_grad_opa(f->scrim, LV_OPA_90, 0);
+    lv_obj_set_style_bg_main_stop(f->scrim, 0, 0);
+    lv_obj_set_style_bg_grad_stop(f->scrim, 150, 0);
+    lv_obj_add_flag(f->scrim, LV_OBJ_FLAG_HIDDEN);
+
+    f->arc = create_arc(f->root, MUSIC_RING_SIZE, COLOR_MUSIC, COLOR_MUSIC_TRACK);
+    lv_arc_set_range(f->arc, 0, MUSIC_ARC_RANGE);
+    lv_obj_set_style_arc_width(f->arc, MUSIC_RING_WIDTH, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(f->arc, MUSIC_RING_WIDTH, LV_PART_INDICATOR);
+
+    // Paused: a dark round sign over the middle of the cover.
+    f->paused = create_circle(f->root, 48, COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(f->paused, LV_OPA_60, 0);
+    lv_obj_align(f->paused, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_center(create_text(f->paused, LV_SYMBOL_PAUSE, &lv_font_montserrat_16, COLOR_TEXT));
+    lv_obj_add_flag(f->paused, LV_OBJ_FLAG_HIDDEN);
+
+    f->col = make_flex(f->root, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(f->col, 0, 0);
+    lv_obj_align(f->col, LV_ALIGN_BOTTOM_MID, 0, -26);
+    f->title = create_text(f->col, "", &lv_font_montserrat_16, COLOR_TEXT);
+    lv_obj_set_width(f->title, 168);
+    lv_label_set_long_mode(f->title, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    f->artist = create_text(f->col, "", &lv_font_montserrat_14, COLOR_ARTIST);
+    lv_obj_set_width(f->artist, 150);
+    lv_label_set_long_mode(f->artist, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_margin_top(f->artist, 2, 0);
+    f->time = create_text(f->col, "", &lv_font_montserrat_12, COLOR_TEXT_DIM);
+    lv_obj_set_style_margin_top(f->time, 4, 0);
+    lv_obj_add_flag(f->col, LV_OBJ_FLAG_HIDDEN);
+
+    f->hint = create_text(f->root, "NOTHING PLAYING", &lv_font_montserrat_bold_12, COLOR_TEXT_DIM);
+    lv_obj_set_style_text_letter_space(f->hint, 1, 0);
+    lv_obj_align(f->hint, LV_ALIGN_CENTER, 0, 58);
+}
+
 /* Name and colour the classic, rings, plus and bar faces after `source`. */
 static void apply_source(ui_screen_t *ui, metrics_source_t source)
 {
@@ -811,6 +922,8 @@ static void create_screen(ui_screen_t *ui, lv_display_t *disp, int index, metric
     create_battery(ui);
     create_image(ui);
     create_timer_face(ui);
+    create_music(ui);
+    ui->eyes = make_face(ui->screen);
     lv_obj_remove_flag(ui->classic.root, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -1492,6 +1605,120 @@ static void update_timer(ui_screen_t *ui, const metrics_timer_t *timer, uint32_t
     timer_tick(f);
 }
 
+static void set_hidden(lv_obj_t *obj, bool hidden)
+{
+    if (hidden) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* "3:07", "1:02:45". */
+static void format_clock(char *out, size_t len, int secs)
+{
+    if (secs >= 3600) {
+        snprintf(out, len, "%d:%02d:%02d", secs / 3600, (secs % 3600) / 60, secs % 60);
+    } else {
+        snprintf(out, len, "%d:%02d", secs / 60, secs % 60);
+    }
+}
+
+/* The parts that move: the position on the ring and in the time. */
+static void music_tick(ui_music_t *f)
+{
+    const metrics_music_t *m = &f->music;
+    if (!m->valid) {
+        return;
+    }
+    float pos = m->pos_s;
+    if (m->playing) {
+        pos += (float) (lv_tick_get() - f->base_ms) / 1000.0f;
+    }
+    if (m->dur_s > 0.0f && pos > m->dur_s) {
+        pos = m->dur_s;
+    }
+    char text[32] = "";
+    if (m->has_pos) {
+        char at[12];
+        format_clock(at, sizeof(at), (int) pos);
+        if (m->dur_s > 0.0f) {
+            char total[12];
+            format_clock(total, sizeof(total), (int) (m->dur_s + 0.5f));
+            snprintf(text, sizeof(text), "%s / %s", at, total);
+        } else {
+            snprintf(text, sizeof(text), "%s", at);
+        }
+    }
+    if (strcmp(lv_label_get_text(f->time), text) != 0) {
+        lv_label_set_text(f->time, text);
+    }
+    int arc = m->has_pos && m->dur_s > 0.0f ? (int) (pos / m->dur_s * MUSIC_ARC_RANGE + 0.5f) : 0;
+    if (lv_arc_get_value(f->arc) != arc) {
+        lv_arc_set_value(f->arc, arc);
+    }
+}
+
+static void update_music(ui_screen_t *ui, const metrics_music_t *m, uint32_t updated_ms, metrics_ui_state_t state)
+{
+    ui_music_t *f = &ui->music;
+    if (state == METRICS_UI_WAITING || !m->valid) {
+        f->music.valid = false;
+        f->cover = false;
+        lv_arc_set_value(f->arc, 0);
+        lv_obj_set_style_arc_color(f->arc, lv_color_hex(COLOR_MUSIC_TRACK), LV_PART_MAIN);
+        lv_obj_set_style_arc_opa(f->arc, LV_OPA_COVER, LV_PART_MAIN);
+        set_hidden(f->art, true);
+        set_hidden(f->scrim, true);
+        set_hidden(f->paused, true);
+        set_hidden(f->col, true);
+        set_hidden(f->disc, false);
+        lv_obj_set_style_opa(f->disc, LV_OPA_40, 0);
+        lv_label_set_text(f->hint, state == METRICS_UI_WAITING ? "WAITING" : "NOTHING PLAYING");
+        set_hidden(f->hint, false);
+        return;
+    }
+    // A new snapshot: count on from what it says.
+    if (updated_ms != f->updated_ms || !f->music.valid) {
+        f->updated_ms = updated_ms;
+        f->base_ms = lv_tick_get();
+    }
+    f->music = *m;
+
+    // The cover, once the one for this track is in.
+    const lv_image_dsc_t *img = art_image();
+    bool cover = m->art != 0 && img != NULL && art_id() == m->art;
+    if (cover && lv_image_get_src(f->art) != img) {
+        lv_image_set_src(f->art, img);
+    }
+    if (cover && art_generation() != f->art_generation) {
+        f->art_generation = art_generation();
+        lv_obj_invalidate(f->art);
+    }
+    f->cover = cover;
+    set_hidden(f->art, !cover);
+    set_hidden(f->scrim, !cover);
+    set_hidden(f->disc, cover);
+    lv_obj_set_style_opa(f->disc, LV_OPA_COVER, 0);
+    lv_obj_set_style_image_opa(f->art, m->playing ? LV_OPA_COVER : LV_OPA_50, 0);
+    lv_obj_set_style_arc_color(f->arc, lv_color_hex(cover ? COLOR_BG : COLOR_MUSIC_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(f->arc, cover ? LV_OPA_50 : LV_OPA_COVER, LV_PART_MAIN);
+    set_arc_color(f->arc, cover ? COLOR_TEXT : COLOR_MUSIC);
+    set_hidden(f->paused, m->playing);
+    set_hidden(f->hint, true);
+    set_hidden(f->col, false);
+
+    if (strcmp(lv_label_get_text(f->title), m->title) != 0) {
+        lv_label_set_text(f->title, m->title);
+    }
+    if (strcmp(lv_label_get_text(f->artist), m->artist) != 0) {
+        lv_label_set_text(f->artist, m->artist);
+    }
+    set_hidden(f->artist, m->artist[0] == '\0');
+    set_text_color(f->title, state == METRICS_UI_STALE ? COLOR_TEXT_DIM : COLOR_TEXT);
+    music_tick(f);
+}
+
 static void timer_timer_cb(lv_timer_t *timer)
 {
     (void) timer;
@@ -1499,6 +1726,9 @@ static void timer_timer_cb(lv_timer_t *timer)
     for (int i = 0; i < 2; i++) {
         if (!lv_obj_has_flag(screens[i]->timer.root, LV_OBJ_FLAG_HIDDEN)) {
             timer_tick(&screens[i]->timer);
+        }
+        if (!lv_obj_has_flag(screens[i]->music.root, LV_OBJ_FLAG_HIDDEN)) {
+            music_tick(&screens[i]->music);
         }
     }
 }
@@ -1517,14 +1747,13 @@ static void show_face(ui_screen_t *ui, metrics_face_t face)
         [METRICS_FACE_BATTERY] = ui->battery.root,
         [METRICS_FACE_IMAGE] = ui->image.root,
         [METRICS_FACE_TIMER] = ui->timer.root,
+        [METRICS_FACE_MUSIC] = ui->music.root,
+        [METRICS_FACE_EYES] = ui->eyes,
     };
     for (int i = 0; i < METRICS_FACE_COUNT; i++) {
-        if (i == (int) face) {
-            lv_obj_remove_flag(roots[i], LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(roots[i], LV_OBJ_FLAG_HIDDEN);
-        }
+        set_hidden(roots[i], i != (int) face);
     }
+    ui_eyes_set_ambient(ui->index, face == METRICS_FACE_EYES);
 }
 
 static int fan_rpm_by_id(const metrics_snapshot_t *snap, const char *id);
@@ -1557,6 +1786,11 @@ static void update_screen(ui_screen_t *ui, metrics_face_t face, metrics_source_t
         break;
     case METRICS_FACE_TIMER:
         update_timer(ui, &snap->timer, snap->updated_ms, state);
+        break;
+    case METRICS_FACE_MUSIC:
+        update_music(ui, &snap->music, snap->updated_ms, state);
+        break;
+    case METRICS_FACE_EYES:
         break;
     case METRICS_FACE_RINGS:
         update_rings(ui, temp, temp_max, state);
