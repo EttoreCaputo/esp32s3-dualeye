@@ -2,18 +2,23 @@
 //!
 //! | Data            | Linux                       | Windows                  | macOS              |
 //! |-----------------|-----------------------------|--------------------------|--------------------|
-//! | CPU load, clock | sysinfo                     | sysinfo                  | sysinfo            |
+//! | CPU load        | sysinfo                     | sysinfo                  | sysinfo            |
+//! | CPU clock       | sysinfo                     | sysinfo                  | IOReport¹ / sysinfo|
 //! | CPU temp        | hwmon (coretemp, k10temp…)  | ACPI thermal zone (WMI)  | SMC / IOHID        |
-//! | CPU power       | RAPL (powercap)             | —                        | —                  |
+//! | CPU power       | RAPL (powercap)             | —                        | IOReport¹          |
 //! | NVIDIA GPU      | NVML                        | NVML                     | —                  |
 //! | AMD GPU         | hwmon (amdgpu)              | —                        | —                  |
-//! | Apple/Mac GPU   | —                           | —                        | SMC + IOAccelerator|
-//! | Fans            | hwmon                       | —                        | —                  |
+//! | Apple/Mac GPU   | —                           | —                        | SMC + IOAccelerator + IOReport¹ |
+//! | Fans            | hwmon                       | —                        | SMC                |
 //! | RAM             | sysinfo                     | sysinfo                  | sysinfo            |
 //! | VRAM            | NVML, amdgpu `mem_info_*`   | NVML                     | IOAccelerator      |
+//!
+//! ¹ Apple Silicon only.
 
 #[cfg(not(target_os = "linux"))]
 mod components;
+#[cfg(target_os = "macos")]
+mod ioreport;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -41,6 +46,8 @@ pub struct Reading {
 #[derive(Debug, Default)]
 struct PlatformSample {
     cpu_temp: Option<f64>,
+    /// Overrides sysinfo's clock, which on Apple Silicon is the maximum.
+    cpu_clock: Option<u32>,
     cpu_power: Option<f64>,
     gpu: DeviceMetrics,
     board_fans: Vec<u32>,
@@ -56,7 +63,7 @@ pub struct Collector {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     nvidia: Option<nvidia::Nvidia>,
     #[cfg(target_os = "macos")]
-    mac_gpu: macos::MacGpu,
+    mac: macos::MacSensors,
 }
 
 impl Collector {
@@ -71,7 +78,7 @@ impl Collector {
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             nvidia: nvidia::Nvidia::init(),
             #[cfg(target_os = "macos")]
-            mac_gpu: macos::MacGpu::new(),
+            mac: macos::MacSensors::new(),
         }
     }
 
@@ -90,10 +97,12 @@ impl Collector {
             platform.gpu_fans = fans;
         }
         #[cfg(target_os = "macos")]
-        self.mac_gpu.fill(&mut platform.gpu, self.sys.total_memory());
+        self.mac.fill(&mut platform, self.sys.total_memory());
 
         let cpus = self.sys.cpus();
-        let clock = if cpus.is_empty() {
+        let clock = if let Some(mhz) = platform.cpu_clock {
+            u64::from(mhz)
+        } else if cpus.is_empty() {
             0
         } else {
             cpus.iter().map(|c| c.frequency()).sum::<u64>() / cpus.len() as u64
@@ -145,7 +154,7 @@ impl Collector {
             out.extend(nvidia.readings());
         }
         #[cfg(target_os = "macos")]
-        out.extend(self.mac_gpu.readings());
+        out.extend(self.mac.readings());
         out
     }
 }

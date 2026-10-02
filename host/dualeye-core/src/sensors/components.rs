@@ -2,8 +2,9 @@
 //!
 //! On Windows that is the ACPI thermal zone over WMI (needs an elevated
 //! process, and many boards report a fixed or missing value). On macOS it is
-//! the SMC on Intel and the IOHID sensor hub on Apple Silicon. Neither OS
-//! exposes fan RPM or CPU power without a vendor driver.
+//! the SMC on Intel and the IOHID sensor hub on Apple Silicon; `macos.rs`
+//! adds the SMC's own CPU keys, fans, clocks and power on top. Windows exposes
+//! no fan RPM or CPU power without a vendor driver.
 
 use sysinfo::Components;
 

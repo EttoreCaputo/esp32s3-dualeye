@@ -220,13 +220,14 @@ dualeye call set_mic --muted true
 
 | Data | Linux | Windows | macOS |
 |------|-------|---------|-------|
-| CPU load, clock | ✓ | ✓ | ✓ |
-| CPU temp (avg of all CPU sensors) | hwmon: coretemp, k10temp, zenpower | ACPI thermal zone (run as admin; many boards report nothing) | SMC / IOHID |
-| CPU power | RAPL (see below) | — | — |
+| CPU load | ✓ | ✓ | ✓ |
+| CPU clock | ✓ | ✓ | Apple Silicon: IOReport (the real average clock; sysinfo only gives the maximum); Intel: ✓ |
+| CPU temp (avg of all CPU sensors) | hwmon: coretemp, k10temp, zenpower | ACPI thermal zone (run as admin; many boards report nothing) | SMC (per-core keys for each chip generation, M1–M5), else IOHID |
+| CPU power | RAPL (see below) | — | Apple Silicon: IOReport `Energy Model` |
 | NVIDIA GPU (temp, load, clock, power, fan RPM) | NVML | NVML | — |
 | AMD GPU | hwmon `amdgpu` | — | — |
-| Mac GPU (temp, load, memory) | — | — | SMC (`Tg*` keys on Apple Silicon, `TG*` on Intel), IOAccelerator |
-| Fans | hwmon (`cpu` = fastest board fan, `gpu` = fastest GPU fan) | — | — |
+| Mac GPU (temp, load, memory, clock, power) | — | — | SMC temperatures (per-generation keys on Apple Silicon, `TG*` on Intel), IOAccelerator; clock and power from IOReport on Apple Silicon |
+| Fans | hwmon (`cpu` = fastest board fan, `gpu` = fastest GPU fan) | — | SMC `F<n>Ac` (`cpu` = fastest fan; MacBook fans stop at 0 RPM when cool) |
 | RAM | ✓ | ✓ | ✓ |
 | VRAM | NVML, `amdgpu` (`mem_info_vram_*`) | NVML | IOAccelerator (Apple Silicon: GPU share of the unified RAM) |
 
