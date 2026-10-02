@@ -52,6 +52,11 @@ Receivers ignore channels they don't know.
 | `voice/listen` | none, or `{"follow_up":true}` | `{}`; stream an utterance as if the wake word had been heard (push-to-talk, `trigger` `host`). With `follow_up` (firmware 1.0; the host asks right after a spoken answer) the `trigger` is `follow_up`, it gives up after 4 s without speech, and speech in its first 0.8 s (the echo of the answer) doesn't count. `-32602` without voice or muted |
 | `voice/stop` | none | `{}`; end the utterance being streamed (`reason` `host`), if any |
 | `audio/stop` | none | `{}`; stop talking: what's buffered from `audio_down` is dropped and the stream ends (`reason` `stopped`) |
+| `media/info` | none | `{"slot_size":4161536,"chunk":2304,"screens":{"left":{"frames":1,"bytes":…},"right":{…}}}` (firmware 1.1): room for each screen's picture, and what's there |
+| `media/begin` | `{"screen":"left","size":bytes,"crc32":n}` | `{"chunk":2304}`; start replacing that screen's picture (the old one goes at once). The format is in `main/media.h`: 240 × 240 RGB565 frames, raw or run-length coded, made by the host |
+| `media/write` | `{"offset":n,"data":base64}` | `{"written":n}`; the next `chunk` bytes at most, in order. The flash is erased as the data arrives |
+| `media/end` | none | `{"frames":n}` once the CRC-32 (the zlib one) matches and the picture checks out; then the `image` face shows it and it survives a reboot |
+| `media/clear` | `{"screen":"right"}` | `{}`; remove that screen's picture |
 | `debug/audio` | `{"cmd":"tone 440 500"}` | `{}`; the M0 audio self-test, its output comes as `log` lines (see `main/audio_selftest.h`) |
 
 `Tool` and `CallToolResult` have the shapes of the [MCP](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) `tools/list` and `tools/call` results (`name`, `description`, `inputSchema`; `content`, `structuredContent`, `isError`), so the host's MCP server (M2) can pass them through unchanged. A tool that runs but fails (bad argument, out of range) returns `isError: true` with the reason as text. Protocol errors use the standard JSON-RPC codes: `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params (including an unknown tool).
@@ -74,6 +79,8 @@ The snapshot the host sends about once a second. Its shape is protocol 1's line 
 ```json
 {"v":2,"ts":1700000000,"cpu":{"temp_c":36.3,"load_pct":1.8,"clock_mhz":1572,"power_w":14.6,"mem":{"used_mb":12288,"total_mb":31744}},"gpu":{"temp_c":31.0},"fans":[{"id":"cpu","rpm":3770}],"claude":{"tok":1234567,"today":4500000,"left_min":133,"s_pct":42.0,"state":"work","model":"OPUS 5.5"}}
 ```
+
+Firmware 1.1 also reads `"net":{"rx_bps":…,"tx_bps":…}` (bytes per second, every interface but loopback), `"disk":{"used_gb":…,"total_gb":…,"read_bps":…,"write_bps":…}` (the system disk; the rates are optional) and `"bat":{"pct":…,"charging":…,"plugged":…,"mins":…}` (absent without a battery; `mins` to empty, or to full while charging, optional), for the `net`, `disk` and `battery` faces; older firmware skips them.
 
 The board ignores a snapshot with neither temperature, and marks its data stale 3 s after the last one.
 
@@ -128,7 +135,7 @@ Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` i
 
 | Tool | Arguments | Effect |
 |------|-----------|--------|
-| `set_face` | `face`: `classic` · `rings` · `plus` · `bar` · `claude` · `clawd`; `screen` | Switch the watch face |
+| `set_face` | `face`: `classic` · `rings` · `plus` · `bar` · `claude` · `clawd` · `net` · `disk` · `battery` · `image` (the last four: firmware 1.1); `source`: `cpu` · `gpu` (firmware 1.1, optional); `screen` | Switch the watch face. `source` is whose metrics classic, rings, plus and bar show on that screen, kept until changed (by default the CPU on the left, the GPU on the right) |
 | `set_rotation` | `degrees`: 0 · 90 · 180 · 270; `screen` | Turn the screen clockwise on top of the DualEye mounting |
 | `set_brightness` | `percent`: 0–100; `screen` | Backlight level (0 turns it off) |
 | `show_text` | `text` (up to 120 characters, ASCII); `screen`; `seconds`: 1–30, default 4 | Show a message over the face, then hide it |
@@ -137,7 +144,7 @@ Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` i
 | `set_volume` | `percent`: 0–100 | Speaker volume (default 60) |
 | `set_eyes` | `on`: boolean; `idle`: boolean (at least one) | `on`: during a conversation, show animated eyes over the whole screens (`true`, the default) or the ring round the watch face (`false`). `idle` (firmware 1.0.2): while nobody is talking, the eyes play a short scene every 30–120 s (`true`, the default). `get_state` has them as `voice.eyes` and `voice.idle_eyes` |
 | `play_eyes` | `name`: `look_around` · `sleepy` · `suspicious` · `happy` · `surprised` · `wink` · `angry` · `sad` · `dizzy` · `cross_eyed` · `eye_roll` · `curious` · `love` · `scan` · `shy` · `flutter`; optional | Play that scene now (a random one without `name`), a few seconds over the watch faces. Refused during a conversation |
-| `get_state` | none | Firmware, uptime, metrics state, each screen's face, rotation and brightness, voice (`available`, `wake_word`, `wake_word_id`, `model`, `wake_words` the board has models for, `muted`, `state`), audio (`speaker`, `volume`, `playing`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (as `structuredContent`) |
+| `get_state` | none | Firmware, uptime, metrics state, each screen's face, source (firmware 1.1), whether it has a picture (`image`, firmware 1.1), rotation and brightness, voice (`available`, `wake_word`, `wake_word_id`, `model`, `wake_words` the board has models for, `muted`, `state`), audio (`speaker`, `volume`, `playing`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (as `structuredContent`) |
 
 Example:
 
@@ -157,7 +164,7 @@ One JSON-RPC 2.0 message per line, one request at a time. The first request must
 | Method | Params | Result |
 |--------|--------|--------|
 | `hello` | `{"token":"…","client":"dualeye-mcp/0.1.0"}` | `{"bridge":"0.1.0","board":<hello result or null>,"port":"/dev/cu.usbmodem101"}` |
-| `tools/list`, `tools/call` | As on `ctrl` | Passed to the board unchanged, one at a time |
+| `tools/list`, `tools/call`, `media/...` | As on `ctrl` | Passed to the board unchanged, one at a time |
 | `host/snapshot` | none | `{"snapshot":<latest sample or null>,"age_ms":…}` |
 | `host/say` | `{"text":"Ciao!","language":"it"}` (`language` optional: what the text looks like) | Once played: `{"text":…,"first_audio_ms":…,"played_ms":…,"reason":"done","underruns":0,"lost":0}`. `-32000` unless the bridge has text-to-speech (the app with spoken replies on, or `dualeye --tts`) |
 

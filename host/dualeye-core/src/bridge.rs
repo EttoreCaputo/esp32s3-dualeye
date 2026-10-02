@@ -39,7 +39,7 @@ use crate::link::{CallError, Link, LinkEvent};
 use crate::protocol::Channel;
 use crate::sensors::Collector;
 use crate::serial;
-use crate::snapshot::{Face, Faces, Rotation, Rotations, Snapshot};
+use crate::snapshot::{Face, Faces, Rotation, Rotations, Snapshot, Source, Sources};
 use crate::stt::Transcript;
 use crate::voice::{self, Hearing, Receiving, Session, Speaker, Spoken, Utterance, VoiceConfig};
 use crate::intents;
@@ -523,9 +523,11 @@ fn say_fn(link: &Arc<Link>, speaker: &Arc<Speaker>, config: &BridgeConfig) -> cr
 }
 
 fn push_settings(link: &Link, faces: Faces, rotation: Rotations) -> Result<(), CallError> {
-    for (screen, face, rot) in [("left", faces.cpu, rotation.cpu), ("right", faces.gpu, rotation.gpu)] {
+    let screens = [("left", faces.cpu, faces.src.cpu, rotation.cpu), ("right", faces.gpu, faces.src.gpu, rotation.gpu)];
+    for (screen, face, source, rot) in screens {
         let calls = [
-            ("set_face", json!({"screen": screen, "face": face.name()})),
+            // A firmware before 1.1 ignores `source`.
+            ("set_face", json!({"screen": screen, "face": face.name(), "source": source.name()})),
             ("set_rotation", json!({"screen": screen, "degrees": rot.degrees()})),
         ];
         for (tool, args) in calls {
@@ -558,14 +560,18 @@ fn adopt_settings(link: &Link, config: &BridgeConfig, pushed: &mut Option<(Faces
 fn read_settings(link: &Link) -> Result<(Faces, Rotations), CallError> {
     let state = link.call_tool("get_state", json!({}), TOOL_TIMEOUT)?;
     let screens = state.structured_content.as_ref().and_then(|s| s.get("screens")).ok_or_else(|| CallError::Invalid("get_state: no screens".into()))?;
-    let screen = |name: &str| -> Result<(Face, Rotation), CallError> {
+    // Before firmware 1.1 the left screen always showed the CPU, the right one the GPU.
+    let screen = |name: &str, usual: Source| -> Result<(Face, Source, Rotation), CallError> {
         let s = &screens[name];
         let face = s["face"].as_str().and_then(|f| f.parse().ok());
+        let source = s["source"].as_str().and_then(|f| f.parse().ok()).unwrap_or(usual);
         let rotation = s["rotation"].as_u64().and_then(|d| Rotation::from_degrees(d as u16));
-        face.zip(rotation).ok_or_else(|| CallError::Invalid(format!("get_state: {name} screen")))
+        let (face, rotation) = face.zip(rotation).ok_or_else(|| CallError::Invalid(format!("get_state: {name} screen")))?;
+        Ok((face, source, rotation))
     };
-    let (left, right) = (screen("left")?, screen("right")?);
-    Ok((Faces { cpu: left.0, gpu: right.0 }, Rotations { cpu: left.1, gpu: right.1 }))
+    let (left, right) = (screen("left", Source::Cpu)?, screen("right", Source::Gpu)?);
+    let faces = Faces { cpu: left.0, gpu: right.0, src: Sources { cpu: left.1, gpu: right.1 } };
+    Ok((faces, Rotations { cpu: left.2, gpu: right.2 }))
 }
 
 fn sleep_unless_stopped(duration: Duration, stop: &AtomicBool) {

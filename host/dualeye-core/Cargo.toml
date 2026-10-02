@@ -8,15 +8,19 @@ license = "MIT"
 repository = "https://github.com/EttoreCaputo/esp32s3-dualeye"
 
 [dependencies]
+base64 = "0.23.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+crc32fast = "1.5.2"
 flate2 = { version = "1.1.10", optional = true }
 getrandom = "0.3"
+image = { version = "0.25.10", default-features = false, features = ["gif", "png", "jpeg", "webp", "bmp"] }
 rmcp = { version = "3.5.0", default-features = false, features = ["server", "transport-io"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 serialport = { version = "4.10.1", default-features = false }
 sha2 = { version = "0.11.0", optional = true }
-sysinfo = { version = "0.39.6", default-features = false, features = ["system", "component"] }
+starship-battery = "0.12.0"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system", "component", "network", "disk"] }
 tar = { version = "0.4.46", optional = true }
 tokio = { version = "1.53.1", features = ["rt", "time"], optional = true }
 ureq = { version = "3.4.2", optional = true }

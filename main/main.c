@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "link.h"
 #include "lvgl_port.h"
+#include "media.h"
 #include "metrics_io.h"
 #include "metrics_model.h"
 #include "rpc.h"
@@ -50,6 +51,8 @@ static void current_view(metrics_snapshot_t *snap, board_settings_t *settings)
     board_settings_get(settings);
     snap->cpu_face = settings->face[UI_SCREEN_CPU];
     snap->gpu_face = settings->face[UI_SCREEN_GPU];
+    snap->cpu_source = settings->source[UI_SCREEN_CPU];
+    snap->gpu_source = settings->source[UI_SCREEN_GPU];
 }
 
 static void ui_refresh_task(void *arg)
@@ -78,6 +81,7 @@ void app_main(void)
     // First, so that everything logged from here on reaches the host in frames.
     ESP_ERROR_CHECK(link_init());
     board_settings_init();
+    media_init();
     board_settings_t settings;
     board_settings_get(&settings);
 

@@ -2,7 +2,19 @@
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import Eye from "./Eye.svelte";
-  import { DEVICES, FACES, ROTATIONS, formatTokens, isClaudeFace, screenFor, type DeviceId, type Face, type Rotation } from "./firmware";
+  import {
+    DEVICES,
+    FACES,
+    ROTATIONS,
+    formatTokens,
+    hasSource,
+    isClaudeFace,
+    screenFor,
+    type DeviceId,
+    type Face,
+    type Rotation,
+    type Source,
+  } from "./firmware";
   import {
     fanRpm,
     monitor,
@@ -15,6 +27,7 @@
     type PortInfo,
     type PowerHelper,
     type Reading,
+    type Side,
     type SttLanguage,
     type VoiceInfo,
     type VoiceSettings,
@@ -417,13 +430,54 @@
     follow = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 24;
   }
 
-  const SCREENS: [DeviceId, string][] = [
-    ["cpu", "Left screen"],
-    ["gpu", "Right screen"],
+  const SCREENS: [DeviceId, string, Side][] = [
+    ["cpu", "Left screen", "left"],
+    ["gpu", "Right screen", "right"],
   ];
   // Thumbnails use the host's latest sample, so they have data even with no board attached.
-  const preview = (id: DeviceId, face: Face) => screenFor(id, face, monitor.last?.[id], false, false, fanRpm(monitor.last, id), monitor.last?.claude);
+  const preview = (id: DeviceId, side: Side, face: Face) => {
+    const src = monitor.faces.src[id];
+    const last = monitor.last;
+    return screenFor(src, face, last?.[src], false, false, {
+      fan: fanRpm(last, src),
+      claude: last?.claude,
+      net: last?.net,
+      disk: last?.disk,
+      bat: last?.bat,
+      image: monitor.images[side],
+    }, `thumb-${side}`);
+  };
   const pick = (id: DeviceId, face: Face) => monitor.setFaces({ ...monitor.faces, [id]: face });
+  const showSource = (id: DeviceId, source: Source) => monitor.setFaces({ ...monitor.faces, src: { ...monitor.faces.src, [id]: source } });
+
+  let imageError = $state<Record<Side, string>>({ left: "", right: "" });
+  let imageNote = $state<Record<Side, string>>({ left: "", right: "" });
+  async function chooseImage(side: Side, e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    imageError[side] = "";
+    imageNote[side] = "";
+    try {
+      const sent = await monitor.sendImage(side, file);
+      imageNote[side] =
+        sent.frames === 1
+          ? `Sent, ${Math.round(sent.bytes / 1024)} KB.`
+          : `Sent ${sent.frames} frames${sent.frames < sent.source_frames ? ` of ${sent.source_frames}` : ""}, ${(sent.duration_ms / 1000).toFixed(1)} s a loop, ${Math.round(sent.bytes / 1024)} KB.`;
+    } catch (err) {
+      imageError[side] = String(err);
+    }
+  }
+  async function removeImage(side: Side) {
+    imageError[side] = "";
+    imageNote[side] = "";
+    try {
+      await monitor.clearImage(side);
+    } catch (err) {
+      imageError[side] = String(err);
+    }
+  }
   const turn = (id: DeviceId, rotation: Rotation) => monitor.setRotation({ ...monitor.rotation, [id]: rotation });
 
   const hex = (n: number) => n.toString(16).padStart(4, "0");
@@ -498,13 +552,14 @@
         </section>
       {:else if tab === "display"}
         <p class="hint">
-          Pick a watch face for each screen, and turn it if the board sits another way round. The board switches with the next
-          frame it gets, and the choice is kept.
+          Pick a watch face for each screen, and turn it if the board sits another way round. Any face goes on either screen; the
+          CPU and GPU faces show whichever you choose. The board switches with the next frame it gets, and the choice is kept.
         </p>
-        {#each SCREENS as [id, side] (id)}
+        {#each SCREENS as [id, label, side] (id)}
           {@const current = monitor.faces[id]}
-          <section style:--accent={DEVICES[id].accent}>
-            <h3>{side} · {DEVICES[id].title}</h3>
+          {@const src = monitor.faces.src[id]}
+          <section style:--accent={DEVICES[src].accent}>
+            <h3>{label}</h3>
             <div class="faces" role="radiogroup" aria-label="{side} face">
               {#each FACES as face (face.id)}
                 <button
@@ -515,12 +570,57 @@
                   title={face.blurb}
                   onclick={() => pick(id, face.id)}
                 >
-                  <span class="thumb"><Eye {id} screen={preview(id, face.id)} board="live" size={66} /></span>
+                  <span class="thumb"><Eye {id} screen={preview(id, side, face.id)} board="live" size={66} /></span>
                   <span class="fname">{face.name}</span>
                 </button>
               {/each}
             </div>
             <p class="fblurb">{FACES.find((f) => f.id === current)?.blurb}</p>
+            {#if hasSource(current)}
+              <div class="rotation">
+                <span class="rlabel">Shows</span>
+                <div class="rots" role="radiogroup" aria-label="{label} shows">
+                  {#each ["cpu", "gpu"] as const as s (s)}
+                    <button class="rot" class:checked={src === s} role="radio" aria-checked={src === s} onclick={() => showSource(id, s)}
+                      >{DEVICES[s].title}</button
+                    >
+                  {/each}
+                </div>
+              </div>
+            {/if}
+            {#if current === "image"}
+              {@const sending = monitor.sending?.side === side ? monitor.sending : null}
+              <div class="rotation">
+                <span class="rlabel">Picture</span>
+                <div class="actions inline">
+                  <label class="btn primary" class:disabled={monitor.sending !== null || monitor.link !== "connected"}>
+                    {sending ? `Sending ${Math.round(sending.progress * 100)}%` : monitor.images[side] ? "Replace…" : "Choose…"}
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+                      disabled={monitor.sending !== null || monitor.link !== "connected"}
+                      onchange={(e) => chooseImage(side, e)}
+                    />
+                  </label>
+                  {#if monitor.images[side]}
+                    <button class="btn" disabled={monitor.sending !== null || monitor.link !== "connected"} onclick={() => removeImage(side)}>Remove</button>
+                  {/if}
+                </div>
+              </div>
+              <p class="hint">
+                PNG, JPEG, WebP or an animated GIF, cropped to the middle square. Long animations are thinned to fit the board's
+                4 MB and play at up to 20 frames a second.
+              </p>
+              {#if monitor.link !== "connected"}
+                <p class="hint">Connect the board to send a picture.</p>
+              {/if}
+              {#if imageNote[side]}
+                <p class="hint">{imageNote[side]}</p>
+              {/if}
+              {#if imageError[side]}
+                <p class="hint error">{imageError[side]}</p>
+              {/if}
+            {/if}
             <div class="rotation">
               <span class="rlabel">Rotation</span>
               <div class="rots" role="radiogroup" aria-label="{side} rotation">
@@ -1703,6 +1803,25 @@
   }
   .alerts .rotation {
     margin-bottom: 12px;
+  }
+  .actions.inline {
+    margin: 0;
+  }
+  label.btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+  }
+  label.btn input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  label.btn.disabled {
+    opacity: 0.45;
+    pointer-events: none;
   }
   .alerts .rot:disabled {
     opacity: 0.45;

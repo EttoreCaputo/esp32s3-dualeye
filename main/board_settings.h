@@ -18,6 +18,8 @@ extern "C" {
 
 typedef struct {
     metrics_face_t face[BOARD_LCD_COUNT];
+    /* Whose metrics the screen's classic, rings, plus and bar faces show. */
+    metrics_source_t source[BOARD_LCD_COUNT];
     /* Extra clockwise turn on top of the DualEye mounting: 0, 90, 180, 270. */
     uint16_t rot[BOARD_LCD_COUNT];
     uint8_t brightness[BOARD_LCD_COUNT];
@@ -40,6 +42,7 @@ void board_settings_get(board_settings_t *out);
 
 /* Each setter saves to NVS. Screens are UI_SCREEN_*. */
 esp_err_t board_settings_set_face(int screen, metrics_face_t face);
+esp_err_t board_settings_set_source(int screen, metrics_source_t source);
 esp_err_t board_settings_set_rotation(int screen, uint16_t degrees);
 /** Also sets the backlight right away. */
 esp_err_t board_settings_set_brightness(int screen, uint8_t percent);

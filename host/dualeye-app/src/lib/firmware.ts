@@ -1,7 +1,7 @@
 // Constants and formatting copied from main/ui_watch.c, so the mirror shows the
 // same pixels the board does. Keep in sync when the firmware UI changes.
 
-import type { ClaudeMetrics, ClaudeState, Metrics } from "./monitor.svelte";
+import type { Battery, ClaudeMetrics, ClaudeState, Disk, Metrics, Net } from "./monitor.svelte";
 
 export const LCD = 240;
 export const USAGE_ARC_SIZE = 216;
@@ -30,7 +30,15 @@ export const COLOR = {
   claudeTrack: "#35190F",
   week: "#E9C4A6",
   weekTrack: "#2B2019",
+  green: "#40E080",
+  greenTrack: "#0F2A18",
+  error: "#FF453A",
 } as const;
+export const NET_SCALE_MIN = 65536;
+export const NET_SCALE_DECAY = 0.97;
+export const DISK_FULL_PCT = 90;
+export const BATTERY_LOW_PCT = 20;
+export const BATTERY_EMPTY_PCT = 10;
 
 export const DEVICES = {
   cpu: { title: "CPU", memTitle: "RAM", accent: "#C4F06A", track: "#163012" },
@@ -39,9 +47,13 @@ export const DEVICES = {
 export type DeviceId = keyof typeof DEVICES;
 
 /** `metrics_face_t`; the names are what goes on the wire. */
-export type Face = "classic" | "rings" | "plus" | "bar" | "claude" | "clawd";
-export type Faces = Record<DeviceId, Face>;
-export const DEFAULT_FACES: Faces = { cpu: "classic", gpu: "classic" };
+export type Face = "classic" | "rings" | "plus" | "bar" | "claude" | "clawd" | "net" | "disk" | "battery" | "image";
+/** `metrics_source_t`: whose metrics classic, rings, plus and bar show. */
+export type Source = DeviceId;
+/** Faces by screen (`cpu` is the left one, `gpu` the right one, as on the wire) and each screen's source. */
+export type Faces = { cpu: Face; gpu: Face; src: Record<DeviceId, Source> };
+export const DEFAULT_SOURCES: Record<DeviceId, Source> = { cpu: "cpu", gpu: "gpu" };
+export const DEFAULT_FACES: Faces = { cpu: "classic", gpu: "classic", src: { ...DEFAULT_SOURCES } };
 export const FACES: { id: Face; name: string; blurb: string }[] = [
   { id: "classic", name: "Classic", blurb: "Temperature, clock, power, fan" },
   { id: "rings", name: "Rings", blurb: "Load, temperature and memory rings" },
@@ -49,7 +61,13 @@ export const FACES: { id: Face; name: string; blurb: string }[] = [
   { id: "bar", name: "Bar", blurb: "Classic with a slim memory bar, no numbers" },
   { id: "claude", name: "Claude", blurb: "Claude Code's 5-hour and weekly limits, with Clawd" },
   { id: "clawd", name: "Clawd", blurb: "Clawd shows whether Claude Code is working" },
+  { id: "net", name: "Network", blurb: "Download and upload speed" },
+  { id: "disk", name: "Disk", blurb: "System disk space, reads and writes" },
+  { id: "battery", name: "Battery", blurb: "The laptop's charge and time left" },
+  { id: "image", name: "Image", blurb: "A picture or GIF of your own" },
 ];
+/** Faces that show the CPU's or the GPU's metrics, as the screen's source says. */
+export const hasSource = (face: Face) => face === "classic" || face === "rings" || face === "plus" || face === "bar";
 /** Extra clockwise turn of a screen, in degrees; `rot` on the wire. */
 export type Rotation = 0 | 90 | 180 | 270;
 export type Rotations = Record<DeviceId, Rotation>;
@@ -58,7 +76,7 @@ export const ROTATIONS: Rotation[] = [0, 90, 180, 270];
 export const isClaudeFace = (face: Face): face is "claude" | "clawd" => face === "claude" || face === "clawd";
 
 /** `ui_classic_layout_t` for the classic-based faces; no bar when `barW` is 0. */
-export const CLASSIC_LAYOUT: Record<Exclude<Face, "rings" | "claude" | "clawd">, { y: number; titleGap: number; barW: number; barH: number; memText: boolean }> = {
+export const CLASSIC_LAYOUT: Record<"classic" | "plus" | "bar", { y: number; titleGap: number; barW: number; barH: number; memText: boolean }> = {
   classic: { y: 2, titleGap: 10, barW: 0, barH: 0, memText: false },
   plus: { y: -10, titleGap: 8, barW: 96, barH: 6, memText: true },
   bar: { y: -3, titleGap: 10, barW: 72, barH: 4, memText: false },
@@ -67,6 +85,8 @@ export const CLASSIC_LAYOUT: Record<Exclude<Face, "rings" | "claude" | "clawd">,
 /** The text and colours one round screen shows, as the `update_*` functions in ui_watch.c compute them. */
 export type Screen = {
   face: Face;
+  /** Whose accent the metrics faces wear: the screen's source. */
+  source: DeviceId;
   placeholder: boolean;
   title: string;
   value: string;
@@ -90,7 +110,22 @@ export type Screen = {
   warn: boolean;
   /** Set on the claude and clawd faces. */
   claude?: ClaudeView;
+  net?: NetView;
+  disk?: DiskView;
+  battery?: BatteryView;
+  /** The image face: a data URL of the picture, or null without one. */
+  image?: string | null;
 };
+
+/** `update_net()`: download outside and in large, upload inside. */
+export type NetView = { rxPct: number; txPct: number; unit: string; tx: string };
+/** `update_disk()` */
+export type DiskView = { pct: number; color: string; space: string; read: string | null; write: string | null };
+/** `update_battery()` */
+export type BatteryView = { pct: number; color: string; status: string; statusColor: string; time: string };
+
+/** What the screens show besides one device's metrics. */
+export type Extras = { net?: Net; disk?: Disk; bat?: Battery; image?: string | null; claude?: ClaudeMetrics; fan?: number };
 
 /** What `update_claude()` and `update_clawd_face()` put on screen. */
 export type ClaudeView = {
@@ -117,17 +152,124 @@ const cInt = (v: number) => Math.trunc(v + 0.5); // (int) (v + 0.5f)
 const pct = (v: number, max: number) => Math.min(100, Math.max(0, cInt((v / max) * 100)));
 const pctText = (p: number | undefined) => (p === undefined ? "--%" : `${p}%`);
 
+/**
+ * One screen: `face`, with `source`'s metrics `m` for the faces that have a
+ * source. `peaks` names the screen whose net rings scale to their recent peak,
+ * like the board's; without it they scale to the moment.
+ */
 export function screenFor(
-  id: DeviceId,
+  source: DeviceId,
   face: Face,
   m: Metrics | undefined,
   stale: boolean,
   waiting: boolean,
-  fan?: number,
-  claude?: ClaudeMetrics,
+  extras: Extras = {},
+  peaks?: string,
 ): Screen {
-  const screen = sensorScreen(id, face, m, stale, waiting, fan);
-  return isClaudeFace(face) ? { ...screen, claude: claudeView(claude, stale, waiting) } : screen;
+  const screen = sensorScreen(source, face, m, stale, waiting, extras.fan);
+  if (isClaudeFace(face)) return { ...screen, claude: claudeView(extras.claude, stale, waiting) };
+  if (face === "net") return netScreen(screen, extras.net, stale, waiting, peaks);
+  if (face === "disk") return diskScreen(screen, extras.disk, stale, waiting);
+  if (face === "battery") return batteryScreen(screen, extras.bat, stale, waiting);
+  if (face === "image") return { ...screen, image: extras.image ?? null };
+  return screen;
+}
+
+/** `format_rate()`: the number and its unit. */
+export function formatRate(bps: number): [string, string] {
+  const units = ["B/s", "KB/s", "MB/s", "GB/s"];
+  let u = 0;
+  while (bps >= 1000 && u < 3) {
+    bps /= 1000;
+    u++;
+  }
+  return [bps < 9.95 && u > 0 ? bps.toFixed(1) : String(cInt(bps)), units[u]];
+}
+const rate = (bps: number) => formatRate(bps).join(" ");
+
+const peaks = new Map<string, { rx: number; tx: number }>();
+const follow = (peak: number, v: number) => Math.max(NET_SCALE_MIN, Math.max(peak * NET_SCALE_DECAY, v));
+
+function placeholderScreen(screen: Screen, title: string, waiting: boolean): Screen {
+  return {
+    ...screen,
+    placeholder: true,
+    title,
+    value: "—",
+    labelColor: COLOR.textDim,
+    valueColor: COLOR.textDim,
+    warn: false,
+  };
+}
+
+function netScreen(screen: Screen, net: Net | undefined, stale: boolean, waiting: boolean, key?: string): Screen {
+  if (waiting || !net) {
+    return { ...placeholderScreen(screen, "NET", waiting), net: { rxPct: 0, txPct: 0, unit: "--", tx: "--" } };
+  }
+  const last = key ? peaks.get(key) : undefined;
+  const peak = { rx: follow(last?.rx ?? NET_SCALE_MIN, net.rx_bps), tx: follow(last?.tx ?? NET_SCALE_MIN, net.tx_bps) };
+  if (key) peaks.set(key, peak);
+  const [value, unit] = formatRate(net.rx_bps);
+  return {
+    ...screen,
+    placeholder: false,
+    title: "NET",
+    value,
+    labelColor: stale ? COLOR.stale : COLOR.cyan,
+    valueColor: stale ? COLOR.textDim : COLOR.text,
+    warn: false,
+    net: { rxPct: pct(net.rx_bps, peak.rx), txPct: pct(net.tx_bps, peak.tx), unit, tx: rate(net.tx_bps) },
+  };
+}
+
+function diskScreen(screen: Screen, disk: Disk | undefined, stale: boolean, waiting: boolean): Screen {
+  if (waiting || !disk || disk.total_gb <= 0) {
+    return { ...placeholderScreen(screen, "DISK", waiting), disk: { pct: 0, color: COLOR.mem, space: "-- GB", read: null, write: null } };
+  }
+  const p = pct(disk.used_gb, disk.total_gb);
+  const full = p >= DISK_FULL_PCT;
+  const space =
+    disk.total_gb >= 1000
+      ? `${(disk.used_gb / 1000).toFixed(1)}/${(disk.total_gb / 1000).toFixed(1)} TB`
+      : `${disk.used_gb.toFixed(0)}/${disk.total_gb.toFixed(0)} GB`;
+  const io = disk.read_bps !== undefined || disk.write_bps !== undefined;
+  return {
+    ...screen,
+    placeholder: false,
+    title: "DISK",
+    value: `${p}%`,
+    labelColor: stale ? COLOR.stale : full ? COLOR.warm : COLOR.mem,
+    valueColor: full ? COLOR.warm : COLOR.text,
+    warn: full,
+    disk: { pct: p, color: full ? COLOR.warm : COLOR.mem, space, read: io ? rate(disk.read_bps ?? 0) : null, write: io ? rate(disk.write_bps ?? 0) : null },
+  };
+}
+
+function batteryScreen(screen: Screen, bat: Battery | undefined, stale: boolean, waiting: boolean): Screen {
+  if (waiting || !bat) {
+    return {
+      ...placeholderScreen(screen, "BATTERY", waiting),
+      battery: { pct: 0, color: COLOR.green, status: waiting ? "WAITING" : "NO BATTERY", statusColor: COLOR.textDim, time: "" },
+    };
+  }
+  const p = pct(bat.pct, 100);
+  const color = !bat.plugged && p <= BATTERY_EMPTY_PCT ? COLOR.hot : !bat.plugged && p <= BATTERY_LOW_PCT ? COLOR.warm : COLOR.green;
+  const status = bat.charging ? "CHARGING" : bat.plugged ? "PLUGGED IN" : "ON BATTERY";
+  let time = "";
+  if (bat.mins !== undefined && bat.mins > 0 && (bat.charging || !bat.plugged)) {
+    const what = bat.charging ? "to full" : "left";
+    time = bat.mins >= 60 ? `${Math.trunc(bat.mins / 60)}h ${String(bat.mins % 60).padStart(2, "0")}m ${what}` : `${bat.mins}m ${what}`;
+  }
+  return {
+    ...screen,
+    placeholder: false,
+    title: "BATTERY",
+    value: `${p}%`,
+    labelColor: stale ? COLOR.stale : color,
+    valueColor: color === COLOR.green ? COLOR.text : color,
+    warn: color === COLOR.hot,
+    battery: { pct: p, color, status, statusColor: bat.charging || bat.plugged ? COLOR.green : COLOR.textDim, time },
+  };
 }
 
 /** `format_tokens()`: "1.2M", "845K", "9.4K", "512". */
@@ -247,6 +389,7 @@ function sensorScreen(
   const memPct = mem ? pct(mem.used_mb, mem.total_mb) : undefined;
   const base = {
     face,
+    source: id,
     title: dev.title,
     memName: dev.memTitle,
     clock: "-- GHz",

@@ -45,7 +45,28 @@ export type ClaudeAlertsInfo = {
   can_speak: boolean;
   last: { text: string; error: string | null; age_s: number } | null;
 };
-export type Snapshot = { v: number; ts: number; cpu?: Metrics; gpu?: Metrics; fans?: Fan[]; face?: Faces; rot?: Rotations; claude?: ClaudeMetrics };
+/** Bytes per second, every interface but loopback. */
+export type Net = { rx_bps: number; tx_bps: number };
+/** The system disk, in GB; throughput where the OS tells. */
+export type Disk = { used_gb: number; total_gb: number; read_bps?: number; write_bps?: number };
+export type Battery = { pct: number; charging: boolean; plugged: boolean; mins?: number };
+export type Snapshot = {
+  v: number;
+  ts: number;
+  cpu?: Metrics;
+  gpu?: Metrics;
+  fans?: Fan[];
+  net?: Net;
+  disk?: Disk;
+  bat?: Battery;
+  face?: Faces;
+  rot?: Rotations;
+  claude?: ClaudeMetrics;
+};
+/** `Prepared` in dualeye-core: what went to the board. */
+export type ImageSent = { frames: number; source_frames: number; bytes: number; duration_ms: number };
+/** An image face's screen, as `media/...` names it. */
+export type Side = "left" | "right";
 export type PortInfo = { name: string; vid: number; pid: number; product: string | null; is_board: boolean };
 export type Reading = { source: string; label: string; value: number; unit: string };
 /** `power_helper::HelperStatus`: the macOS root helper that reads the exact CPU power. */
@@ -216,6 +237,10 @@ class Monitor {
   eyes = $state(true);
   /** Transcribed utterances, oldest first. */
   transcripts = $state<TranscriptEntry[]>([]);
+  /** What each screen's image face shows, as data URLs; null without a picture. */
+  images = $state<Record<Side, string | null>>({ left: null, right: null });
+  /** An image on its way to the board: which screen and how far (0–1). */
+  sending = $state<{ side: Side; progress: number } | null>(null);
 
   job = $state<DeviceJob>("idle");
   /** Output of the last esptool run. */
@@ -254,6 +279,10 @@ class Monitor {
   async #connect() {
     await listen<BridgeEvent>("bridge", (e) => this.#apply(e.payload));
     await listen<FlashEvent>("flash", (e) => this.#applyFlash(e.payload));
+    await listen<{ side: Side; progress: number }>("image", (e) => (this.sending = e.payload));
+    for (const side of ["left", "right"] as Side[]) {
+      invoke<string | null>("image_preview", { side }).then((url) => (this.images[side] = url)).catch(() => {});
+    }
     const s = await invoke<Status>("status");
     const now = Date.now();
     this.link = s.link;
@@ -421,6 +450,39 @@ class Monitor {
   async setRotation(rotation: Rotations) {
     this.rotation = rotation;
     if (!this.preview) await invoke("set_rotation", { rotation });
+  }
+
+  /** Put `file` on `side`'s image face; the board gets it already scaled and cropped. */
+  async sendImage(side: Side, file: File): Promise<ImageSent> {
+    const url = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    if (this.preview) {
+      for (let p = 0; p <= 1; p += 0.1) {
+        this.sending = { side, progress: p };
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      this.sending = null;
+      this.images[side] = url;
+      return { frames: 1, source_frames: 1, bytes: file.size, duration_ms: 0 };
+    }
+    this.sending = { side, progress: 0 };
+    try {
+      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      const sent = await invoke<ImageSent>("send_image", { side, bytes });
+      this.images[side] = url;
+      return sent;
+    } finally {
+      this.sending = null;
+    }
+  }
+
+  async clearImage(side: Side) {
+    if (!this.preview) await invoke("clear_image", { side });
+    this.images[side] = null;
   }
 
   async claudeLink(): Promise<ClaudeLink> {
@@ -714,6 +776,10 @@ function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, ro
           { id: "cpu", rpm: Math.round(3780 + cpuLoad * 9 + Math.random() * 40) },
           { id: "gpu", rpm: gpuLoad > 25 ? Math.round(900 + gpuLoad * 14) : 0 },
         ],
+        // Downloads in bursts, a trickle up.
+        net: { rx_bps: Math.round(40_000 + 12_000_000 * burst + Math.random() * 30_000), tx_bps: Math.round(8_000 + 400_000 * burst * Math.random()) },
+        disk: { used_gb: 612.4, total_gb: 994.7, read_bps: Math.round(2_000_000 * burst), write_bps: Math.round(300_000 + 4_000_000 * burst * Math.random()) },
+        bat: { pct: Math.max(5, Math.round(84 - t / 30)), charging: false, plugged: false, mins: Math.max(10, Math.round(312 - t / 6)) },
         face: { ...faces() },
         // Like the bridge: left out when both screens are upright.
         ...(rotation().cpu || rotation().gpu ? { rot: { ...rotation() } } : {}),

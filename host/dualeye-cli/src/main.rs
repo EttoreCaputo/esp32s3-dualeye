@@ -39,7 +39,10 @@ use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage};
 use dualeye_core::eval::{self, EvalSet, Responder};
 use dualeye_core::llm::{self, Llm, LlmConfig};
 use dualeye_core::voice::{self, VoiceConfig};
-use dualeye_core::{Agent, Board, BoardFirmware, ClaudeUsage, Collector, Face, Faces, Hub, Memory, Rotation, Rotations, Snapshot, Tool, Toolbox, intents, mcp, serial};
+use dualeye_core::{
+    Agent, Board, BoardFirmware, ClaudeUsage, Collector, Face, Faces, Hub, Memory, Rotation, Rotations, Snapshot, Source, Sources, Tool, Toolbox, intents, mcp, media,
+    serial,
+};
 use serde_json::{Map, Value, json};
 
 #[derive(Parser)]
@@ -53,14 +56,21 @@ struct Args {
     /// Milliseconds between snapshots
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(200..))]
     interval_ms: u64,
-    /// Watch face on the left (CPU) screen: classic, rings, plus, bar, claude or clawd.
-    /// Without any face or rotation flag the board keeps its own; with one,
-    /// the others fall back to classic and 0
+    /// Watch face on the left screen: classic, rings, plus, bar, claude, clawd,
+    /// net, disk, battery or image. Without any face, source or rotation flag
+    /// the board keeps its own; with one, the others fall back to classic,
+    /// the usual source and 0
     #[arg(long)]
     cpu_face: Option<Face>,
-    /// Watch face on the right (GPU) screen: classic, rings, plus, bar, claude or clawd
+    /// Watch face on the right screen, from the same list
     #[arg(long)]
     gpu_face: Option<Face>,
+    /// Whose metrics classic, rings, plus and bar show on the left screen: cpu (default) or gpu
+    #[arg(long)]
+    cpu_source: Option<Source>,
+    /// Likewise on the right screen: gpu (default) or cpu
+    #[arg(long)]
+    gpu_source: Option<Source>,
     /// Turn the left (CPU) screen clockwise: 0, 90, 180 or 270 degrees
     #[arg(long)]
     cpu_rotation: Option<Rotation>,
@@ -207,6 +217,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Put a picture or an animated GIF on a screen, for its image face:
+    /// `dualeye image cat.gif --screen left`, then `--cpu-face image`.
+    /// `--clear` takes it off
+    Image {
+        /// PNG, JPEG, GIF, WebP or BMP; cropped to the middle square
+        #[arg(required_unless_present = "clear")]
+        file: Option<std::path::PathBuf>,
+        /// left or right
+        #[arg(long, default_value = "left", value_parser = ["left", "right"])]
+        screen: String,
+        #[arg(long)]
+        clear: bool,
+        #[arg(long, env = "DUALEYE_PORT")]
+        port: Option<String>,
+    },
     /// Speak through the board's speaker. Needs the app with spoken replies
     /// on, or `dualeye --tts`, running
     Say {
@@ -244,6 +269,7 @@ fn main() -> ExitCode {
         Some(Command::Piper { action }) => return piper_command(action),
         Some(Command::Ask { text, language, port, llm }) => return ask(&text, language.as_deref(), port, &llm),
         Some(Command::Eval { llm, rules, set, language, verbose, json }) => return eval(&llm, rules, &set, language.as_deref(), verbose, json),
+        Some(Command::Image { file, screen, clear, port }) => return image(port, file.as_deref(), &screen, clear),
         Some(Command::Say { text, language }) => {
             return match board(None).say(&text, language.as_deref()) {
                 Ok(r) => {
@@ -330,13 +356,22 @@ fn main() -> ExitCode {
     let config = BridgeConfig {
         port: args.port,
         interval: Duration::from_millis(args.interval_ms),
-        faces: Arc::new(Mutex::new(Faces { cpu: args.cpu_face.unwrap_or_default(), gpu: args.gpu_face.unwrap_or_default() })),
+        faces: Arc::new(Mutex::new(Faces {
+            cpu: args.cpu_face.unwrap_or_default(),
+            gpu: args.gpu_face.unwrap_or_default(),
+            src: Sources { cpu: args.cpu_source.unwrap_or(Source::Cpu), gpu: args.gpu_source.unwrap_or(Source::Gpu) },
+        })),
         rotation: Arc::new(Mutex::new(Rotations {
             cpu: args.cpu_rotation.unwrap_or_default(),
             gpu: args.gpu_rotation.unwrap_or_default(),
         })),
         hub,
-        adopt_board_settings: args.cpu_face.is_none() && args.gpu_face.is_none() && args.cpu_rotation.is_none() && args.gpu_rotation.is_none(),
+        adopt_board_settings: args.cpu_face.is_none()
+            && args.gpu_face.is_none()
+            && args.cpu_source.is_none()
+            && args.gpu_source.is_none()
+            && args.cpu_rotation.is_none()
+            && args.gpu_rotation.is_none(),
         voice: Arc::new(Mutex::new(VoiceConfig {
             dump_dir: args.voice_dump.map(|d| if d.as_os_str().is_empty() { voice::default_dump_dir().unwrap_or(d) } else { d }),
             stt,
@@ -878,5 +913,38 @@ mod tests {
         assert_eq!(args(&[]), Ok(json!({})));
         assert!(args(&["--face"]).is_err());
         assert!(args(&["rings"]).is_err());
+    }
+}
+
+fn image(port: Option<String>, file: Option<&std::path::Path>, screen: &str, clear: bool) -> ExitCode {
+    let board = board(port);
+    let result = match file {
+        _ if clear => media::clear(&board, screen).map(|()| format!("{screen}: picture removed")),
+        Some(path) => std::fs::read(path).map_err(|e| format!("{}: {e}", path.display())).and_then(|bytes| {
+            let mut shown = -1;
+            let sent = media::send(&board, screen, &bytes, |p| {
+                let pct = (p * 100.0) as i32;
+                if pct / 10 != shown / 10 {
+                    shown = pct;
+                    eprint!("\rsending {pct}%");
+                }
+            });
+            eprintln!();
+            sent.map(|p| match p.frames {
+                1 => format!("{screen}: picture, {} KB", p.bytes / 1024),
+                n => format!("{screen}: {n} frames ({} of the original), {:.1} s, {} KB", p.source_frames, f64::from(p.duration_ms) / 1000.0, p.bytes / 1024),
+            })
+        }),
+        None => Err("give a file, or --clear".into()),
+    };
+    match result {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
     }
 }

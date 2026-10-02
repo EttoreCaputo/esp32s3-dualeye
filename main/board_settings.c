@@ -17,6 +17,7 @@ static const char *TAG = "settings";
 static const char *const ROT_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "rot_cpu", [UI_SCREEN_GPU] = "rot_gpu"};
 static const char *const FACE_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "face_cpu", [UI_SCREEN_GPU] = "face_gpu"};
 static const char *const BL_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "bl_cpu", [UI_SCREEN_GPU] = "bl_gpu"};
+static const char *const SRC_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "src_cpu", [UI_SCREEN_GPU] = "src_gpu"};
 
 #define MIC_MUTED_KEY "mic_muted"
 #define WAKE_WORD_KEY "wake_word"
@@ -46,6 +47,10 @@ static void load(void)
         uint8_t face = 0;
         if (nvs_get_u8(nvs, FACE_KEYS[i], &face) == ESP_OK && face < METRICS_FACE_COUNT) {
             s_settings.face[i] = (metrics_face_t) face;
+        }
+        uint8_t src = 0;
+        if (nvs_get_u8(nvs, SRC_KEYS[i], &src) == ESP_OK && src < METRICS_SOURCE_COUNT) {
+            s_settings.source[i] = (metrics_source_t) src;
         }
         uint8_t bl = 0;
         if (nvs_get_u8(nvs, BL_KEYS[i], &bl) == ESP_OK && bl <= 100) {
@@ -97,6 +102,8 @@ void board_settings_init(void)
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
         s_settings.brightness[i] = BOARD_BRIGHTNESS_DEFAULT;
     }
+    s_settings.source[UI_SCREEN_CPU] = METRICS_SOURCE_CPU;
+    s_settings.source[UI_SCREEN_GPU] = METRICS_SOURCE_GPU;
     s_settings.volume = BOARD_VOLUME_DEFAULT;
     s_settings.eyes = true;
     s_settings.idle_eyes = true;
@@ -130,6 +137,21 @@ esp_err_t board_settings_set_face(int screen, metrics_face_t face)
     xSemaphoreGive(s_lock);
     if (changed) {
         save(FACE_KEYS[screen], face, false);
+    }
+    return ESP_OK;
+}
+
+esp_err_t board_settings_set_source(int screen, metrics_source_t source)
+{
+    if (!valid_screen(screen) || source >= METRICS_SOURCE_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool changed = s_settings.source[screen] != source;
+    s_settings.source[screen] = source;
+    xSemaphoreGive(s_lock);
+    if (changed) {
+        save(SRC_KEYS[screen], source, false);
     }
     return ESP_OK;
 }

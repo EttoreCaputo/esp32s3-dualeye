@@ -12,6 +12,8 @@
 //! | Fans            | hwmon                       | —                        | SMC                |
 //! | RAM             | sysinfo                     | sysinfo                  | sysinfo            |
 //! | VRAM            | NVML, amdgpu `mem_info_*`   | NVML                     | IOAccelerator      |
+//! | Network, disk   | sysinfo                     | sysinfo                  | sysinfo            |
+//! | Battery         | power_supply                | power API                | IOKit              |
 //!
 //! ¹ Apple Silicon only.
 //! ² Where macOS 27 froze IOReport's CPU energy counter: SoC rail minus GPU power.
@@ -29,6 +31,7 @@ mod macos;
 pub mod power_helper;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod nvidia;
+mod system;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -68,6 +71,7 @@ pub struct Collector {
     nvidia: Option<nvidia::Nvidia>,
     #[cfg(target_os = "macos")]
     mac: macos::MacSensors,
+    system: system::SystemSensors,
 }
 
 impl Collector {
@@ -83,6 +87,7 @@ impl Collector {
             nvidia: nvidia::Nvidia::init(),
             #[cfg(target_os = "macos")]
             mac: macos::MacSensors::new(),
+            system: system::SystemSensors::new(),
         }
     }
 
@@ -127,12 +132,16 @@ impl Collector {
             fans.push(Fan { id: "gpu".into(), rpm });
         }
 
+        let (net, disk, bat) = self.system.sample();
         Snapshot {
             v: SNAPSHOT_VERSION,
             ts: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
             cpu,
             gpu: platform.gpu,
             fans,
+            net,
+            disk,
+            bat,
             face: None,
             rot: None,
             claude: None,

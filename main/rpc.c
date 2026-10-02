@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "link.h"
+#include "media.h"
 #include "playback.h"
 #include "voice.h"
 
@@ -84,6 +85,7 @@ static cJSON *identity(void)
         cJSON_AddItemToArray(channels, cJSON_CreateString(base[i]));
     }
     cJSON_AddItemToArray(caps, cJSON_CreateString("tools"));
+    cJSON_AddItemToArray(caps, cJSON_CreateString("media"));
     if (voice_available()) {
         cJSON_AddItemToArray(channels, cJSON_CreateString("audio_up"));
         cJSON_AddItemToArray(caps, cJSON_CreateString("voice"));
@@ -185,6 +187,13 @@ void rpc_handle(uint8_t *payload, size_t len)
         // Stop talking: what's buffered is dropped.
         playback_stop();
         result = cJSON_CreateObject();
+    } else if (strncmp(name, "media/", 6) == 0) {
+        // Images for the image face: begin, write..., end; clear; info.
+        result = media_rpc(name, params, &message);
+        code = RPC_INVALID_PARAMS;
+        if (result == NULL && strcmp(message, "method not found") == 0) {
+            code = RPC_METHOD_NOT_FOUND;
+        }
     } else if (strcmp(name, "debug/audio") == 0) {
         const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(params, "cmd");
         if (!cJSON_IsString(cmd)) {

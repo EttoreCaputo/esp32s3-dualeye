@@ -16,6 +16,15 @@ static const char *const FACE_NAMES[METRICS_FACE_COUNT] = {
     [METRICS_FACE_BAR] = "bar",
     [METRICS_FACE_CLAUDE] = "claude",
     [METRICS_FACE_CLAWD] = "clawd",
+    [METRICS_FACE_NET] = "net",
+    [METRICS_FACE_DISK] = "disk",
+    [METRICS_FACE_BATTERY] = "battery",
+    [METRICS_FACE_IMAGE] = "image",
+};
+
+static const char *const SOURCE_NAMES[METRICS_SOURCE_COUNT] = {
+    [METRICS_SOURCE_CPU] = "cpu",
+    [METRICS_SOURCE_GPU] = "gpu",
 };
 
 const char *metrics_face_name(metrics_face_t face)
@@ -28,6 +37,28 @@ bool metrics_face_from_name(const char *name, metrics_face_t *out)
     for (int i = 0; i < METRICS_FACE_COUNT; i++) {
         if (strcmp(name, FACE_NAMES[i]) == 0) {
             *out = (metrics_face_t) i;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool metrics_face_has_source(metrics_face_t face)
+{
+    return face == METRICS_FACE_CLASSIC || face == METRICS_FACE_RINGS || face == METRICS_FACE_PLUS
+           || face == METRICS_FACE_BAR;
+}
+
+const char *metrics_source_name(metrics_source_t source)
+{
+    return source < METRICS_SOURCE_COUNT ? SOURCE_NAMES[source] : NULL;
+}
+
+bool metrics_source_from_name(const char *name, metrics_source_t *out)
+{
+    for (int i = 0; i < METRICS_SOURCE_COUNT; i++) {
+        if (strcmp(name, SOURCE_NAMES[i]) == 0) {
+            *out = (metrics_source_t) i;
             return true;
         }
     }

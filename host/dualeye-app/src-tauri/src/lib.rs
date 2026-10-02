@@ -56,7 +56,7 @@ use dualeye_core::tts::{self, Tts, TtsConfig};
 use dualeye_core::voice::{self, Spoken, VoiceConfig};
 use dualeye_core::{
     Agent, Board, BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
-    mcp, serial,
+    mcp, media, serial,
 };
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -602,6 +602,45 @@ async fn set_board_idle_eyes(on: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
+fn side(side: &str) -> Result<&'static str, String> {
+    match side {
+        "left" => Ok("left"),
+        "right" => Ok("right"),
+        other => Err(format!("unknown screen {other}")),
+    }
+}
+
+/// Put a picture or a GIF on `side`'s image face, emitting `image`
+/// `{side, progress}` as it goes.
+#[tauri::command]
+async fn send_image(app: AppHandle, side: String, bytes: Vec<u8>) -> Result<media::Prepared, String> {
+    let side = self::side(&side)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut last = -1.0f32;
+        media::send(&board(), side, &bytes, |p| {
+            if p - last >= 0.02 || p >= 1.0 {
+                last = p;
+                let _ = app.emit("image", serde_json::json!({"side": side, "progress": p}));
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn clear_image(side: String) -> Result<(), String> {
+    let side = self::side(&side)?;
+    tauri::async_runtime::spawn_blocking(move || media::clear(&board(), side)).await.map_err(|e| e.to_string())?
+}
+
+/// What was last sent to `side`, as a data URL for the mirror.
+#[tauri::command]
+async fn image_preview(side: String) -> Result<Option<String>, String> {
+    let side = self::side(&side)?;
+    tauri::async_runtime::spawn_blocking(move || media::copy_data_url(side)).await.map_err(|e| e.to_string())
+}
+
 /// Say a test sentence through the board, with the voice of `language`.
 #[tauri::command]
 async fn test_voice(language: String) -> Result<(), String> {
@@ -1062,7 +1101,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, power_helper_status, set_power_helper, open_power_helper_settings])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_piper, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

@@ -7,6 +7,13 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.1.0
+
+- Any face on either screen: the CPU and GPU faces show whichever you pick, so both screens can show the GPU, or the CPU can go on the right.
+- Three new faces: **Network** (download and upload speed), **Disk** (space used, reads and writes) and **Battery** (charge, charging, time left).
+- **Image**: a picture or an animated GIF of your own on a screen, picked in the app. The board keeps it and shows it even with the app closed.
+- A new flash layout makes room for the pictures: the app flashes the whole image, so update from the app. Your settings stay.
+
 ## 1.0.2
 
 - The eyes now come out on their own: every minute or two, while nobody is talking, they open over the watch faces for a few seconds — a look around, a wink, a yawn, a roll of the eyes, a dizzy spin, hearts in their eyes and a dozen more — then close again. Turn it off in the app's Voice tab.

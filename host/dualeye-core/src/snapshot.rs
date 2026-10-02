@@ -64,10 +64,29 @@ pub enum Face {
     Claude,
     /// Claude Code: a large animated Clawd showing whether Claude is working.
     Clawd,
+    /// Download and upload speed (firmware 1.1).
+    Net,
+    /// The system disk: space used, reads and writes (firmware 1.1).
+    Disk,
+    /// The laptop's battery (firmware 1.1).
+    Battery,
+    /// The picture or GIF uploaded for that screen (firmware 1.1).
+    Image,
 }
 
 impl Face {
-    pub const ALL: [Face; 6] = [Face::Classic, Face::Rings, Face::Plus, Face::Bar, Face::Claude, Face::Clawd];
+    pub const ALL: [Face; 10] = [
+        Face::Classic,
+        Face::Rings,
+        Face::Plus,
+        Face::Bar,
+        Face::Claude,
+        Face::Clawd,
+        Face::Net,
+        Face::Disk,
+        Face::Battery,
+        Face::Image,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -77,7 +96,69 @@ impl Face {
             Face::Bar => "bar",
             Face::Claude => "claude",
             Face::Clawd => "clawd",
+            Face::Net => "net",
+            Face::Disk => "disk",
+            Face::Battery => "battery",
+            Face::Image => "image",
         }
+    }
+
+    /// Shows a CPU's or a GPU's metrics, as its screen's [`Source`] says.
+    pub fn has_source(self) -> bool {
+        matches!(self, Face::Classic | Face::Rings | Face::Plus | Face::Bar)
+    }
+}
+
+/// Whose metrics a screen's classic, rings, plus and bar faces show. Mirrors
+/// `metrics_source_t` in `main/metrics_model.h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    Cpu,
+    Gpu,
+}
+
+impl Source {
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::Cpu => "cpu",
+            Source::Gpu => "gpu",
+        }
+    }
+}
+
+impl std::str::FromStr for Source {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "cpu" => Ok(Source::Cpu),
+            "gpu" => Ok(Source::Gpu),
+            _ => Err(format!("unknown source `{s}`, expected cpu or gpu")),
+        }
+    }
+}
+
+/// The source of each screen: by default the CPU on the left, the GPU on the right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sources {
+    #[serde(default = "cpu")]
+    pub cpu: Source,
+    #[serde(default = "gpu")]
+    pub gpu: Source,
+}
+
+fn cpu() -> Source {
+    Source::Cpu
+}
+
+fn gpu() -> Source {
+    Source::Gpu
+}
+
+impl Default for Sources {
+    fn default() -> Self {
+        Self { cpu: Source::Cpu, gpu: Source::Gpu }
     }
 }
 
@@ -92,13 +173,22 @@ impl std::str::FromStr for Face {
     }
 }
 
-/// Which face each screen shows: left (`cpu`) and right (`gpu`).
+/// Which face each screen shows: left (`cpu`) and right (`gpu`), and whose
+/// metrics the faces that have a source show there.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Faces {
     #[serde(default, deserialize_with = "face_or_classic")]
     pub cpu: Face,
     #[serde(default, deserialize_with = "face_or_classic")]
     pub gpu: Face,
+    #[serde(default)]
+    pub src: Sources,
+}
+
+impl Faces {
+    pub fn new(cpu: Face, gpu: Face) -> Self {
+        Self { cpu, gpu, src: Sources::default() }
+    }
 }
 
 /// Names this build doesn't know (such as the retired `memory` and `gauge`)
@@ -183,6 +273,37 @@ pub struct Fan {
     pub rpm: u32,
 }
 
+/// Network throughput over every interface but loopback, in bytes per second.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Net {
+    pub rx_bps: u64,
+    pub tx_bps: u64,
+}
+
+/// The system disk, in GB (10^9 bytes, as the OS shows them), and its
+/// throughput where the OS tells.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Disk {
+    pub used_gb: f32,
+    pub total_gb: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_bps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_bps: Option<u64>,
+}
+
+/// The laptop's battery.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Battery {
+    pub pct: f32,
+    pub charging: bool,
+    /// On mains power: charging, full or held at a charge limit.
+    pub plugged: bool,
+    /// Minutes to empty, or to full while charging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mins: Option<u32>,
+}
+
 /// Through a string, so an `f32` reads `34.8` rather than `34.79999923706055`.
 pub fn short_floats(value: &impl Serialize) -> serde_json::Value {
     serde_json::to_string(value).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::Value::Null)
@@ -198,6 +319,13 @@ pub struct Snapshot {
     pub gpu: DeviceMetrics,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fans: Vec<Fan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<Net>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<Disk>,
+    /// Absent without a battery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bat: Option<Battery>,
     /// What the bridge has set the board's faces to, for frontends that
     /// mirror the screens. Not part of the payload: faces are board state
     /// since protocol v2, set with the `set_face` tool.
@@ -220,7 +348,12 @@ impl Snapshot {
             "cpu": short_floats(&self.cpu),
             "gpu": short_floats(&self.gpu),
             "fans": self.fans,
-            "note": "temperatures in °C, clocks in MHz, power in W, memory in MiB (system RAM under cpu, VRAM under gpu), fan speeds in RPM",
+            "net": self.net,
+            "disk": short_floats(&self.disk),
+            "battery": short_floats(&self.bat),
+            "note": "temperatures in °C, clocks in MHz, power in W, memory in MiB (system RAM under cpu, VRAM under gpu), \
+                     fan speeds in RPM, network and disk speeds in bytes per second, disk space in GB, \
+                     battery in percent with minutes to empty (or to full while charging); battery is null on a desktop",
         })
     }
 
@@ -270,7 +403,10 @@ mod tests {
                 ..Default::default()
             },
             fans: vec![Fan { id: "cpu".into(), rpm: 3770 }],
-            face: Some(Faces { cpu: Face::Rings, gpu: Face::Plus }),
+            net: Some(Net { rx_bps: 1200, tx_bps: 30 }),
+            disk: None,
+            bat: Some(Battery { pct: 84.0, charging: true, plugged: true, mins: Some(42) }),
+            face: Some(Faces::new(Face::Rings, Face::Plus)),
             rot: None,
             claude: None,
         };
@@ -278,7 +414,8 @@ mod tests {
             payload(&snap),
             "{\"v\":2,\"ts\":1700000000,\"cpu\":{\"temp_c\":36.3,\"load_pct\":1.8,\"clock_mhz\":1572,\"power_w\":14.6,\
              \"mem\":{\"used_mb\":12288,\"total_mb\":31744}},\"gpu\":{\"temp_c\":31.0,\"mem\":{\"used_mb\":1024,\"total_mb\":24576}},\
-             \"fans\":[{\"id\":\"cpu\",\"rpm\":3770}]}"
+             \"fans\":[{\"id\":\"cpu\",\"rpm\":3770}],\"net\":{\"rx_bps\":1200,\"tx_bps\":30},\
+             \"bat\":{\"pct\":84.0,\"charging\":true,\"plugged\":true,\"mins\":42}}"
         );
     }
 
@@ -290,6 +427,9 @@ mod tests {
             cpu: DeviceMetrics::default(),
             gpu: DeviceMetrics::default(),
             fans: vec![],
+            net: None,
+            disk: None,
+            bat: None,
             face: None,
             rot: None,
             claude: None,
@@ -306,7 +446,10 @@ mod tests {
             cpu: DeviceMetrics { temp_c: Some(40.0), ..Default::default() },
             gpu: DeviceMetrics::default(),
             fans: vec![],
-            face: Some(Faces { cpu: Face::Claude, gpu: Face::Clawd }),
+            net: None,
+            disk: None,
+            bat: None,
+            face: Some(Faces::new(Face::Claude, Face::Clawd)),
             rot: None,
             claude: Some(ClaudeMetrics {
                 tok: 1_234_567,
@@ -331,9 +474,13 @@ mod tests {
         assert_eq!("clawd".parse::<Face>(), Ok(Face::Clawd));
         assert!("gauge".parse::<Face>().is_err());
         let faces: Faces = serde_json::from_str("{\"gpu\":\"rings\"}").unwrap();
-        assert_eq!(faces, Faces { cpu: Face::Classic, gpu: Face::Rings });
+        assert_eq!(faces, Faces::new(Face::Classic, Face::Rings));
         let old: Faces = serde_json::from_str("{\"cpu\":\"gauge\",\"gpu\":\"memory\"}").unwrap();
         assert_eq!(old, Faces::default());
+        assert_eq!(old.src, Sources { cpu: Source::Cpu, gpu: Source::Gpu });
+        let swapped: Faces = serde_json::from_str("{\"cpu\":\"net\",\"src\":{\"cpu\":\"gpu\"}}").unwrap();
+        assert_eq!(swapped.cpu, Face::Net);
+        assert_eq!(swapped.src, Sources { cpu: Source::Gpu, gpu: Source::Gpu });
     }
 
     #[test]
@@ -344,6 +491,9 @@ mod tests {
             cpu: DeviceMetrics { temp_c: Some(40.0), ..Default::default() },
             gpu: DeviceMetrics::default(),
             fans: vec![],
+            net: None,
+            disk: None,
+            bat: None,
             face: None,
             rot: Some(Rotations { cpu: Rotation::R180, gpu: Rotation::R0 }),
             claude: None,

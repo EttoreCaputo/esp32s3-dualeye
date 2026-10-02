@@ -120,6 +120,10 @@ fn face(words: &[String]) -> Option<Face> {
         (&["bar", "bars", "barra"], Face::Bar),
         (&["clawd", "clawed", "clod", "mascotte", "mascot", "granchio", "crab"], Face::Clawd),
         (&["claude", "cloud", "clode"], Face::Claude),
+        (&["net", "network", "rete", "internet"], Face::Net),
+        (&["disk", "disco", "dischi"], Face::Disk),
+        (&["battery", "batteria"], Face::Battery),
+        (&["image", "immagine", "foto", "picture", "photo", "gif"], Face::Image),
     ];
     table.iter().find(|(names, _)| has(words, names)).map(|&(_, f)| f)
 }

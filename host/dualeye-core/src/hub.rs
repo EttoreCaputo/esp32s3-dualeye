@@ -13,7 +13,7 @@
 //! | Method | Result |
 //! |--------|--------|
 //! | `hello` `{"token","client"}` | `{"bridge", "board": Hello or null, "port"}` |
-//! | `tools/list`, `tools/call` | Passed to the board as they are |
+//! | `tools/list`, `tools/call`, `media/...` | Passed to the board as they are |
 //! | `host/snapshot` | `{"snapshot": Snapshot or null, "age_ms"}`: the bridge's latest sample |
 //! | `host/say` `{"text","language"?}` | How it was spoken, once played |
 //! | `host/claude_hook` (a Claude Code hook's JSON) | `{"taken"}`: whether a bridge takes alerts |
@@ -305,6 +305,8 @@ pub(crate) type HookFn = Arc<dyn Fn(Value) + Send + Sync>;
 fn handle(shared: &Shared, method: &str, params: Value) -> Result<Value, (i64, String)> {
     match method {
         "tools/list" | "tools/call" => {}
+        // Image uploads (firmware 1.1); writes take a moment when the flash erases.
+        m if m.starts_with("media/") => {}
         "host/say" => {
             let text = params.get("text").and_then(Value::as_str).filter(|t| !t.trim().is_empty());
             let Some(text) = text else { return Err((INVALID_PARAMS, "expected {\"text\": string, \"language\"?: \"it\" | \"en\"}".into())) };
@@ -498,6 +500,27 @@ impl Board {
         reply
     }
 
+    /// Run `job` with a way to send the board JSON-RPC requests (`media/...`
+    /// for an image upload): through the bridge, or over the port, opened once
+    /// for the whole job.
+    pub fn session<T>(&self, job: impl FnOnce(&dyn Fn(&str, Value, Duration) -> Result<Value, CallError>) -> Result<T, CallError>) -> Result<T, CallError> {
+        {
+            let mut slot = self.hub.lock().unwrap();
+            if let Some(hub) = self.hub_client(&mut slot) {
+                *self.route.lock().unwrap() = Some(Route::Hub);
+                let hub = std::cell::RefCell::new(hub);
+                let result = job(&|method, params, timeout| hub.borrow_mut().request_waiting(method, params, timeout));
+                if matches!(result, Err(CallError::Io(_) | CallError::Closed | CallError::Invalid(_))) {
+                    *slot = None;
+                }
+                return result;
+            }
+        }
+        *self.route.lock().unwrap() = Some(Route::Direct);
+        let link = self.open_direct()?;
+        job(&|method, params, timeout| link.call(method, params, timeout))
+    }
+
     /// Hand a Claude Code hook's JSON to the running bridge, for its alerts.
     /// Only through the hub: without a bridge there is nobody to tell.
     pub fn claude_hook(&self, event: Value) -> Result<Value, CallError> {
@@ -551,13 +574,17 @@ impl Board {
             }
         }
         *self.route.lock().unwrap() = Some(Route::Direct);
+        direct(&self.open_direct()?)
+    }
+
+    fn open_direct(&self) -> Result<Link, CallError> {
         let port = self.port.clone().or_else(serial::detect_board).ok_or_else(|| CallError::Unavailable("board not found on USB".into()))?;
         let link = Link::open(&port, |_| {}).map_err(|e| CallError::Unavailable(format!("{port}: {e}")))?;
         link.handshake(Duration::from_secs(3)).map_err(|e| match e {
             CallError::Timeout => CallError::Unavailable(format!("{port}: the board does not answer (firmware 0.4 or later needed)")),
             other => other,
         })?;
-        direct(&link)
+        Ok(link)
     }
 }
 

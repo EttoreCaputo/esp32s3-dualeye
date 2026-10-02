@@ -3,7 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "board_display.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "media.h"
 
 LV_FONT_DECLARE(lv_font_montserrat_bold_12)
 LV_FONT_DECLARE(lv_font_montserrat_bold_48)
@@ -35,6 +38,17 @@ LV_FONT_DECLARE(lv_font_fan_16)
 #define COLOR_CLAUDE_TRACK 0x35190F
 #define COLOR_WEEK 0xE9C4A6
 #define COLOR_WEEK_TRACK 0x2B2019
+/* Upload on the net face, and the battery. */
+#define COLOR_GREEN 0x40E080
+#define COLOR_GREEN_TRACK 0x0F2A18
+
+/* The net face's rings scale to the fastest of the last minute or so, never below 64 KB/s. */
+#define NET_SCALE_MIN 65536.0f
+#define NET_SCALE_DECAY 0.97f
+#define DISK_FULL_PCT 90
+#define BATTERY_LOW_PCT 20
+#define BATTERY_EMPTY_PCT 10
+#define IMAGE_TICK_MS 20
 
 #define TEMP_WARM_C 80.0f
 #define TEMP_HOT_C 90.0f
@@ -120,6 +134,54 @@ typedef struct {
     lv_obj_t *week;
 } ui_claude_t;
 
+/* Download on the outer ring and in large, upload inside. */
+typedef struct {
+    lv_obj_t *root;
+    lv_obj_t *rx_arc;
+    lv_obj_t *tx_arc;
+    ui_title_t title;
+    lv_obj_t *value;
+    lv_obj_t *unit;
+    lv_obj_t *tx;
+    float rx_peak;
+    float tx_peak;
+} ui_net_t;
+
+/* The system disk: space used on the ring, reads and writes below. */
+typedef struct {
+    lv_obj_t *root;
+    lv_obj_t *arc;
+    ui_title_t title;
+    lv_obj_t *value;
+    lv_obj_t *space;
+    lv_obj_t *io_row;
+    lv_obj_t *read;
+    lv_obj_t *write;
+} ui_disk_t;
+
+/* Charge on the ring, what the battery is doing and for how long. */
+typedef struct {
+    lv_obj_t *root;
+    lv_obj_t *arc;
+    ui_title_t title;
+    lv_obj_t *value;
+    lv_obj_t *status;
+    lv_obj_t *time;
+} ui_battery_t;
+
+/* The uploaded picture, a frame at a time, or a hint without one. */
+typedef struct {
+    lv_obj_t *root;
+    lv_obj_t *img;
+    lv_obj_t *hint;
+    lv_image_dsc_t dsc;
+    uint16_t *pixels;
+    uint32_t generation;
+    int frame;
+    int frames;
+    uint32_t next_ms;
+} ui_image_face_t;
+
 /* A large Clawd between the model name and what Claude is doing. */
 typedef struct {
     lv_obj_t *root;
@@ -132,6 +194,10 @@ typedef struct {
 
 typedef struct {
     lv_obj_t *screen;
+    /* UI_SCREEN_*: which image slot is ours. */
+    int index;
+    /* Whose metrics classic, rings, plus and bar show, and how they're named and coloured. */
+    metrics_source_t source;
     const char *name;
     const char *mem_name;
     uint32_t accent;
@@ -142,6 +208,10 @@ typedef struct {
     ui_classic_t bar;
     ui_claude_t claude;
     ui_clawd_face_t clawd;
+    ui_net_t net;
+    ui_disk_t disk;
+    ui_battery_t battery;
+    ui_image_face_t image;
 } ui_screen_t;
 
 /* How the classic-based faces differ: column offset, gap under the title and
@@ -531,13 +601,110 @@ static void create_clawd_face(ui_screen_t *ui)
     (void) row;
 }
 
-static void create_screen(ui_screen_t *ui, lv_display_t *disp, const char *name, const char *mem_name,
-                          uint32_t accent, uint32_t track)
+static void create_net(ui_screen_t *ui)
 {
-    ui->name = name;
-    ui->mem_name = mem_name;
-    ui->accent = accent;
-    ui->track = track;
+    ui_net_t *f = &ui->net;
+    f->root = make_face(ui->screen);
+    f->rx_arc = create_arc(f->root, USAGE_ARC_SIZE, COLOR_CYAN, COLOR_TEMP_TRACK);
+    f->tx_arc = create_arc(f->root, USAGE_ARC_SIZE - RING_GAP, COLOR_GREEN, COLOR_GREEN_TRACK);
+    f->rx_peak = NET_SCALE_MIN;
+    f->tx_peak = NET_SCALE_MIN;
+
+    lv_obj_t *col = create_column(f->root, 2);
+    create_title(&f->title, col, "NET", COLOR_CYAN, 6);
+    f->value = create_text(col, "—", &lv_font_montserrat_bold_48, COLOR_TEXT);
+    f->unit = create_text(col, LV_SYMBOL_DOWN " --", &lv_font_montserrat_14, COLOR_CYAN);
+    lv_obj_set_style_margin_bottom(f->unit, 4, 0);
+    f->tx = create_text(col, LV_SYMBOL_UP " --", &lv_font_montserrat_14, COLOR_GREEN);
+}
+
+static void create_disk(ui_screen_t *ui)
+{
+    ui_disk_t *f = &ui->disk;
+    f->root = make_face(ui->screen);
+    f->arc = create_arc(f->root, USAGE_ARC_SIZE, COLOR_MEM, COLOR_MEM_TRACK);
+
+    lv_obj_t *col = create_column(f->root, 2);
+    create_title(&f->title, col, "DISK", COLOR_MEM, 6);
+    f->value = create_text(col, "—", &lv_font_montserrat_bold_48, COLOR_TEXT);
+    f->space = create_text(col, "-- GB", &lv_font_montserrat_14, COLOR_TEXT_DIM);
+    lv_obj_set_style_margin_bottom(f->space, 4, 0);
+    f->io_row = make_flex(col, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(f->io_row, 10, 0);
+    lv_obj_t *read_name = NULL;
+    lv_obj_t *write_name = NULL;
+    lv_obj_t *r = create_pair(f->io_row, &read_name, "R", COLOR_MEM, &f->read);
+    lv_obj_t *w = create_pair(f->io_row, &write_name, "W", COLOR_WARM, &f->write);
+    (void) r;
+    (void) w;
+}
+
+static void create_battery(ui_screen_t *ui)
+{
+    ui_battery_t *f = &ui->battery;
+    f->root = make_face(ui->screen);
+    f->arc = create_arc(f->root, USAGE_ARC_SIZE, COLOR_GREEN, COLOR_GREEN_TRACK);
+
+    lv_obj_t *col = create_column(f->root, 2);
+    create_title(&f->title, col, "BATTERY", COLOR_GREEN, 6);
+    f->value = create_text(col, "—", &lv_font_montserrat_bold_48, COLOR_TEXT);
+    f->status = create_text(col, "NO BATTERY", &lv_font_montserrat_bold_12, COLOR_TEXT_DIM);
+    lv_obj_set_style_text_letter_space(f->status, 1, 0);
+    lv_obj_set_style_margin_top(f->status, 6, 0);
+    lv_obj_set_style_margin_bottom(f->status, 4, 0);
+    f->time = create_text(col, "", &lv_font_montserrat_14, COLOR_TEXT_DIM);
+}
+
+static void create_image(ui_screen_t *ui)
+{
+    ui_image_face_t *f = &ui->image;
+    f->root = make_face(ui->screen);
+    f->img = lv_image_create(f->root);
+    lv_obj_center(f->img);
+    lv_obj_add_flag(f->img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *col = create_column(f->root, 0);
+    f->hint = col;
+    lv_obj_t *title = create_text(col, "NO IMAGE", &lv_font_montserrat_bold_12, COLOR_TEXT_DIM);
+    lv_obj_set_style_text_letter_space(title, 1, 0);
+    lv_obj_set_style_margin_bottom(title, 6, 0);
+    create_text(col, "Pick one in the\nDualEye app", &lv_font_montserrat_14, COLOR_TEXT_DIM);
+    // Not loaded yet: the first update looks.
+    f->generation = UINT32_MAX;
+}
+
+/* Name and colour the classic, rings, plus and bar faces after `source`. */
+static void apply_source(ui_screen_t *ui, metrics_source_t source)
+{
+    if (source == ui->source && ui->name != NULL) {
+        return;
+    }
+    bool gpu = source == METRICS_SOURCE_GPU;
+    ui->source = source;
+    ui->name = gpu ? "GPU" : "CPU";
+    ui->mem_name = gpu ? "VRAM" : "RAM";
+    ui->accent = gpu ? COLOR_USAGE_GPU : COLOR_USAGE_CPU;
+    ui->track = gpu ? COLOR_TRACK_GPU : COLOR_TRACK_CPU;
+    ui_classic_t *classics[] = {&ui->classic, &ui->plus, &ui->bar};
+    for (size_t i = 0; i < sizeof(classics) / sizeof(classics[0]); i++) {
+        if (classics[i]->root == NULL) {
+            continue;
+        }
+        style_arc(classics[i]->usage_arc, USAGE_ARC_SIZE, ui->accent, ui->track);
+        lv_label_set_text(classics[i]->title.label, ui->name);
+        if (classics[i]->mem_name != NULL) {
+            lv_label_set_text(classics[i]->mem_name, ui->mem_name);
+        }
+    }
+    if (ui->rings.root != NULL) {
+        style_arc(ui->rings.usage_arc, USAGE_ARC_SIZE, ui->accent, ui->track);
+        lv_label_set_text(ui->rings.title.label, ui->name);
+    }
+}
+
+static void create_screen(ui_screen_t *ui, lv_display_t *disp, int index, metrics_source_t source)
+{
+    ui->index = index;
+    apply_source(ui, source);
     ui->screen = lv_display_get_screen_active(disp);
     style_screen_black(ui->screen);
 
@@ -547,6 +714,10 @@ static void create_screen(ui_screen_t *ui, lv_display_t *disp, const char *name,
     create_classic(ui, &ui->bar, &LAYOUT_BAR);
     create_claude(ui);
     create_clawd_face(ui);
+    create_net(ui);
+    create_disk(ui);
+    create_battery(ui);
+    create_image(ui);
     lv_obj_remove_flag(ui->classic.root, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -850,6 +1021,213 @@ static void update_clawd_face(ui_screen_t *ui, const metrics_claude_t *c, metric
     set_tokens(f->tokens, c->tokens);
 }
 
+/* "512 B/s", "9.4 KB/s", "12 MB/s": the number and its unit apart, for the large value. */
+static void format_rate(float bps, char *num, size_t num_len, const char **unit)
+{
+    static const char *const UNITS[] = {"B/s", "KB/s", "MB/s", "GB/s"};
+    int u = 0;
+    while (bps >= 1000.0f && u < 3) {
+        bps /= 1000.0f;
+        u++;
+    }
+    if (bps < 9.95f && u > 0) {
+        snprintf(num, num_len, "%.1f", bps);
+    } else {
+        snprintf(num, num_len, "%d", (int) (bps + 0.5f));
+    }
+    *unit = UNITS[u];
+}
+
+static void set_rate(lv_obj_t *label, const char *prefix, float bps)
+{
+    char num[12];
+    const char *unit;
+    format_rate(bps, num, sizeof(num), &unit);
+    lv_label_set_text_fmt(label, "%s%s %s", prefix, num, unit);
+}
+
+/* A peak that follows `value` up at once and down slowly. */
+static float follow_peak(float peak, float value)
+{
+    peak *= NET_SCALE_DECAY;
+    if (value > peak) {
+        peak = value;
+    }
+    return peak < NET_SCALE_MIN ? NET_SCALE_MIN : peak;
+}
+
+static void update_net(ui_screen_t *ui, const metrics_net_t *net, metrics_ui_state_t state)
+{
+    ui_net_t *f = &ui->net;
+    if (state == METRICS_UI_WAITING || !net->valid) {
+        lv_arc_set_value(f->rx_arc, 0);
+        lv_arc_set_value(f->tx_arc, 0);
+        lv_label_set_text(f->value, "—");
+        lv_label_set_text(f->unit, LV_SYMBOL_DOWN " --");
+        lv_label_set_text(f->tx, LV_SYMBOL_UP " --");
+        set_title(&f->title, placeholder_title(state), false);
+        set_text_color(f->value, COLOR_TEXT_DIM);
+        return;
+    }
+    f->rx_peak = follow_peak(f->rx_peak, net->rx_bps);
+    f->tx_peak = follow_peak(f->tx_peak, net->tx_bps);
+    lv_arc_set_value(f->rx_arc, clamp_pct(net->rx_bps, f->rx_peak));
+    lv_arc_set_value(f->tx_arc, clamp_pct(net->tx_bps, f->tx_peak));
+
+    char num[12];
+    const char *unit;
+    format_rate(net->rx_bps, num, sizeof(num), &unit);
+    lv_label_set_text(f->value, num);
+    lv_label_set_text_fmt(f->unit, LV_SYMBOL_DOWN " %s", unit);
+    set_rate(f->tx, LV_SYMBOL_UP " ", net->tx_bps);
+    bool stale = state == METRICS_UI_STALE;
+    set_title(&f->title, stale ? COLOR_STALE : COLOR_CYAN, false);
+    set_text_color(f->value, stale ? COLOR_TEXT_DIM : COLOR_TEXT);
+}
+
+static void update_disk(ui_screen_t *ui, const metrics_disk_t *disk, metrics_ui_state_t state)
+{
+    ui_disk_t *f = &ui->disk;
+    if (state == METRICS_UI_WAITING || !disk->valid) {
+        lv_arc_set_value(f->arc, 0);
+        lv_label_set_text(f->value, "—");
+        lv_label_set_text(f->space, "-- GB");
+        lv_obj_add_flag(f->io_row, LV_OBJ_FLAG_HIDDEN);
+        set_title(&f->title, placeholder_title(state), false);
+        set_text_color(f->value, COLOR_TEXT_DIM);
+        return;
+    }
+    int pct = clamp_pct(disk->used_gb, disk->total_gb);
+    bool full = pct >= DISK_FULL_PCT;
+    lv_arc_set_value(f->arc, pct);
+    set_arc_color(f->arc, full ? COLOR_WARM : COLOR_MEM);
+    set_pct(f->value, true, pct);
+    if (disk->total_gb >= 1000.0f) {
+        lv_label_set_text_fmt(f->space, "%.1f/%.1f TB", disk->used_gb / 1000.0f, disk->total_gb / 1000.0f);
+    } else {
+        lv_label_set_text_fmt(f->space, "%.0f/%.0f GB", disk->used_gb, disk->total_gb);
+    }
+    if (disk->has_io) {
+        lv_obj_remove_flag(f->io_row, LV_OBJ_FLAG_HIDDEN);
+        set_rate(f->read, "", disk->read_bps);
+        set_rate(f->write, "", disk->write_bps);
+    } else {
+        lv_obj_add_flag(f->io_row, LV_OBJ_FLAG_HIDDEN);
+    }
+    uint32_t tone = state == METRICS_UI_STALE ? COLOR_STALE : full ? COLOR_WARM : COLOR_MEM;
+    set_title(&f->title, tone, full);
+    set_text_color(f->value, full ? COLOR_WARM : COLOR_TEXT);
+}
+
+static void update_battery(ui_screen_t *ui, const metrics_battery_t *bat, metrics_ui_state_t state)
+{
+    ui_battery_t *f = &ui->battery;
+    if (state == METRICS_UI_WAITING || !bat->valid) {
+        lv_arc_set_value(f->arc, 0);
+        lv_label_set_text(f->value, "—");
+        lv_label_set_text(f->status, state == METRICS_UI_WAITING ? "WAITING" : "NO BATTERY");
+        set_text_color(f->status, placeholder_title(state));
+        lv_label_set_text(f->time, "");
+        set_title(&f->title, placeholder_title(state), false);
+        set_text_color(f->value, COLOR_TEXT_DIM);
+        return;
+    }
+    int pct = clamp_pct(bat->pct, 100.0f);
+    uint32_t color = COLOR_GREEN;
+    if (!bat->plugged && pct <= BATTERY_EMPTY_PCT) {
+        color = COLOR_HOT;
+    } else if (!bat->plugged && pct <= BATTERY_LOW_PCT) {
+        color = COLOR_WARM;
+    }
+    lv_arc_set_value(f->arc, pct);
+    set_arc_color(f->arc, color);
+    set_pct(f->value, true, pct);
+    set_text_color(f->value, color == COLOR_GREEN ? COLOR_TEXT : color);
+    const char *status = bat->charging ? LV_SYMBOL_CHARGE " CHARGING" : bat->plugged ? "PLUGGED IN" : "ON BATTERY";
+    // The bold font has no symbols: the plain one carries the bolt.
+    lv_obj_set_style_text_font(f->status, bat->charging ? &lv_font_montserrat_12 : &lv_font_montserrat_bold_12, 0);
+    lv_label_set_text(f->status, status);
+    set_text_color(f->status, bat->charging || bat->plugged ? COLOR_GREEN : COLOR_TEXT_DIM);
+    if (bat->has_mins && bat->mins > 0 && (bat->charging || !bat->plugged)) {
+        const char *what = bat->charging ? "to full" : "left";
+        if (bat->mins >= 60) {
+            lv_label_set_text_fmt(f->time, "%dh %02dm %s", bat->mins / 60, bat->mins % 60, what);
+        } else {
+            lv_label_set_text_fmt(f->time, "%dm %s", bat->mins, what);
+        }
+    } else {
+        lv_label_set_text(f->time, "");
+    }
+    set_title(&f->title, state == METRICS_UI_STALE ? COLOR_STALE : color, color == COLOR_HOT);
+}
+
+/* Show frame `index` of our image; false when it can't be had right now. */
+static bool image_show_frame(ui_screen_t *ui, int index)
+{
+    ui_image_face_t *f = &ui->image;
+    uint16_t delay = 0;
+    if (!media_decode(ui->index, index, f->pixels, &delay)) {
+        return false;
+    }
+    f->frame = index;
+    uint32_t now = lv_tick_get();
+    f->next_ms = now + (delay > 0 ? delay : 100);
+    lv_obj_invalidate(f->img);
+    return true;
+}
+
+/* Load the image again when one was uploaded or removed since. */
+static void update_image(ui_screen_t *ui)
+{
+    ui_image_face_t *f = &ui->image;
+    uint32_t gen = media_generation();
+    if (gen == f->generation) {
+        return;
+    }
+    f->generation = gen;
+    f->frames = media_frame_count(ui->index);
+    if (f->frames > 0 && f->pixels == NULL) {
+        f->pixels = heap_caps_malloc(MEDIA_WIDTH * MEDIA_HEIGHT * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (f->pixels == NULL) {
+            ESP_LOGE(TAG, "no memory for the image");
+            f->frames = 0;
+        } else {
+            f->dsc = (lv_image_dsc_t) {
+                .header = {.magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_RGB565, .w = MEDIA_WIDTH,
+                           .h = MEDIA_HEIGHT, .stride = MEDIA_WIDTH * 2},
+                .data_size = MEDIA_WIDTH * MEDIA_HEIGHT * 2,
+                .data = (const uint8_t *) f->pixels,
+            };
+            lv_image_set_src(f->img, &f->dsc);
+        }
+    }
+    if (f->frames > 0 && image_show_frame(ui, 0)) {
+        lv_obj_remove_flag(f->img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(f->hint, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        f->frames = 0;
+        lv_obj_add_flag(f->img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(f->hint, LV_OBJ_FLAG_HIDDEN);
+        // Try again on the next update (an upload held the slot).
+        f->generation = media_present(ui->index) ? UINT32_MAX : gen;
+    }
+}
+
+/* The next frame of an animation that's on screen, once its delay is up. */
+static void image_timer_cb(lv_timer_t *timer)
+{
+    (void) timer;
+    ui_screen_t *screens[] = {&s_cpu, &s_gpu};
+    uint32_t now = lv_tick_get();
+    for (int i = 0; i < 2; i++) {
+        ui_image_face_t *f = &screens[i]->image;
+        if (f->frames < 2 || lv_obj_has_flag(f->root, LV_OBJ_FLAG_HIDDEN) || (int32_t) (now - f->next_ms) < 0) {
+            continue;
+        }
+        image_show_frame(screens[i], (f->frame + 1) % f->frames);
+    }
+}
+
 static void show_face(ui_screen_t *ui, metrics_face_t face)
 {
     lv_obj_t *roots[METRICS_FACE_COUNT] = {
@@ -859,6 +1237,10 @@ static void show_face(ui_screen_t *ui, metrics_face_t face)
         [METRICS_FACE_BAR] = ui->bar.root,
         [METRICS_FACE_CLAUDE] = ui->claude.root,
         [METRICS_FACE_CLAWD] = ui->clawd.root,
+        [METRICS_FACE_NET] = ui->net.root,
+        [METRICS_FACE_DISK] = ui->disk.root,
+        [METRICS_FACE_BATTERY] = ui->battery.root,
+        [METRICS_FACE_IMAGE] = ui->image.root,
     };
     for (int i = 0; i < METRICS_FACE_COUNT; i++) {
         if (i == (int) face) {
@@ -869,14 +1251,34 @@ static void show_face(ui_screen_t *ui, metrics_face_t face)
     }
 }
 
+static int fan_rpm_by_id(const metrics_snapshot_t *snap, const char *id);
+
 /* Only the visible face is refreshed; a switch redraws it from the same snapshot. */
-static void update_screen(ui_screen_t *ui, metrics_face_t face, const metrics_temp_t *temp, float temp_max,
-                          const metrics_claude_t *claude, metrics_ui_state_t state, int fan_rpm)
+static void update_screen(ui_screen_t *ui, metrics_face_t face, metrics_source_t source, const metrics_snapshot_t *snap)
 {
     if (face >= METRICS_FACE_COUNT) {
         face = METRICS_FACE_CLASSIC;
     }
+    apply_source(ui, source < METRICS_SOURCE_COUNT ? source : METRICS_SOURCE_CPU);
+    bool gpu = ui->source == METRICS_SOURCE_GPU;
+    const metrics_temp_t *temp = gpu ? &snap->gpu : &snap->cpu;
+    float temp_max = gpu ? METRICS_GPU_TEMP_MAX_DEFAULT : METRICS_CPU_TEMP_MAX_DEFAULT;
+    int fan_rpm = fan_rpm_by_id(snap, gpu ? "gpu" : "cpu");
+    const metrics_claude_t *claude = &snap->claude;
+    metrics_ui_state_t state = snap->state;
     switch (face) {
+    case METRICS_FACE_NET:
+        update_net(ui, &snap->net, state);
+        break;
+    case METRICS_FACE_DISK:
+        update_disk(ui, &snap->disk, state);
+        break;
+    case METRICS_FACE_BATTERY:
+        update_battery(ui, &snap->battery, state);
+        break;
+    case METRICS_FACE_IMAGE:
+        update_image(ui);
+        break;
     case METRICS_FACE_RINGS:
         update_rings(ui, temp, temp_max, state);
         break;
@@ -902,11 +1304,12 @@ static void update_screen(ui_screen_t *ui, metrics_face_t face, const metrics_te
 void ui_watch_create(lv_display_t *disp_cpu, lv_display_t *disp_gpu)
 {
     lv_display_set_default(disp_cpu);
-    create_screen(&s_cpu, disp_cpu, "CPU", "RAM", COLOR_USAGE_CPU, COLOR_TRACK_CPU);
+    create_screen(&s_cpu, disp_cpu, UI_SCREEN_CPU, METRICS_SOURCE_CPU);
 
     lv_display_set_default(disp_gpu);
-    create_screen(&s_gpu, disp_gpu, "GPU", "VRAM", COLOR_USAGE_GPU, COLOR_TRACK_GPU);
+    create_screen(&s_gpu, disp_gpu, UI_SCREEN_GPU, METRICS_SOURCE_GPU);
     lv_timer_create(clawd_timer_cb, CLAWD_TICK_MS, NULL);
+    lv_timer_create(image_timer_cb, IMAGE_TICK_MS, NULL);
     ESP_LOGI(TAG, "Watch UI created");
 }
 
@@ -925,8 +1328,6 @@ void ui_watch_update(const metrics_snapshot_t *snap)
     if (snap == 0) {
         return;
     }
-    update_screen(&s_cpu, snap->cpu_face, &snap->cpu, METRICS_CPU_TEMP_MAX_DEFAULT, &snap->claude, snap->state,
-                  fan_rpm_by_id(snap, "cpu"));
-    update_screen(&s_gpu, snap->gpu_face, &snap->gpu, METRICS_GPU_TEMP_MAX_DEFAULT, &snap->claude, snap->state,
-                  fan_rpm_by_id(snap, "gpu"));
+    update_screen(&s_cpu, snap->cpu_face, snap->cpu_source, snap);
+    update_screen(&s_gpu, snap->gpu_face, snap->gpu_source, snap);
 }

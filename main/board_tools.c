@@ -12,6 +12,7 @@
 #include "metrics_model.h"
 #include "playback.h"
 #include "ui_eyes.h"
+#include "media.h"
 #include "ui_toast.h"
 #include "ui_voice.h"
 #include "voice.h"
@@ -20,7 +21,7 @@
 
 #define SCREEN_PROP \
     "\"screen\":{\"type\":\"string\",\"enum\":[\"left\",\"right\",\"both\"],\"default\":\"both\"," \
-    "\"description\":\"left is the CPU screen, right the GPU screen\"}"
+    "\"description\":\"left or right round screen, or both\"}"
 
 /** A tool fills `text` with what it did, or why it refused (returning false). */
 typedef bool (*tool_fn_t)(const cJSON *args, char *text, cJSON **structured);
@@ -74,15 +75,30 @@ static bool tool_set_face(const cJSON *args, char *text, cJSON **structured)
     const cJSON *face = cJSON_GetObjectItemCaseSensitive(args, "face");
     metrics_face_t f;
     if (!cJSON_IsString(face) || !metrics_face_from_name(face->valuestring, &f)) {
-        snprintf(text, TEXT_MAX, "face must be one of classic, rings, plus, bar, claude, clawd");
+        snprintf(text, TEXT_MAX,
+                 "face must be one of classic, rings, plus, bar, claude, clawd, net, disk, battery, image");
+        return false;
+    }
+    const cJSON *source = cJSON_GetObjectItemCaseSensitive(args, "source");
+    metrics_source_t src = METRICS_SOURCE_CPU;
+    bool has_source = source != NULL;
+    if (has_source && (!cJSON_IsString(source) || !metrics_source_from_name(source->valuestring, &src))) {
+        snprintf(text, TEXT_MAX, "source must be cpu or gpu");
         return false;
     }
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
         if (on[i]) {
             board_settings_set_face(i, f);
+            if (has_source) {
+                board_settings_set_source(i, src);
+            }
         }
     }
-    snprintf(text, TEXT_MAX, "%s: %s", label, metrics_face_name(f));
+    if (has_source && metrics_face_has_source(f)) {
+        snprintf(text, TEXT_MAX, "%s: %s with the %s", label, metrics_face_name(f), metrics_source_name(src));
+    } else {
+        snprintf(text, TEXT_MAX, "%s: %s", label, metrics_face_name(f));
+    }
     return true;
 }
 
@@ -306,6 +322,8 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {
         cJSON *s = cJSON_AddObjectToObject(screens, SCREEN_NAMES[i]);
         cJSON_AddStringToObject(s, "face", metrics_face_name(settings.face[i]));
+        cJSON_AddStringToObject(s, "source", metrics_source_name(settings.source[i]));
+        cJSON_AddBoolToObject(s, "image", media_present(i));
         cJSON_AddNumberToObject(s, "rotation", settings.rot[i]);
         cJSON_AddNumberToObject(s, "brightness", settings.brightness[i]);
     }
@@ -350,12 +368,17 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
 static const tool_t TOOLS[] = {
     {
         .name = "set_face",
-        .description = "Switch the watch face of one or both round screens.",
+        .description = "Switch the watch face of one or both round screens. Any face goes on either screen.",
         .schema = "{\"type\":\"object\",\"properties\":{"
-                  "\"face\":{\"type\":\"string\",\"enum\":[\"classic\",\"rings\",\"plus\",\"bar\",\"claude\",\"clawd\"],"
+                  "\"face\":{\"type\":\"string\",\"enum\":[\"classic\",\"rings\",\"plus\",\"bar\",\"claude\",\"clawd\","
+                  "\"net\",\"disk\",\"battery\",\"image\"],"
                   "\"description\":\"classic: temperature, clock, power, load ring and fan; rings: load, temperature "
                   "and memory rings; plus: classic with a memory bar and numbers; bar: classic with a small memory "
-                  "bar; claude: Claude Code usage limits and tokens; clawd: animated Claude Code mascot\"},"
+                  "bar; claude: Claude Code usage limits and tokens; clawd: animated Claude Code mascot; net: "
+                  "download and upload speed; disk: system disk space and activity; battery: the laptop's battery; "
+                  "image: the picture or GIF uploaded for that screen\"},"
+                  "\"source\":{\"type\":\"string\",\"enum\":[\"cpu\",\"gpu\"],\"description\":\"Whose metrics "
+                  "classic, rings, plus and bar show; unchanged when left out\"},"
                   SCREEN_PROP "},\"required\":[\"face\"]}",
         .fn = tool_set_face,
     },

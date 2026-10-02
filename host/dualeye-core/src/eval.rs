@@ -135,10 +135,15 @@ impl Toolbox for SimBoard {
         };
         match name {
             "set_face" => {
-                let face = args["face"].as_str().filter(|f| ["classic", "rings", "plus", "bar", "claude", "clawd"].contains(f));
-                let face = face.ok_or("face must be one of classic, rings, plus, bar, claude, clawd")?;
+                let face = args["face"].as_str().filter(|f| f.parse::<crate::Face>().is_ok());
+                let face = face.ok_or("face must be one of classic, rings, plus, bar, claude, clawd, net, disk, battery, image")?;
+                let source = args.get("source").map(|s| s.as_str().filter(|s| ["cpu", "gpu"].contains(s)).ok_or("source must be cpu or gpu")).transpose()?;
                 let (on, which) = screens(args)?;
                 on.iter().for_each(|s| set(format!("{s}.face"), json!(face)));
+                if let Some(source) = source {
+                    on.iter().for_each(|s| set(format!("{s}.source"), json!(source)));
+                    return Ok(format!("{}: {face} with the {source}", label(which)));
+                }
                 Ok(format!("{}: {face}", label(which)))
             }
             "set_rotation" => {

@@ -49,16 +49,26 @@ Closing the window keeps the app running in the tray, so the screens stay live.
 
 ## Watch faces
 
-Each screen shows one of six faces, chosen independently (left = CPU, right = GPU) in Settings → **Display**:
+Each screen shows one of ten faces, chosen independently in Settings → **Display**; any face goes on either screen:
 
 | Face | Shows |
 |------|-------|
 | `classic` | Temperature, clock, power, fan RPM; load on the ring (the default) |
 | `rings` | Three rings, outside in: load, temperature (cyan, orange from 80 °C, red from 90 °C), memory |
-| `plus` | Classic, plus a RAM (left) or VRAM (right) bar with GiB used/total; orange from 90 % |
+| `plus` | Classic, plus a RAM (CPU) or VRAM (GPU) bar with GiB used/total; orange from 90 % |
 | `bar` | Classic with a slimmer RAM/VRAM bar, no numbers |
 | `claude` | Claude Code: 5-hour limit used on the outer ring, weekly limit on the inner ring (orange from 80 %, red from 95 %), time to the 5-hour reset, and a small Clawd |
 | `clawd` | Claude Code's mascot, large and animated: walks while Claude works, blinks when idle, sleeps after 30 min |
+| `net` | Download speed in large and on the outer ring, upload on the inner ring; the rings scale to the last minute's peak (firmware 1.1) |
+| `disk` | The system disk: space used on the ring (orange from 90 %), used/total, reads and writes per second where the OS reports them (firmware 1.1) |
+| `battery` | The laptop's charge on the ring (orange below 20 %, red below 10 % on battery), whether it's charging, and the time to empty or to full; "No battery" on a desktop (firmware 1.1) |
+| `image` | A picture or an animated GIF of your own (firmware 1.1, see below) |
+
+The first four show the CPU or the GPU: by default the CPU on the left screen and the GPU on the right one, but **Shows** under each screen switches it, so both screens can show the GPU, or the CPU can go on the right.
+
+### Your own pictures
+
+Pick **Image** for a screen, then **Choose…** a PNG, JPEG, WebP, BMP or animated GIF. The app crops it to the middle square, scales it to 240 × 240 and sends it to the board, which keeps it in its flash (4 MB per screen) and shows it even with the app closed. Animations play at up to 20 frames a second; a long one is thinned until it fits. **Remove** takes it off.
 
 In the same tab you can turn each screen by 0°, 90°, 180° or 270° if the board sits another way round; the app's mirror stays upright and marks a turned screen with a badge.
 
@@ -180,7 +190,7 @@ Changes made this way show up in the app. It works with the app closed too: the 
 | Settings, voice models and logs | `~/Library/Application Support/dualeye` | `%APPDATA%\dualeye` | `~/.config/dualeye` |
 | esptool, for flashing | `~/Library/Application Support/com.dualeye.monitor/esptool` | `%LOCALAPPDATA%\com.dualeye.monitor\esptool` | `~/.local/share/com.dualeye.monitor/esptool` |
 
-The voice models are in `models/` (with `whisper-server.log` and `llama-server.log`), recordings, when kept, in `voice/`.
+The voice models are in `models/` (with `whisper-server.log` and `llama-server.log`), recordings, when kept, in `voice/`, and a copy of each screen's picture, for the app's mirror, in `images/`.
 
 ---
 
@@ -200,6 +210,9 @@ cargo run --release -- --cpu-rotation 180 --gpu-rotation 180   # board upside do
 cargo run --release -- tools                                      # the board's tools
 cargo run --release -- call set_face --screen left --face rings
 cargo run --release -- call show_text --text "Ciao!" --seconds 5
+cargo run --release -- --cpu-face rings --cpu-source gpu         # the GPU on the left screen too
+cargo run --release -- image cat.gif --screen right               # a picture for the image face
+cargo run --release -- call set_face --screen right --face image
 cargo run --release -- mcp                                        # MCP server on stdio
 cargo run --release -- --help
 ```

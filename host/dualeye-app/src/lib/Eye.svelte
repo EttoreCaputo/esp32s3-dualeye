@@ -31,7 +31,8 @@
     pixels?: boolean;
   } = $props();
 
-  const dev = $derived(DEVICES[id]);
+  // The metrics faces wear their source's colours, whichever screen they're on.
+  const dev = $derived(DEVICES[screen.source ?? id]);
   const lit = $derived(board !== "off");
   const ui = $derived(board !== "off" && board !== "boot");
   const C = LCD / 2;
@@ -106,7 +107,14 @@
         {#if screen.face === "claude" && screen.claude.showWeek}
           {@render arc(USAGE_ARC_SIZE - RING_GAP, screen.claude.weekColor, COLOR.weekTrack, screen.claude.weekPct)}
         {/if}
-      {:else}
+      {:else if screen.net}
+        {@render arc(USAGE_ARC_SIZE, COLOR.cyan, COLOR.tempTrack, screen.net.rxPct)}
+        {@render arc(USAGE_ARC_SIZE - RING_GAP, COLOR.green, COLOR.greenTrack, screen.net.txPct)}
+      {:else if screen.disk}
+        {@render arc(USAGE_ARC_SIZE, screen.disk.color, COLOR.memTrack, screen.disk.pct)}
+      {:else if screen.battery}
+        {@render arc(USAGE_ARC_SIZE, screen.battery.color, COLOR.greenTrack, screen.battery.pct)}
+      {:else if screen.face !== "image"}
         {@render arc(USAGE_ARC_SIZE, dev.accent, dev.track, screen.usagePct)}
         {#if screen.face === "rings"}
           {@render arc(USAGE_ARC_SIZE - RING_GAP, screen.tempRing, COLOR.tempTrack, screen.tempPct)}
@@ -129,6 +137,43 @@
           <span class="title" style:color={COLOR.textDim} style:margin-bottom="14px">{c.model}</span>
           {@render clawd(8, c, 14)}
           {@render pair(c.status, c.statusColor, c.tokens)}
+        </div>
+      {/if}
+    {:else if screen.net}
+      <div class="col" style:--y="2px">
+        {@render title(6)}
+        <div class="value" style:color={screen.valueColor}>{screen.value}</div>
+        <div class="row" style:color={COLOR.cyan} style:margin-bottom="4px">↓ {screen.net.unit}</div>
+        <div class="row" style:color={COLOR.green}>↑ {screen.net.tx}</div>
+      </div>
+    {:else if screen.disk}
+      <div class="col" style:--y="2px">
+        {@render title(6)}
+        <div class="value" style:color={screen.valueColor}>{screen.value}</div>
+        <div class="row dim" style:margin-bottom="4px">{screen.disk.space}</div>
+        {#if screen.disk.read !== null}
+          <div class="row" style:gap="10px">
+            {@render pair("R", COLOR.mem, screen.disk.read)}
+            {@render pair("W", COLOR.warm, screen.disk.write ?? "--")}
+          </div>
+        {/if}
+      </div>
+    {:else if screen.battery}
+      <div class="col" style:--y="2px">
+        {@render title(6)}
+        <div class="value" style:color={screen.valueColor}>{screen.value}</div>
+        <span class="title" style:color={screen.battery.statusColor} style:margin="6px 0 4px">
+          {screen.battery.status === "CHARGING" ? "⚡ " : ""}{screen.battery.status}
+        </span>
+        <div class="row dim">{screen.battery.time}</div>
+      </div>
+    {:else if screen.face === "image"}
+      {#if screen.image}
+        <img class="picture" src={screen.image} alt="" />
+      {:else}
+        <div class="col" style:--y="0px">
+          <span class="title" style:color={COLOR.textDim} style:margin-bottom="6px">NO IMAGE</span>
+          <div class="row dim hint">Pick one in the<br />DualEye app</div>
         </div>
       {/if}
     {:else if screen.face === "rings"}
@@ -276,6 +321,18 @@
   .fan {
     width: 16px;
     height: 16px;
+  }
+  /* The host's copy, cropped to the middle square like the board's. */
+  .picture {
+    position: absolute;
+    inset: 0;
+    width: 240px;
+    height: 240px;
+    object-fit: cover;
+  }
+  .hint {
+    text-align: center;
+    white-space: normal;
   }
   .clawd {
     display: block;

@@ -1,9 +1,11 @@
 # DualEye flash layout (16 MB). nvs and phy_init sit where partitions_singleapp
 # had them, so a board updated from 0.4 keeps its settings.
 # The model partition follows the app directly: build/merged-binary.bin only
-# pads the gap between them. The rest of the flash is free for OTA later.
-# Name,   Type, SubType, Offset,   Size
-nvs,      data, nvs,     0x9000,   0x6000
-phy_init, data, phy,     0xf000,   0x1000
-factory,  app,  factory, 0x10000,  3M
-model,    data, spiffs,  0x310000, 2M
+# pads the gap between them. `media` holds the image face's pictures, one
+# half per screen (main/media.h); the last 3 MB stay free for an OTA app.
+# Name,   Type, SubType,   Offset,   Size
+nvs,      data, nvs,       0x9000,   0x6000
+phy_init, data, phy,       0xf000,   0x1000
+factory,  app,  factory,   0x10000,  3M
+model,    data, spiffs,    0x310000, 2M
+media,    data, undefined, 0x510000, 0x7F0000

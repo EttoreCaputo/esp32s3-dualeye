@@ -398,6 +398,131 @@ static bool parse_claude_object(js_t *j, metrics_claude_t *claude)
     }
 }
 
+/* {"rx_bps": n, "tx_bps": n} */
+static bool parse_net_object(js_t *j, metrics_net_t *net)
+{
+    if (!consume(j, '{')) {
+        return false;
+    }
+    bool got = false;
+    for (;;) {
+        char key[32];
+        bool done = false;
+        if (!object_key(j, key, sizeof(key), &done)) {
+            return false;
+        }
+        if (done) {
+            net->valid = got;
+            return true;
+        }
+        bool ok = true;
+        if (strcmp(key, "rx_bps") == 0) {
+            ok = read_number_field(j, &net->rx_bps);
+            got = true;
+        } else if (strcmp(key, "tx_bps") == 0) {
+            ok = read_number_field(j, &net->tx_bps);
+            got = true;
+        } else {
+            ok = skip_value(j, 1);
+        }
+        if (!ok) {
+            return false;
+        }
+        object_sep(j);
+    }
+}
+
+/* {"used_gb": n, "total_gb": n, "read_bps"?: n, "write_bps"?: n} */
+static bool parse_disk_object(js_t *j, metrics_disk_t *disk)
+{
+    if (!consume(j, '{')) {
+        return false;
+    }
+    for (;;) {
+        char key[32];
+        bool done = false;
+        if (!object_key(j, key, sizeof(key), &done)) {
+            return false;
+        }
+        if (done) {
+            disk->valid = disk->total_gb > 0.0f;
+            return true;
+        }
+        bool ok = true;
+        if (strcmp(key, "used_gb") == 0) {
+            ok = read_number_field(j, &disk->used_gb);
+        } else if (strcmp(key, "total_gb") == 0) {
+            ok = read_number_field(j, &disk->total_gb);
+        } else if (strcmp(key, "read_bps") == 0) {
+            ok = read_number_field(j, &disk->read_bps);
+            disk->has_io = ok;
+        } else if (strcmp(key, "write_bps") == 0) {
+            ok = read_number_field(j, &disk->write_bps);
+            disk->has_io = ok;
+        } else {
+            ok = skip_value(j, 1);
+        }
+        if (!ok) {
+            return false;
+        }
+        object_sep(j);
+    }
+}
+
+static bool parse_bool(js_t *j, bool *out)
+{
+    skip_ws(j);
+    if (expect_lit(j, "true")) {
+        *out = true;
+        return true;
+    }
+    if (expect_lit(j, "false")) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+/* {"pct": n, "charging": b, "plugged": b, "mins"?: n} */
+static bool parse_battery_object(js_t *j, metrics_battery_t *bat)
+{
+    if (!consume(j, '{')) {
+        return false;
+    }
+    bool got_pct = false;
+    for (;;) {
+        char key[32];
+        bool done = false;
+        if (!object_key(j, key, sizeof(key), &done)) {
+            return false;
+        }
+        if (done) {
+            bat->valid = got_pct;
+            return true;
+        }
+        bool ok = true;
+        if (strcmp(key, "pct") == 0) {
+            ok = read_number_field(j, &bat->pct);
+            got_pct = ok;
+        } else if (strcmp(key, "charging") == 0) {
+            ok = parse_bool(j, &bat->charging);
+        } else if (strcmp(key, "plugged") == 0) {
+            ok = parse_bool(j, &bat->plugged);
+        } else if (strcmp(key, "mins") == 0) {
+            float mins = 0.0f;
+            ok = read_number_field(j, &mins);
+            bat->mins = (int) mins;
+            bat->has_mins = ok;
+        } else {
+            ok = skip_value(j, 1);
+        }
+        if (!ok) {
+            return false;
+        }
+        object_sep(j);
+    }
+}
+
 esp_err_t metrics_parse_line(const char *line, metrics_snapshot_t *out)
 {
     if (line == NULL || out == NULL) {
@@ -429,6 +554,12 @@ esp_err_t metrics_parse_line(const char *line, metrics_snapshot_t *out)
             ok = parse_fans(&j, out);
         } else if (strcmp(key, "claude") == 0) {
             ok = parse_claude_object(&j, &out->claude);
+        } else if (strcmp(key, "net") == 0) {
+            ok = parse_net_object(&j, &out->net);
+        } else if (strcmp(key, "disk") == 0) {
+            ok = parse_disk_object(&j, &out->disk);
+        } else if (strcmp(key, "bat") == 0) {
+            ok = parse_battery_object(&j, &out->battery);
         } else if (strcmp(key, "ts") == 0) {
             double value = 0.0;
             ok = parse_number(&j, &value);

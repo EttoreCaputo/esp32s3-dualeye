@@ -38,7 +38,8 @@ use crate::snapshot::{Snapshot, short_floats};
 pub const FLAG: &str = "--mcp";
 
 const INSTRUCTIONS: &str = "DualEye is a small USB display on the user's desk with two round screens: \
-`left` shows this computer's CPU, `right` its GPU (or Claude Code usage, with the claude and clawd faces). \
+`left` and `right`; any face goes on either one: the computer's CPU or GPU (set_face's source), network, disk, battery, \
+Claude Code usage (claude and clawd) or a picture the user uploaded in the DualEye app (image). \
 The board's tools change what the screens show; show_text puts a short ASCII message on them. \
 get_metrics and get_claude_usage read this computer, and work without the board. \
 speak says a short sentence out loud through the board's speaker, in Italian or English.";

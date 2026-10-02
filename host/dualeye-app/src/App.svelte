@@ -21,15 +21,35 @@
   const shown = $derived(monitor.shown);
 
   // The face the board is on: from the last line it got, classic until the first one.
-  const screen = (id: DeviceId) =>
-    screenFor(id, shown?.face?.[id] ?? "classic", shown?.[id], board === "stale", board === "waiting", fanRpm(shown, id), shown?.claude);
+  // `id` is the screen (cpu: left, gpu: right); its source picks the metrics.
+  const source = (id: DeviceId): DeviceId => shown?.face?.src?.[id] ?? id;
+  const screen = (id: DeviceId) => {
+    const src = source(id);
+    return screenFor(
+      src,
+      shown?.face?.[id] ?? "classic",
+      shown?.[src],
+      board === "stale",
+      board === "waiting",
+      {
+        fan: fanRpm(shown, src),
+        claude: shown?.claude,
+        net: shown?.net,
+        disk: shown?.disk,
+        bat: shown?.bat,
+        image: monitor.images[id === "cpu" ? "left" : "right"],
+      },
+      id,
+    );
+  };
   // A line without `rot` turns both screens upright. Before the first line the
   // board keeps its last rotation, which normally is the one picked here.
   const rotation = $derived(shown ? { cpu: shown.rot?.cpu ?? 0, gpu: shown.rot?.gpu ?? 0 } : monitor.rotation);
   const glow = (id: DeviceId) => {
-    const m = shown?.[id];
+    const src = source(id);
+    const m = shown?.[src];
     const active = (board === "live" || board === "stale") && m?.temp_c !== undefined;
-    return { color: heatColor(id, m?.temp_c), level: active ? 0.25 + ((m?.load_pct ?? 0) / 100) * 0.75 : 0.12 };
+    return { color: heatColor(src, m?.temp_c), level: active ? 0.25 + ((m?.load_pct ?? 0) / 100) * 0.75 : 0.12 };
   };
 
   const caption = $derived.by(() => {

@@ -23,6 +23,7 @@ pub mod hub;
 pub mod intents;
 pub mod link;
 pub mod llm;
+pub mod media;
 pub mod models;
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -49,4 +50,4 @@ pub use serial::PortInfo;
 pub use stt::{Stt, SttConfig, SttLanguage, Transcript};
 pub use tts::{Tts, TtsConfig};
 pub use voice::{Speaker, Spoken, Utterance, VoiceConfig};
-pub use snapshot::{DeviceMetrics, Face, Faces, Fan, Memory, Rotation, Rotations, Snapshot};
+pub use snapshot::{Battery, DeviceMetrics, Disk, Face, Faces, Fan, Memory, Net, Rotation, Rotations, Snapshot, Source, Sources};

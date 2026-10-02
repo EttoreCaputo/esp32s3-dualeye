@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c"
+idf_component_register(SRCS "media.c" "main.c"
                             "board_display.c"
                             "lvgl_port.c"
                             "metrics_model.c"
@@ -17,9 +17,10 @@ idf_component_register(SRCS "main.c"
                             "ui_voice.c"
                             "ui_eyes.c"
                             "playback.c"
+                            "media.c"
                             "fonts/lv_font_montserrat_bold_12.c"
                             "fonts/lv_font_montserrat_bold_48.c"
                             "fonts/lv_font_fan_16.c"
                        INCLUDE_DIRS "."
                        LDFRAGMENTS "linker.lf"
-                       REQUIRES esp_app_format esp_codec_dev esp-sr esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_usb_serial_jtag esp_lcd esp_lcd_gc9a01 esp_timer lvgl nvs_flash)
+                       REQUIRES esp_app_format esp_partition esp_rom mbedtls esp_codec_dev esp-sr esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_usb_serial_jtag esp_lcd esp_lcd_gc9a01 esp_timer lvgl nvs_flash)
