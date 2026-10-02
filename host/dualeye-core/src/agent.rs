@@ -41,6 +41,7 @@ Rules:
 - pomodoro: pomodoro
 - stop, cancel or pause a timer: control_timer
 - watch face: set_face
+- open an app (apri, avvia): open_app
 - music: play, pause, next or previous song: media_control
 - what song is playing: now_playing
 - scrivi, write: show_text
@@ -211,14 +212,22 @@ impl Agent {
                 reply = spoken(content, language);
                 break;
             }
-            messages.push(json!({"role": "assistant", "content": content, "tool_calls": calls}));
-            for (i, call) in calls.iter().enumerate() {
-                let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or_default().to_string();
-                let arguments = match call.pointer("/function/arguments") {
+            // A call cut off by max_tokens has arguments that aren't JSON,
+            // which the server refuses to read back in the history.
+            let parsed: Vec<Value> = calls
+                .iter()
+                .map(|call| match call.pointer("/function/arguments") {
                     Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
                     Some(v @ Value::Object(_)) => v.clone(),
                     _ => json!({}),
-                };
+                })
+                .collect();
+            for (call, arguments) in calls.iter_mut().zip(&parsed) {
+                call["function"]["arguments"] = json!(arguments.to_string());
+            }
+            messages.push(json!({"role": "assistant", "content": content, "tool_calls": calls}));
+            for (i, (call, arguments)) in calls.iter().zip(parsed).enumerate() {
+                let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or_default().to_string();
                 // Small models like to do the same thing twice, or to read
                 // the time over and over instead of doing what was asked.
                 let before = actions.iter().find(|a| a.ok && a.tool == name && a.arguments == arguments);

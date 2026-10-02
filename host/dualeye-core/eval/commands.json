@@ -6,7 +6,7 @@
     "left.brightness": 80, "right.brightness": 80,
     "volume": 60, "muted": false, "wake_word": "alexa",
     "text": "", "text.screen": "",
-    "timers": "", "music": ""
+    "timers": "", "music": "", "app": ""
   },
   "metrics": {"cpu": {"temp_c": 52.3, "load_pct": 23.0, "clock_mhz": 3228, "power_w": 18.4, "mem": {"used_mb": 11468, "total_mb": 32768}},
               "gpu": {"temp_c": 41.2, "load_pct": 7.0, "clock_mhz": 1296, "power_w": 6.1},
@@ -77,6 +77,10 @@
     {"lang": "en", "say": ["Set the brightness to 60.", "A bit brighter, 90."], "expect": {"left.brightness": 90, "right.brightness": 90}},
     {"lang": "en", "say": ["Set a timer for five minutes."], "expect": {"timers": "timer:300"}},
     {"lang": "en", "say": ["Remind me to stretch in 45 minutes."], "expect": {"timers": "reminder:stretch"}},
-    {"lang": "en", "say": ["Start a pomodoro."], "expect": {"timers": "work:1500"}}
+    {"lang": "en", "say": ["Start a pomodoro."], "expect": {"timers": "work:1500"}},
+    {"lang": "it", "say": ["Apri Spotify."], "expect": {"app": "~spotify"}},
+    {"lang": "it", "say": ["Puoi aprire la calcolatrice?"], "expect": {"app": "~calc"}},
+    {"lang": "en", "say": ["Open Safari."], "expect": {"app": "~safari"}},
+    {"lang": "en", "say": ["Launch Visual Studio Code."], "expect": {"app": "~visual studio code"}}
   ]
 }

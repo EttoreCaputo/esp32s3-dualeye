@@ -564,6 +564,9 @@ impl Toolbox for BoardTools {
         if Timers::tools().iter().any(|t| t.name == name) {
             return self.board.timer_tool(name, arguments, &self.language);
         }
+        if let Some(result) = dualeye_core::apps::call_tool(name, arguments) {
+            return result;
+        }
         let result = self.board.call_tool(name, arguments.clone()).map_err(|e| e.to_string())?;
         match (result.is_error, name, &result.structured_content) {
             (true, ..) => Err(result.text()),

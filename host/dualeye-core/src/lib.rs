@@ -14,6 +14,7 @@
 //! and a Tauri app are both thin shells over this.
 
 pub mod agent;
+pub mod apps;
 pub mod bridge;
 pub mod claude;
 #[cfg(feature = "download")]

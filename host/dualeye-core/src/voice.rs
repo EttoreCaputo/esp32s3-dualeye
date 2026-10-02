@@ -32,6 +32,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::agent::{Action, Agent, Toolbox};
+use crate::apps;
 use crate::bridge::{BridgeEvent, EventSink};
 use crate::intents::{self, Context};
 use crate::link::{Link, Tool};
@@ -412,8 +413,8 @@ const ALARM_FOLLOW_UP: Duration = Duration::from_secs(20);
 const NOT_BY_VOICE: &[&str] = &["set_mic", "set_eyes", "play_eyes"];
 
 /// The board's tools as the voice agent gets them: without those in
-/// [`NOT_BY_VOICE`], plus the host's `get_metrics`, timers ([`Timers::tools`])
-/// and music ([`Music::tools`]).
+/// [`NOT_BY_VOICE`], plus the host's `get_metrics`, timers ([`Timers::tools`]),
+/// music ([`Music::tools`]) and apps ([`apps::tools`]).
 pub fn voice_tools(board: Vec<Tool>) -> Vec<Tool> {
     let metrics = Tool {
         name: "get_metrics".into(),
@@ -426,6 +427,7 @@ pub fn voice_tools(board: Vec<Tool>) -> Vec<Tool> {
         .chain([metrics])
         .chain(Timers::tools())
         .chain(Music::tools())
+        .chain(apps::tools())
         .collect()
 }
 
@@ -482,6 +484,9 @@ impl Toolbox for BoardToolbox<'_> {
             return result;
         }
         if let Some(result) = self.session.music.call_tool(name, arguments) {
+            return result;
+        }
+        if let Some(result) = apps::call_tool(name, arguments) {
             return result;
         }
         if NOT_BY_VOICE.contains(&name) {

@@ -218,6 +218,12 @@ impl Toolbox for SimBoard {
                 set("music".into(), json!(action));
                 Ok(format!("Spotify: {action}"))
             }
+            // Like crate::apps, with every app installed.
+            "open_app" => {
+                let name = args["app"].as_str().filter(|n| !n.trim().is_empty()).ok_or("app must be a non-empty string")?;
+                set("app".into(), json!(name));
+                Ok(format!("{name} opened"))
+            }
             "now_playing" => Ok(json!({"state": "playing", "title": "Zitti e buoni", "artist": "Måneskin", "album": "Teatro d'ira", "player": "Spotify"}).to_string()),
             other => Err(format!("unknown tool {other}")),
         }

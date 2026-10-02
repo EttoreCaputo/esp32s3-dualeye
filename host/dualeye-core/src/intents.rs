@@ -6,7 +6,7 @@
 //! name, a screen, "luminosità"/"brightness", "volume", "ruota"/"rotate",
 //! "scrivi"/"write", "temperatura"/"temperature", "che ore"/"what time",
 //! "timer", "ricordami"/"remind me", "pomodoro", "pausa la musica"/"next song",
-//! "cosa sta suonando"/"what's playing".
+//! "cosa sta suonando"/"what's playing", "apri Spotify"/"open Safari".
 //! It returns the board tools to call and what to answer; anything else is
 //! answered with "Non ho capito" / "Sorry, I didn't get that".
 
@@ -159,6 +159,10 @@ pub fn understand(text: &str, language: &str, ctx: &Context) -> Plan {
         return plan;
     }
 
+    if let Some(plan) = app_plan(&w, it) {
+        return plan;
+    }
+
     if let Some(plan) = music_plan(&w, it, ctx) {
         return plan;
     }
@@ -258,10 +262,10 @@ pub fn understand(text: &str, language: &str, ctx: &Context) -> Plan {
     if has_pair(&w, &[("cosa", "sai"), ("what", "can")]) || has(&w, &["aiuto", "help"]) {
         let reply = if it {
             "Posso cambiare faccia, luminosità, rotazione e volume, scrivere un messaggio, dirti le temperature e l'ora, \
-             impostare timer, promemoria e un pomodoro, e mettere in pausa o cambiare la musica."
+             impostare timer, promemoria e un pomodoro, mettere in pausa o cambiare la musica e aprire le app."
         } else {
             "I can change the face, brightness, rotation and volume, write a message, tell you the temperatures and the time, \
-             set timers, reminders and a pomodoro, and pause or skip the music."
+             set timers, reminders and a pomodoro, pause or skip the music and open apps."
         };
         return plan(vec![], it, reply.into());
     }
@@ -616,6 +620,37 @@ fn timer_plan(text: &str, w: &[String], it: bool, ctx: &Context) -> Option<Plan>
     Some(plan(vec![tool("set_timer", args)], it, reply))
 }
 
+/// "Apri Spotify", "puoi aprire la calcolatrice", "open Safari", "launch
+/// Visual Studio Code": open_app with the name. "Avvia la musica" stays the
+/// music's, and "start a timer" was the timer's already.
+fn app_plan(w: &[String], it: bool) -> Option<Plan> {
+    const OPEN: &[&str] = &["apri", "aprimi", "aprire", "open"];
+    const START: &[&str] = &["avvia", "avviare", "lancia", "lanciare", "esegui", "launch", "start", "run"];
+    // Near the start: "Alexa, apri...", "can you open...", "potresti aprire...".
+    let verb = w.iter().take(4).position(|x| OPEN.contains(&x.as_str()) || START.contains(&x.as_str()))?;
+    const FILLER: &[&str] = &[
+        "l", "la", "il", "lo", "le", "un", "una", "mi", "me", "my", "the", "up", "app", "applicazione", "programma", "application",
+        "program", "di", "per", "favore", "please",
+    ];
+    let mut name: Vec<&str> = w[verb + 1..].iter().map(String::as_str).skip_while(|x| FILLER.contains(x)).collect();
+    while name.last().is_some_and(|x| matches!(*x, "please" | "grazie" | "favore" | "per" | "thanks" | "app" | "application" | "applicazione" | "program" | "programma")) {
+        name.pop();
+    }
+    let started = START.contains(&w[verb].as_str());
+    let generic = |x: &str| has(&[x.to_string()], MUSIC_WORDS) && x != "spotify" || has(&[x.to_string()], &["timer*", "pomodor*", "countdown*", "cronometro"]);
+    if started && (name.is_empty() || name.iter().any(|x| generic(x))) {
+        return None;
+    }
+    if name.is_empty() {
+        return Some(plan(vec![], it, if it { "Quale app apro?" } else { "Which app should I open?" }.into()));
+    }
+    let said = name.join(" ");
+    let shown = said.split(' ').map(capitalize).collect::<Vec<_>>().join(" ");
+    let mut p = plan(vec![tool("open_app", json!({"app": said}))], it, if it { format!("Apro {shown}.") } else { format!("Opening {shown}.") });
+    p.failure = if it { format!("Non trovo l'app {shown}.") } else { format!("I can't find the app {shown}.") };
+    Some(p)
+}
+
 const MUSIC_WORDS: &[&str] = &["music*", "musica", "canzon*", "brano", "brani", "song*", "track*", "traccia", "spotify", "pezzo"];
 
 /// Words about the music playing, so the voice looks at what plays first.
@@ -876,6 +911,24 @@ mod tests {
         assert_eq!(asked.reply, "Zitti e buoni di Måneskin.");
         assert_eq!(understand("What's playing?", "en", &Context::default()).reply, "Nothing is playing.");
         assert!(asks_music("che canzone è questa"));
+    }
+
+    #[test]
+    fn apps_by_rules() {
+        let open = |n: &str| vec![tool("open_app", json!({"app": n}))];
+        assert_eq!(calls("Apri Spotify", "it"), open("spotify"));
+        assert_eq!(calls("Alexa, apri la calcolatrice per favore", "it"), open("calcolatrice"));
+        assert_eq!(calls("Puoi aprire Visual Studio Code?", "it"), open("visual studio code"));
+        assert_eq!(calls("Open the Safari app", "en"), open("safari"));
+        assert_eq!(calls("Launch Google Chrome please", "en"), open("google chrome"));
+        assert_eq!(calls("Avvia Spotify", "it"), open("spotify"));
+        assert_eq!(understand("Apri Spotify", "it", &Context::default()).reply, "Apro Spotify.");
+        // The music's and the timers' own starts stay theirs.
+        assert_eq!(calls("Avvia la musica", "it"), [tool("media_control", json!({"action": "play"}))]);
+        assert_eq!(calls("Start a timer for five minutes", "en"), [tool("set_timer", json!({"seconds": 300}))]);
+        assert_eq!(calls("Avvia un pomodoro", "it")[0].0, "pomodoro");
+        let p = understand("Apri", "it", &Context::default());
+        assert!(p.calls.is_empty() && p.understood);
     }
 
     #[test]

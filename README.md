@@ -143,8 +143,9 @@ They close and the watch faces come back when the conversation ends. While nobod
 
 - **Follow-ups.** After an answer the board keeps listening for 4 s, so *"e anche a destra"* or *"a bit more"* works straight away; the last exchanges are remembered for 3 minutes. Turn it off with **Keep listening after an answer**.
 - **Interrupting.** Say "Alexa" while the board talks: it stops and listens.
+- **Opening apps.** *"Alexa, apri Spotify"*, *"avvia la calcolatrice"*, *"open Safari"*, *"launch Visual Studio Code"*: the app installed on the computer whose name is closest to what was said opens (Whisper's spellings and Italian names like *calcolatrice* or *impostazioni* work too). Only installed apps can be opened: the Applications folders on macOS, the Start menu on Windows, the `.desktop` entries on Linux.
 - **Wake word, mic and volume.** Choose "Alexa" or "Hi ESP", mute the mic, and set the speaker's volume; the board remembers all three.
-- **Without a language model** (turned off, or not downloaded) a few fixed phrases still work: faces, screens, brightness, rotation, volume, temperatures, the time, timers, reminders and the pomodoro, and the music (pause, play, next, previous, what's playing).
+- **Without a language model** (turned off, or not downloaded) a few fixed phrases still work: faces, screens, brightness, rotation, volume, temperatures, the time, timers, reminders and the pomodoro, the music (pause, play, next, previous, what's playing), and opening apps.
 
 On an M1 Pro the answer starts about 1.5 s after you stop talking (2–3 s when something changes on the board).
 
