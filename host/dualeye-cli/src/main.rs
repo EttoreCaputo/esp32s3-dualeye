@@ -36,6 +36,7 @@ use std::thread;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use dualeye_core::agent;
 use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
 use dualeye_core::claude::{hooks, statusline};
 use dualeye_core::cloud::{self, CloudRef, Provider};
@@ -150,6 +151,10 @@ struct LlmArgs {
     /// (default: as many as fit)
     #[arg(long, value_name = "N")]
     llm_gpu_layers: Option<u32>,
+    /// How the language model talks: cute (default), playful, calm, sassy,
+    /// butler, minimal, or a description of your own
+    #[arg(long, value_name = "NAME|TEXT")]
+    personality: Option<String>,
 }
 
 /// Talk to the board's tools. While the app or a streaming `dualeye` runs,
@@ -562,7 +567,12 @@ fn llm_config(args: &LlmArgs) -> Result<LlmConfig, String> {
 }
 
 fn agent(args: &LlmArgs) -> Result<Arc<Agent>, String> {
-    Ok(Arc::new(Agent::new(Arc::new(Llm::new(llm_config(args)?)))))
+    let agent = Agent::new(Arc::new(Llm::new(llm_config(args)?)));
+    if let Some(p) = &args.personality {
+        let preset = ["cute", "playful", "calm", "sassy", "butler", "minimal"].contains(&p.as_str());
+        agent.set_personality(&agent::personality_prompt(if preset { p } else { "custom" }, p));
+    }
+    Ok(Arc::new(agent))
 }
 
 /// The board's tools for `dualeye ask`, through a running bridge or the port.

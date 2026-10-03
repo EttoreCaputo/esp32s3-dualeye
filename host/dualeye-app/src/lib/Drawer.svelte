@@ -1,22 +1,12 @@
+<script module lang="ts">
+  export type Tab = "voice" | "timers" | "claude" | "device" | "diagnostics";
+</script>
+
 <script lang="ts">
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
-  import Eye from "./Eye.svelte";
+  import { formatTokens, isClaudeFace } from "./firmware";
   import {
-    DEVICES,
-    FACES,
-    ROTATIONS,
-    formatTokens,
-    hasSource,
-    isClaudeFace,
-    screenFor,
-    type DeviceId,
-    type Face,
-    type Rotation,
-    type Source,
-  } from "./firmware";
-  import {
-    fanRpm,
     monitor,
     type ClaudeAlertSettings,
     type ClaudeAlertsInfo,
@@ -26,8 +16,8 @@
     type McpInfo,
     type PortInfo,
     type PowerHelper,
+    type Personality,
     type Reading,
-    type Side,
     type SttLanguage,
     type ShowOn,
     type TimerInfo,
@@ -38,18 +28,15 @@
     type VoiceSettings,
   } from "./monitor.svelte";
 
-  type Tab = "connection" | "display" | "timers" | "voice" | "device" | "sensors" | "console";
   const TABS: [Tab, string][] = [
-    ["connection", "Connection"],
-    ["display", "Display"],
-    ["timers", "Timers"],
     ["voice", "Voice"],
+    ["timers", "Timers"],
+    ["claude", "Claude"],
     ["device", "Device"],
-    ["sensors", "Sensors"],
-    ["console", "Console"],
+    ["diagnostics", "Diagnostics"],
   ];
 
-  let { open = $bindable(false), tab = $bindable("connection") }: { open: boolean; tab?: Tab } = $props();
+  let { open = $bindable(false), tab = $bindable("voice") }: { open: boolean; tab?: Tab } = $props();
 
   let ports = $state<PortInfo[]>([]);
   let firmware = $state<FirmwareInfo | null>(null);
@@ -70,7 +57,7 @@
   let follow = $state(true);
 
   $effect(() => {
-    if (!open || (tab !== "connection" && tab !== "device")) return;
+    if (!open || tab !== "device") return;
     const load = () => monitor.listPorts().then((p) => (ports = p));
     load();
     const id = setInterval(load, 2000);
@@ -127,7 +114,7 @@
   ];
 
   $effect(() => {
-    if (!open || tab !== "sensors") return;
+    if (!open || tab !== "diagnostics" || diag !== "sensors") return;
     let alive = true;
     const load = async () => {
       const [r, p] = await Promise.all([monitor.readings(), monitor.powerHelper()]);
@@ -155,7 +142,7 @@
   });
 
   $effect(() => {
-    if (!open || tab !== "display") return;
+    if (!open || tab !== "claude") return;
     let alive = true;
     const load = () => {
       monitor.claudeLink().then((l) => alive && (claudeLink = l));
@@ -170,12 +157,40 @@
     };
   });
 
+  /** Diagnostics shows the sensors or the board's console. */
+  let diag = $state<"sensors" | "console">("sensors");
+  /** The online services' keys are open. */
+  let keysOpen = $state(false);
+  let customLength = $state<number | null>(null);
+
+  const PERSONALITIES: [Personality, string, string][] = [
+    ["cute", "Cute", "Warm, cheerful, a little playful"],
+    ["playful", "Playful", "Jokes, puns, gentle teasing"],
+    ["calm", "Calm", "Soft and reassuring"],
+    ["sassy", "Sassy", "A cat with dry humour"],
+    ["butler", "Butler", "Formal, at your service"],
+    ["minimal", "Minimal", "Just the facts, no chat"],
+    ["custom", "Your own", "Describe it yourself"],
+  ];
+  /** `agent::MAX_PERSONALITY`. */
+  const MAX_PERSONALITY = 300;
+  const KIND_NAMES: Record<ModelInfo["kind"], string> = { whisper: "Hearing", llm: "Understanding", voice: "Voice" };
+  const ENGINE_NAMES: Record<TtsEngine, string> = { piper: "Piper", kokoro: "Kokoro" };
+  const STATUS = { off: "Off", starting: "Loading…", ready: "Ready", error: "Not working" };
+
+  /** A model as its list shows it: size and whether it's here, or whether its service has a key. */
+  function optionLabel(v: VoiceInfo, m: ModelInfo): string {
+    if (m.provider) return `${m.id.slice(m.id.indexOf(":") + 1)}${m.installed ? "" : ` · needs a ${providerName(v, m.provider)} key`}`;
+    return `${m.id} · ${mb(m.bytes)}${m.installed ? " · downloaded" : ""}${m.id === v.recommendation.whisper || m.id === v.recommendation.llm ? " · recommended" : ""}`;
+  }
+
   let voice = $state<VoiceInfo | null>(null);
   let voiceError = $state("");
 
   $effect(() => {
     if (!open || tab !== "voice") return;
     let alive = true;
+    customLength = null;
     const load = () => monitor.voiceInfo().then((v) => alive && (voice = v));
     load();
     // Faster while a model downloads, for its progress bar.
@@ -346,9 +361,6 @@
     ["it", "Italiano"],
     ["en", "English"],
   ];
-  const STT_STATUS = { off: "Off", starting: "Loading the model…", ready: "Ready", error: "Not working" };
-  const TTS_STATUS = { off: "Off", starting: "Loading the voices…", ready: "Ready", error: "Not working" };
-  const LLM_STATUS = { off: "Off", starting: "Loading the model…", ready: "Ready", error: "Not working" };
   const mb = (n: number) => `${Math.round(n / 1_000_000)} MB`;
   const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const newestFirst = $derived([...monitor.transcripts].reverse());
@@ -510,64 +522,87 @@
     follow = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 24;
   }
 
-  const SCREENS: [DeviceId, string, Side][] = [
-    ["cpu", "Left screen", "left"],
-    ["gpu", "Right screen", "right"],
-  ];
-  // Thumbnails use the host's latest sample, so they have data even with no board attached.
-  const preview = (id: DeviceId, side: Side, face: Face) => {
-    const src = monitor.faces.src[id];
-    const last = monitor.last;
-    return screenFor(src, face, last?.[src], false, false, {
-      fan: fanRpm(last, src),
-      claude: last?.claude,
-      net: last?.net,
-      disk: last?.disk,
-      bat: last?.bat,
-      image: monitor.images[side],
-      // A sample one, so the thumbnail shows what the face looks like.
-      timer: last?.timer ?? { kind: "timer", state: "run", left_s: 272, total_s: 600 },
-      music: last?.music ?? { state: "play", title: "Nothing playing", pos_s: 70, dur_s: 200 },
-      cover: monitor.cover,
-    });
-  };
-  const pick = (id: DeviceId, face: Face) => monitor.setFaces({ ...monitor.faces, [id]: face });
-  const showSource = (id: DeviceId, source: Source) => monitor.setFaces({ ...monitor.faces, src: { ...monitor.faces.src, [id]: source } });
-
-  let imageError = $state<Record<Side, string>>({ left: "", right: "" });
-  let imageNote = $state<Record<Side, string>>({ left: "", right: "" });
-  async function chooseImage(side: Side, e: Event) {
-    const input = e.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = "";
-    if (!file) return;
-    imageError[side] = "";
-    imageNote[side] = "";
-    try {
-      const sent = await monitor.sendImage(side, file);
-      imageNote[side] =
-        sent.frames === 1
-          ? `Sent, ${Math.round(sent.bytes / 1024)} KB.`
-          : `Sent ${sent.frames} frames${sent.frames < sent.source_frames ? ` of ${sent.source_frames}` : ""}, ${(sent.duration_ms / 1000).toFixed(1)} s a loop, ${Math.round(sent.bytes / 1024)} KB.`;
-    } catch (err) {
-      imageError[side] = String(err);
-    }
-  }
-  async function removeImage(side: Side) {
-    imageError[side] = "";
-    imageNote[side] = "";
-    try {
-      await monitor.clearImage(side);
-    } catch (err) {
-      imageError[side] = String(err);
-    }
-  }
-  const turn = (id: DeviceId, rotation: Rotation) => monitor.setRotation({ ...monitor.rotation, [id]: rotation });
-
   const hex = (n: number) => n.toString(16).padStart(4, "0");
   const kb = (n: number) => `${Math.round(n / 1024)} KB`;
   const fmt = (r: Reading) => (r.unit === "RPM" || r.unit === "%" || r.unit === "MB" ? r.value.toFixed(0) : r.value.toFixed(1));
 </script>
+
+<!-- One model to pick, from this computer's or an online service's, and what it still needs. -->
+{#snippet picker(v: VoiceInfo, label: string, what: string, kind: ModelInfo["kind"], lang: string | null, chosen: string, onpick: (id: string) => void, off: boolean)}
+  {@const list = v.models.filter((m) => m.kind === kind && (lang === null || m.language === lang))}
+  {@const m = list.find((x) => x.id === chosen)}
+  {@const downloading = !!m && v.download?.[0] === m.id}
+  {@const installing = m?.engine ? v[`${m.engine}_install`] : null}
+  <div class="mrow" class:off>
+    <div class="mhead">
+      <span class="mtext">
+        <span class="pname">{label}</span>
+        <span class="mnote">{what}</span>
+      </span>
+      {#if kind === "voice" && lang}
+        <button
+          class="btn small"
+          disabled={v.tts !== "ready" || testing !== null || monitor.link !== "connected" || !m?.installed}
+          title="Say a sentence through the board"
+          onclick={() => testVoice(lang)}>{testing === lang ? "Speaking…" : "Test"}</button
+        >
+      {/if}
+    </div>
+    <div class="select">
+      <select value={chosen} disabled={off} aria-label={label} onchange={(e) => onpick(e.currentTarget.value)}>
+        {#if !m}<option value={chosen} disabled>Choose…</option>{/if}
+        <optgroup label="On this computer">
+          {#each list.filter((o) => !o.provider) as o (o.id)}
+            <option value={o.id}>{optionLabel(v, o)}</option>
+          {/each}
+        </optgroup>
+        {#each v.providers as p (p.id)}
+          {@const cloud = list.filter((o) => o.provider === p.id)}
+          {#if cloud.length}
+            <optgroup label="{p.name}, online">
+              {#each cloud as o (o.id)}
+                <option value={o.id}>{optionLabel(v, o)}</option>
+              {/each}
+            </optgroup>
+          {/if}
+        {/each}
+      </select>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.5 8 10l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    </div>
+    {#if m && !off}
+      <div class="mstatus">
+        <span class="mnote">
+          {m.note}
+        </span>
+        <span class="mside">
+          {#if m.provider}
+            {#if m.installed}
+              <span class="chip online" title="Runs online: what you say is sent there">Online</span>
+            {:else}
+              <button class="btn small primary" onclick={() => (keysOpen = true)}>Add a {providerName(v, m.provider)} key</button>
+            {/if}
+          {:else if downloading}
+            <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(v.download?.[1] ?? 0)}% · Stop</button>
+          {:else if !m.installed}
+            <button class="btn small primary" disabled={!!v.download} onclick={() => download(m.id)}>Download · {mb(m.bytes)}</button>
+          {:else if m.engine && !v[m.engine]}
+            <button class="btn small primary" disabled={!!installing} onclick={() => m.engine && installEngine(m.engine)}
+              >{installing ? "Installing…" : `Install ${ENGINE_NAMES[m.engine]}`}</button
+            >
+          {:else}
+            <span class="chip ready">Ready</span>
+          {/if}
+        </span>
+      </div>
+      {#if downloading}
+        <div class="progress mprogress"><span style:width="{v.download?.[1] ?? 0}%"></span></div>
+      {/if}
+      {#if installing}
+        <p class="hint small">{installing}</p>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
 
 <svelte:window onkeydown={onKey} />
 
@@ -590,177 +625,264 @@
     </nav>
 
     <div class="content">
-      {#if tab === "connection"}
-        <section>
-          <h3>Serial port</h3>
-          <p class="hint">The board is found automatically by its Espressif USB ID. Pin a port only if you have more than one.</p>
-          <div class="ports">
-            <label class="port" class:checked={monitor.portSetting === null}>
-              <input type="radio" name="port" checked={monitor.portSetting === null} onchange={() => monitor.setPort(null)} />
-              <span class="radio"></span>
-              <span class="pname">Automatic</span>
-              <span class="pmeta">{monitor.portSetting === null && monitor.port ? monitor.port : "303a:*"}</span>
+      {#if tab === "voice"}
+        {#if !voice}
+          <p class="empty">Loading…</p>
+        {:else}
+          {@const v = voice}
+          <section class="voice">
+            <label class="switch master">
+              <input type="checkbox" checked={v.settings.enabled} onchange={(e) => setVoice({ enabled: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="mtext">
+                <span class="slabel">Voice assistant</span>
+                <span class="mnote">Say “Alexa”, then a command: “metti la faccia rings a sinistra”, “what's the temperature?”</span>
+              </span>
             </label>
-            {#each ports as p (p.name)}
-              <label class="port" class:checked={monitor.portSetting === p.name}>
-                <input type="radio" name="port" checked={monitor.portSetting === p.name} onchange={() => monitor.setPort(p.name)} />
-                <span class="radio"></span>
-                <span class="pname">{p.name}</span>
-                <span class="pmeta">{hex(p.vid)}:{hex(p.pid)}{p.is_board ? " · DualEye" : ""}</span>
-              </label>
-            {:else}
-              <p class="empty">No USB serial ports found.</p>
-            {/each}
-          </div>
-        </section>
-
-        {#if monitor.message && monitor.link !== "connected"}
-          <section class="alert" class:error={monitor.link === "offline"}>
-            <h3>{monitor.link === "offline" ? "Connection lost" : "Waiting"}</h3>
-            <p class="mono">{monitor.message}</p>
-            {#if monitor.permissionDenied}
-              <p class="hint">Linux: add yourself to the <code>dialout</code> group, then log out and back in.</p>
-              <pre>sudo usermod -aG dialout "$USER"</pre>
-            {/if}
-          </section>
-        {/if}
-
-        <section>
-          <h3>Stream</h3>
-          <dl class="facts">
-            <div><dt>Rate</dt><dd>1 Hz</dd></div>
-            <div><dt>Baud</dt><dd>115200</dd></div>
-            <div><dt>Format</dt><dd>JSON line · v1</dd></div>
-            <div><dt>Stale after</dt><dd>3 s</dd></div>
-          </dl>
-        </section>
-      {:else if tab === "display"}
-        <p class="hint">
-          Pick a watch face for each screen, and turn it if the board sits another way round. Any face goes on either screen; the
-          CPU and GPU faces show whichever you choose. The board switches with the next frame it gets, and the choice is kept.
-        </p>
-        {#each SCREENS as [id, label, side] (id)}
-          {@const current = monitor.faces[id]}
-          {@const src = monitor.faces.src[id]}
-          <section style:--accent={DEVICES[src].accent}>
-            <h3>{label}</h3>
-            <div class="faces" role="radiogroup" aria-label="{side} face">
-              {#each FACES as face (face.id)}
-                <button
-                  class="face"
-                  class:checked={current === face.id}
-                  role="radio"
-                  aria-checked={current === face.id}
-                  title={face.blurb}
-                  onclick={() => pick(id, face.id)}
-                >
-                  <span class="thumb"><Eye {id} screen={preview(id, side, face.id)} board="live" size={66} /></span>
-                  <span class="fname">{face.name}</span>
-                </button>
+            {#if v.settings.enabled}
+              <div class="pills">
+                {#each [["Hearing", v.stt], ["Understanding", v.settings.llm ? v.llm : "off"], ["Speaking", v.tts]] as [name, state] (name)}
+                  <span class="pill {state}" title={STATUS[state as keyof typeof STATUS]}><span class="dot"></span>{name}</span>
+                {/each}
+                <span class="pill board" title="The board's voice state">Board: {monitor.link === "connected" ? monitor.voice : "offline"}</span>
+              </div>
+              {#each [v.stt === "error" && v.stt_error, v.tts === "error" && v.tts_error, v.settings.llm && v.llm === "error" && v.llm_error && `${v.llm_error}. Meanwhile a few fixed phrases work.`] as err, i (i)}
+                {#if err}<p class="hint error">{err}</p>{/if}
               {/each}
+            {/if}
+            <div class="volume">
+              <span class="rlabel">Volume</span>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={volume ?? 60}
+                disabled={volume === null}
+                aria-label="Speaker volume"
+                onchange={(e) => setVolume(Number(e.currentTarget.value))}
+              />
+              <span class="pmeta">{volume === null ? "—" : `${volume}%`}</span>
             </div>
-            <p class="fblurb">{FACES.find((f) => f.id === current)?.blurb}</p>
-            {#if hasSource(current)}
-              <div class="rotation">
-                <span class="rlabel">Shows</span>
-                <div class="rots" role="radiogroup" aria-label="{label} shows">
-                  {#each ["cpu", "gpu"] as const as s (s)}
-                    <button class="rot" class:checked={src === s} role="radio" aria-checked={src === s} onclick={() => showSource(id, s)}
-                      >{DEVICES[s].title}</button
-                    >
-                  {/each}
-                </div>
-              </div>
-            {/if}
-            {#if current === "music"}
-              {@const playing = monitor.last?.music}
-              <div class="rotation">
-                <span class="rlabel">Music</span>
-                <div class="actions inline">
-                  <button class="btn" title="Previous track" onclick={() => monitor.musicControl("previous").catch(() => {})}>⏮</button>
-                  <button class="btn" title="Play or pause" onclick={() => monitor.musicControl("toggle").catch(() => {})}
-                    >{playing?.state === "play" ? "Pause" : "Play"}</button
-                  >
-                  <button class="btn" title="Next track" onclick={() => monitor.musicControl("next").catch(() => {})}>⏭</button>
-                </div>
-              </div>
-              <p class="hint">
-                {#if playing}
-                  {playing.title}{playing.artist ? ` · ${playing.artist}` : ""}.
-                {:else}
-                  Nothing playing right now.
-                {/if}
-                Spotify and Apple Music on a Mac, any app that shows its music in the system on Windows, MPRIS players (with
-                <code>playerctl</code>) on Linux. "Alexa, pausa", "next song" and "cosa sta suonando?" work too.
-              </p>
-            {/if}
-            {#if current === "eyes"}
-              <label class="check">
-                <input type="checkbox" checked={monitor.followPointer} onchange={(e) => monitor.setFollowPointer(e.currentTarget.checked)} />
-                <span>Follow the mouse pointer</span>
-              </label>
-              <p class="hint">
-                The eyes look where the pointer is, glance about when it stops, and doze off after a minute of stillness until it
-                moves again. Put the face on both screens for a pair.
-              </p>
-            {/if}
-            {#if current === "image"}
-              {@const sending = monitor.sending?.side === side ? monitor.sending : null}
-              <div class="rotation">
-                <span class="rlabel">Picture</span>
-                <div class="actions inline">
-                  <label class="btn primary" class:disabled={monitor.sending !== null || monitor.link !== "connected"}>
-                    {sending ? `Sending ${Math.round(sending.progress * 100)}%` : monitor.images[side] ? "Replace…" : "Choose…"}
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
-                      disabled={monitor.sending !== null || monitor.link !== "connected"}
-                      onchange={(e) => chooseImage(side, e)}
-                    />
-                  </label>
-                  {#if monitor.images[side]}
-                    <button class="btn" disabled={monitor.sending !== null || monitor.link !== "connected"} onclick={() => removeImage(side)}>Remove</button>
-                  {/if}
-                </div>
-              </div>
-              <p class="hint">
-                PNG, JPEG, WebP or an animated GIF, cropped to the middle square. Long animations are thinned to fit the board's
-                4 MB and play at up to 20 frames a second.
-              </p>
-              {#if monitor.link !== "connected"}
-                <p class="hint">Connect the board to send a picture.</p>
-              {/if}
-              {#if imageNote[side]}
-                <p class="hint">{imageNote[side]}</p>
-              {/if}
-              {#if imageError[side]}
-                <p class="hint error">{imageError[side]}</p>
-              {/if}
-            {/if}
             <div class="rotation">
-              <span class="rlabel">Rotation</span>
-              <div class="rots" role="radiogroup" aria-label="{side} rotation">
-                {#each ROTATIONS as deg (deg)}
+              <span class="rlabel">Language</span>
+              <div class="rots langs" role="radiogroup" aria-label="Language">
+                {#each LANGUAGES as [id, label] (id)}
                   <button
                     class="rot"
-                    class:checked={monitor.rotation[id] === deg}
+                    class:checked={v.settings.language === id}
                     role="radio"
-                    aria-checked={monitor.rotation[id] === deg}
-                    title={deg === 0 ? "Upright" : `Turned ${deg}° clockwise`}
-                    onclick={() => turn(id, deg)}
+                    aria-checked={v.settings.language === id}
+                    title={id === "auto" ? "Whisper tells Italian from English" : `Always ${label}`}
+                    onclick={() => setVoice({ language: id })}>{label}</button
                   >
-                    <svg viewBox="0 0 16 16" aria-hidden="true" style:rotate="{deg}deg">
-                      <circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.3" opacity="0.45" />
-                      <path d="M8 3.2 L10.4 6.6 H5.6 Z" fill="currentColor" />
-                    </svg>
-                    {deg}°
-                  </button>
                 {/each}
               </div>
             </div>
           </section>
-        {/each}
 
+          <section class="voice" class:dimmed={!v.settings.llm}>
+            <h3>Personality</h3>
+            <div class="persona" role="radiogroup" aria-label="Personality">
+              {#each PERSONALITIES as [id, name, blurb] (id)}
+                <button class="pcard" class:checked={v.settings.personality === id} role="radio" aria-checked={v.settings.personality === id} onclick={() => setVoice({ personality: id })}>
+                  <b>{name}</b>
+                  <small>{blurb}</small>
+                </button>
+              {/each}
+            </div>
+            {#if v.settings.personality === "custom"}
+              <div class="custom">
+                <textarea
+                  rows="3"
+                  maxlength={MAX_PERSONALITY}
+                  placeholder="A grumpy old pirate parrot who loves bad weather and calls me captain"
+                  value={v.settings.personality_custom}
+                  oninput={(e) => (customLength = e.currentTarget.value.length)}
+                  onchange={(e) => setVoice({ personality_custom: e.currentTarget.value })}
+                ></textarea>
+                <span class="pmeta">{customLength ?? v.settings.personality_custom.length}/{MAX_PERSONALITY}</span>
+              </div>
+            {/if}
+            <p class="hint">
+              {v.settings.llm
+                ? "Changes how DualEye talks, from the next command. It still does what you ask the same way."
+                : "Turn on “Understand with a language model” below: the fixed phrases have no personality."}
+            </p>
+          </section>
+
+          <section class="voice">
+            <h3>Behaviour</h3>
+            <label class="switch">
+              <input type="checkbox" checked={v.settings.speak} onchange={(e) => setVoice({ speak: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Answer out loud</span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" checked={v.settings.follow_up} disabled={!v.settings.speak} onchange={(e) => setVoice({ follow_up: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Keep listening after an answer, without the wake word</span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" checked={v.settings.llm} onchange={(e) => setVoice({ llm: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Understand with a language model</span>
+            </label>
+            <label class="switch" title={eyes === null ? "Needs the board connected, with firmware 1.0.1 or newer" : ""}>
+              <input type="checkbox" checked={eyes ?? true} disabled={eyes === null} onchange={(e) => setEyes(e.currentTarget.checked)} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Show animated eyes while talking, instead of the ring</span>
+            </label>
+            <label class="switch" title={idleEyes === null ? "Needs the board connected, with firmware 1.0.2 or newer" : ""}>
+              <input type="checkbox" checked={idleEyes ?? true} disabled={idleEyes === null} onchange={(e) => setIdleEyes(e.currentTarget.checked)} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Let the eyes play now and then while idle</span>
+            </label>
+          </section>
+
+          <section class="voice">
+            <h3>Models</h3>
+            {#if !usesRecommended(v)}
+              <div class="recbox">
+                <p class="hint">{v.recommendation.why}</p>
+                <button class="btn small" onclick={useRecommended}>
+                  Use {v.recommendation.whisper}{v.recommendation.llm ? ` + ${v.recommendation.llm}` : " without a language model"}
+                </button>
+              </div>
+            {/if}
+            {@render picker(v, "Hearing", "Turns what you say into text", "whisper", null, v.settings.model, (id) => setVoice({ model: id }), false)}
+            {@render picker(v, "Understanding", "Works out what to do and what to answer", "llm", null, v.settings.llm_model, (id) => setVoice({ llm_model: id }), !v.settings.llm)}
+            {#each VOICE_LANGUAGES as [lang, label] (lang)}
+              {@render picker(v, `Voice · ${label}`, "Speaks the answers", "voice", lang, v.settings.voices[lang] ?? "", (id) => setVoice({ voices: { ...v.settings.voices, [lang]: id } }), !v.settings.speak)}
+            {/each}
+            {#if voiceError}<p class="hint error">{voiceError}</p>{/if}
+            {#if engineError}<p class="hint error">{engineError}</p>{/if}
+
+            <details class="more" bind:open={keysOpen}>
+              <summary>Online services <span class="pmeta">{v.providers.filter((p) => p.key).length ? "key saved" : "no key"}</span></summary>
+              <p class="hint">
+                Instead of this computer, an online service can hear, understand and speak: nothing to download, but what you say leaves this
+                computer, and free plans have daily limits. With a key, its models show up in the lists above.
+              </p>
+              {#each v.providers as p (p.id)}
+                <div class="provider">
+                  <div class="phead">
+                    <span class="mtext"><span class="pname">{p.name}</span><span class="mnote">{p.note}</span></span>
+                    {#if p.key === "env"}
+                      <span class="pmeta" title="Its environment variable wins over a saved key">Key from {p.key_env}</span>
+                    {:else if p.key === "saved"}
+                      <button class="btn small" disabled={savingKey === p.id} onclick={() => saveKey(p.id, null)}>Forget key</button>
+                    {/if}
+                  </div>
+                  {#if p.key !== "env"}
+                    <div class="tform">
+                      <input
+                        class="ttext key"
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder={p.key ? "Replace the API key" : `API key, from ${p.keys_url}`}
+                        aria-label={`${p.name} API key`}
+                        bind:value={keyDrafts[p.id]}
+                      />
+                      <button class="btn small primary" disabled={!keyDrafts[p.id]?.trim() || savingKey === p.id} onclick={() => saveKey(p.id, keyDrafts[p.id])}
+                        >{savingKey === p.id ? "Checking…" : "Save"}</button
+                      >
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+              {#if keyError}<p class="hint error">{keyError}</p>{/if}
+            </details>
+
+            <details class="more">
+              <summary>Downloads and advanced</summary>
+              <p class="hint">
+                {hardwareLine(v.hardware)}. whisper-server: <code>{v.server ?? "not found"}</code> · llama-server: <code>{v.llm_server ?? "not found"}</code>
+              </p>
+              {#if !v.server}
+                <p class="hint error">
+                  whisper-server wasn't found. The app's installer comes with it; for a build of your own, run <code>tools/build_sidecars.sh</code> or
+                  install whisper.cpp (<code>brew install whisper-cpp</code> on macOS).
+                </p>
+              {/if}
+              {#if !v.llm_server}
+                <p class="hint error">
+                  llama-server wasn't found. The app's installer comes with it; for a build of your own, run <code>tools/build_sidecars.sh</code> or
+                  install llama.cpp (<code>brew install llama.cpp</code> on macOS).
+                </p>
+              {/if}
+              <div class="ports">
+                {#each ENGINES as [engine, name, note] (engine)}
+                  {@const installing = v[`${engine}_install`]}
+                  <div class="port model" class:checked={!!v[engine]}>
+                    <span class="mtext">
+                      <span class="pname">{name}</span>
+                      <span class="mnote">{installing ? `Installing… ${installing}` : note}</span>
+                    </span>
+                    <span class="mside">
+                      {#if v[engine]}
+                        <span class="pmeta">Installed</span>
+                      {:else}
+                        <button class="btn small primary" disabled={!!installing} onclick={() => installEngine(engine)}>{installing ? "Installing…" : "Install"}</button>
+                      {/if}
+                    </span>
+                  </div>
+                {/each}
+                {#each v.models.filter((m) => !m.provider && m.installed) as m (m.id)}
+                  {@const used = [v.settings.model, v.settings.llm_model, ...Object.values(v.settings.voices)].includes(m.id)}
+                  <div class="port model">
+                    <span class="mtext">
+                      <span class="pname">{m.id}</span>
+                      <span class="mnote">{KIND_NAMES[m.kind]} · {mb(m.bytes)}{used ? " · in use" : ""}</span>
+                    </span>
+                    <span class="mside">
+                      <button class="btn small" disabled={used && v.settings.enabled} title={m.engine === "kokoro" ? "Every Kokoro voice shares these files" : "Delete the file"} onclick={() => removeModel(m.id)}>Delete</button>
+                    </span>
+                  </div>
+                {/each}
+              </div>
+              <label class="check">
+                <input type="checkbox" checked={v.settings.keep_recordings} onchange={(e) => setVoice({ keep_recordings: e.currentTarget.checked })} />
+                <span>Keep recordings as WAV files, for debugging</span>
+              </label>
+            </details>
+          </section>
+
+          <section>
+            <h3>Transcripts</h3>
+            {#each newestFirst as entry (entry.at + "-" + entry.id)}
+              <div class="transcript">
+                <span class="tmeta">{clock(entry.at)}</span>
+                {#if entry.transcript}
+                  <span class="tlang">{entry.transcript.language}</span>
+                  <span class="ttext">{entry.transcript.text}</span>
+                  <span class="tmeta">{(entry.transcript.elapsed_ms / 1000).toFixed(1)} s</span>
+                  {#if entry.reply}
+                    <span class="treply" class:muted={!entry.reply.understood}>
+                      → {entry.reply.text}
+                      {#if entry.reply.by === "rules" && v.settings.llm}
+                        <span class="taction" title="The language model wasn't available: a fixed phrase answered">fixed phrase</span>
+                      {/if}
+                      {#each entry.reply.actions as action, i (i)}
+                        <span class="taction">{action}</span>
+                      {/each}
+                      {#if entry.spoken?.reason === "barge_in"}
+                        <span class="taction" title="The wake word was said over the answer">interrupted</span>
+                      {/if}
+                    </span>
+                    <span class="tmeta">{entry.spoken ? `${(entry.spoken.first_audio_ms / 1000).toFixed(1)} s` : ""}</span>
+                  {/if}
+                {:else}
+                  <span class="ttext muted">No words heard</span>
+                {/if}
+              </div>
+            {:else}
+              <p class="empty">{v.settings.enabled ? "Say “Alexa”, then a command." : "Turn the voice assistant on to see what the board hears."}</p>
+            {/each}
+          </section>
+        {/if}
+      {:else if tab === "claude"}
         <section class="claude" class:dimmed={!usesClaude}>
           <h3>Claude Code</h3>
           <p class="hint">
@@ -1024,385 +1146,45 @@
             </div>
           </div>
           <p class="hint" style:margin-top="10px">
-            While a timer runs, that screen shows it instead of its face, and goes back when it's done. The Timer face, in the Display
-            tab, shows it on any screen you put it on.{info && !info.can_speak ? " Turn on spoken replies in the Voice tab to hear what each timer was for." : ""}
+            While a timer runs, that screen shows it instead of its face, and goes back when it's done. The Timer face (click a screen
+            on the main window) shows it on any screen you put it on.{info && !info.can_speak ? " Turn on spoken replies in the Voice tab to hear what each timer was for." : ""}
           </p>
         </section>
-      {:else if tab === "voice"}
-        <p class="hint">
-          After its wake word, <b>“Alexa”</b>, the board sends what you say to this computer. With voice on, whisper.cpp transcribes it
-          here, in Italian or English, a small language model works out what to do (“metti la faccia rings a sinistra”, “what's the
-          temperature?”) and Piper or Kokoro answers through the board's speaker. Nothing leaves the computer unless you pick a cloud model below.
-        </p>
-        {#if !voice}
-          <p class="empty">Loading…</p>
-        {:else}
-          <section class="voice">
-            <h3>Voice</h3>
-            <label class="switch">
-              <input type="checkbox" checked={voice.settings.enabled} onchange={(e) => setVoice({ enabled: e.currentTarget.checked })} />
-              <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Transcribe what the board hears</span>
+      {:else if tab === "device"}
+        <section>
+          <h3>Serial port</h3>
+          <p class="hint">The board is found automatically by its Espressif USB ID. Pin a port only if you have more than one.</p>
+          <div class="ports">
+            <label class="port" class:checked={monitor.portSetting === null}>
+              <input type="radio" name="port" checked={monitor.portSetting === null} onchange={() => monitor.setPort(null)} />
+              <span class="radio"></span>
+              <span class="pname">Automatic</span>
+              <span class="pmeta">{monitor.portSetting === null && monitor.port ? monitor.port : "303a:*"}</span>
             </label>
-            <label class="switch">
-              <input type="checkbox" checked={voice.settings.speak} onchange={(e) => setVoice({ speak: e.currentTarget.checked })} />
-              <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Answer out loud</span>
-            </label>
-            <label class="switch">
-              <input
-                type="checkbox"
-                checked={voice.settings.follow_up}
-                disabled={!voice.settings.speak}
-                onchange={(e) => setVoice({ follow_up: e.currentTarget.checked })}
-              />
-              <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Keep listening after an answer, without the wake word</span>
-            </label>
-            <label class="switch">
-              <input type="checkbox" checked={voice.settings.llm} onchange={(e) => setVoice({ llm: e.currentTarget.checked })} />
-              <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Understand with a language model</span>
-            </label>
-            <label class="switch" title={eyes === null ? "Needs the board connected, with firmware 1.0.1 or newer" : ""}>
-              <input type="checkbox" checked={eyes ?? true} disabled={eyes === null} onchange={(e) => setEyes(e.currentTarget.checked)} />
-              <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Show animated eyes while talking, instead of the ring</span>
-            </label>
-            <label class="switch" title={idleEyes === null ? "Needs the board connected, with firmware 1.0.2 or newer" : ""}>
-              <input type="checkbox" checked={idleEyes ?? true} disabled={idleEyes === null} onchange={(e) => setIdleEyes(e.currentTarget.checked)} />
-              <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Let the eyes play now and then while idle</span>
-            </label>
-            <dl class="facts">
-              <div>
-                <dt>Speech-to-text</dt>
-                <dd class:good={voice.stt === "ready"} class:bad={voice.stt === "error"}>{STT_STATUS[voice.stt]}</dd>
-              </div>
-              <div>
-                <dt>Text-to-speech</dt>
-                <dd class:good={voice.tts === "ready"} class:bad={voice.tts === "error"}>{TTS_STATUS[voice.tts]}</dd>
-              </div>
-              <div>
-                <dt>Language model</dt>
-                <dd class:good={voice.llm === "ready"} class:bad={voice.llm === "error"}>{LLM_STATUS[voice.llm]}</dd>
-              </div>
-              <div><dt>Board</dt><dd>{monitor.link === "connected" ? monitor.voice : "offline"}</dd></div>
-            </dl>
-            {#if voice.stt === "error" && voice.stt_error}
-              <p class="hint error">{voice.stt_error}</p>
-            {/if}
-            {#if voice.tts === "error" && voice.tts_error}
-              <p class="hint error">{voice.tts_error}</p>
-            {/if}
-            {#if voice.llm === "error" && voice.llm_error}
-              <p class="hint error">{voice.llm_error}. Meanwhile a few fixed phrases work.</p>
-            {/if}
-            <div class="volume">
-              <span class="rlabel">Volume</span>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="5"
-                value={volume ?? 60}
-                disabled={volume === null}
-                aria-label="Speaker volume"
-                onchange={(e) => setVolume(Number(e.currentTarget.value))}
-              />
-              <span class="pmeta">{volume === null ? "—" : `${volume}%`}</span>
-            </div>
-            <div class="rotation">
-              <span class="rlabel">Language</span>
-              <div class="rots langs" role="radiogroup" aria-label="Language">
-                {#each LANGUAGES as [id, label] (id)}
-                  <button
-                    class="rot"
-                    class:checked={voice.settings.language === id}
-                    role="radio"
-                    aria-checked={voice.settings.language === id}
-                    title={id === "auto" ? "Whisper tells Italian from English" : `Always ${label}`}
-                    onclick={() => setVoice({ language: id })}>{label}</button
-                  >
-                {/each}
-              </div>
-            </div>
-            <div class="hwbox">
-              <span class="rlabel">This computer</span>
-              <p class="hint">{hardwareLine(voice.hardware)}. {voice.recommendation.why}</p>
-              {#if !usesRecommended(voice)}
-                <button class="btn small" onclick={useRecommended}>
-                  Use {voice.recommendation.whisper}{voice.recommendation.llm ? ` and ${voice.recommendation.llm}` : " without a language model"}
-                </button>
-              {/if}
-            </div>
-            <label class="check">
-              <input type="checkbox" checked={voice.settings.keep_recordings} onchange={(e) => setVoice({ keep_recordings: e.currentTarget.checked })} />
-              <span>Keep recordings as WAV files, for debugging</span>
-            </label>
-          </section>
-
-          {#snippet cloudSide(v: VoiceInfo, m: ModelInfo)}
-            <span class="pmeta" title={m.installed ? "Runs online: what you say is sent there" : "Add its API key under Cloud services"}
-              >{providerName(v, m.provider)} · {m.installed ? "cloud" : "no key"}</span
-            >
-          {/snippet}
-
-          <section>
-            <h3>Cloud services</h3>
-            <p class="hint">
-              Instead of this computer, an online service can transcribe, understand and speak: no downloads, but what you say leaves this
-              computer, and free plans have daily limits. Its models show up below next to the local ones.
-            </p>
-            <div class="ports">
-              {#each voice.providers as p (p.id)}
-                <div class="port model provider" class:checked={!!p.key}>
-                  <span class="mtext">
-                    <span class="pname">{p.name}</span>
-                    <span class="mnote">{p.note}</span>
-                  </span>
-                  <span class="mside">
-                    {#if p.key === "env"}
-                      <span class="pmeta" title="Its environment variable wins over a saved key">Key from {p.key_env}</span>
-                    {:else if p.key === "saved"}
-                      <span class="pmeta">Key saved</span>
-                      <button class="btn small" disabled={savingKey === p.id} onclick={() => saveKey(p.id, null)}>Forget</button>
-                    {/if}
-                  </span>
-                  {#if p.key !== "env"}
-                    <div class="tform keyform">
-                      <input
-                        class="ttext"
-                        type="password"
-                        autocomplete="off"
-                        spellcheck="false"
-                        placeholder={p.key ? "Replace the API key" : `API key, from ${p.keys_url}`}
-                        aria-label={`${p.name} API key`}
-                        bind:value={keyDrafts[p.id]}
-                      />
-                      <button class="btn small primary" disabled={!keyDrafts[p.id]?.trim() || savingKey === p.id} onclick={() => saveKey(p.id, keyDrafts[p.id])}
-                        >{savingKey === p.id ? "Checking…" : "Save"}</button
-                      >
-                    </div>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-            {#if keyError}
-              <p class="hint error">{keyError}</p>
-            {/if}
-          </section>
-
-          <section>
-            <h3>Speech model</h3>
-            {#if !voice.server}
-              <p class="hint error">
-                whisper-server wasn't found. The app's installer comes with it; for a build of your own, run
-                <code>tools/build_sidecars.sh</code> or install whisper.cpp (<code>brew install whisper-cpp</code> on macOS).
-              </p>
+            {#each ports as p (p.name)}
+              <label class="port" class:checked={monitor.portSetting === p.name}>
+                <input type="radio" name="port" checked={monitor.portSetting === p.name} onchange={() => monitor.setPort(p.name)} />
+                <span class="radio"></span>
+                <span class="pname">{p.name}</span>
+                <span class="pmeta">{hex(p.vid)}:{hex(p.pid)}{p.is_board ? " · DualEye" : ""}</span>
+              </label>
             {:else}
-              <p class="hint">Downloaded from Hugging Face once and checked. whisper-server: <code>{voice.server}</code></p>
-            {/if}
-            <div class="ports">
-              {#each voice.models.filter((m) => m.kind === "whisper") as m (m.id)}
-                {@const downloading = voice.download?.[0] === m.id}
-                <div class="port model" class:checked={voice.settings.model === m.id}>
-                  <label class="mpick">
-                    <input type="radio" name="model" checked={voice.settings.model === m.id} onchange={() => setVoice({ model: m.id })} />
-                    <span class="radio"></span>
-                    <span class="mtext">
-                      <span class="pname">{m.id}{#if m.id === voice.recommendation.whisper || m.id === voice.recommendation.llm}<span class="rec" title="What this computer runs best">recommended</span>{/if}</span>
-                      <span class="mnote">{m.note}</span>
-                    </span>
-                  </label>
-                  <span class="mside">
-                    {#if m.provider}
-                      {@render cloudSide(voice, m)}
-                    {:else}
-                      <span class="pmeta">{mb(m.bytes)}</span>
-                      {#if downloading}
-                        <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
-                      {:else if m.installed}
-                        <button class="btn small" disabled={voice.settings.model === m.id && voice.settings.enabled} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
-                      {:else}
-                        <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
-                      {/if}
-                    {/if}
-                  </span>
-                  {#if downloading}
-                    <div class="progress mprogress"><span style:width="{voice.download?.[1] ?? 0}%"></span></div>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-            {#if voiceError}
-              <p class="hint error">{voiceError}</p>
-            {/if}
-          </section>
-
-          <section>
-            <h3>Language model</h3>
-            {#if !voice.llm_server}
-              <p class="hint error">
-                llama-server wasn't found. The app's installer comes with it; for a build of your own, run
-                <code>tools/build_sidecars.sh</code> or install llama.cpp (<code>brew install llama.cpp</code> on macOS).
-              </p>
-            {:else}
-              <p class="hint">
-                It turns what you say into actions on the board and a short answer. Bigger models understand more and take longer.
-                llama-server: <code>{voice.llm_server}</code>
-              </p>
-            {/if}
-            <div class="ports">
-              {#each voice.models.filter((m) => m.kind === "llm") as m (m.id)}
-                {@const downloading = voice.download?.[0] === m.id}
-                {@const chosen = voice.settings.llm_model === m.id}
-                <div class="port model" class:checked={chosen}>
-                  <label class="mpick" title={m.license ? "License: " + m.license : undefined}>
-                    <input type="radio" name="llm" checked={chosen} onchange={() => setVoice({ llm_model: m.id })} />
-                    <span class="radio"></span>
-                    <span class="mtext">
-                      <span class="pname">{m.id}{#if m.id === voice.recommendation.whisper || m.id === voice.recommendation.llm}<span class="rec" title="What this computer runs best">recommended</span>{/if}</span>
-                      <span class="mnote">{m.note}</span>
-                    </span>
-                  </label>
-                  <span class="mside">
-                    {#if m.provider}
-                      {@render cloudSide(voice, m)}
-                    {:else}
-                      <span class="pmeta">{mb(m.bytes)}</span>
-                      {#if downloading}
-                        <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
-                      {:else if m.installed}
-                        <button class="btn small" disabled={chosen && voice.settings.enabled && voice.settings.llm} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
-                      {:else}
-                        <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
-                      {/if}
-                    {/if}
-                  </span>
-                  {#if downloading}
-                    <div class="progress mprogress"><span style:width="{voice.download?.[1] ?? 0}%"></span></div>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-          </section>
-
-          <section>
-            <h3>Voices</h3>
-            <p class="hint">
-              Two engines speak the answers, each a Python program that runs next to the app, installed into a private virtualenv. Pick a voice
-              of either for each language. Check each voice's license before sharing what it says.
-            </p>
-            <div class="ports">
-              {#each ENGINES as [engine, name, note] (engine)}
-                {@const installing = voice[`${engine}_install`]}
-                <div class="port model" class:checked={!!voice[engine]}>
-                  <span class="mtext">
-                    <span class="pname">{name}</span>
-                    <span class="mnote">{installing ? `Installing… ${installing}` : note}</span>
-                  </span>
-                  <span class="mside">
-                    {#if voice[engine]}
-                      <span class="pmeta">Installed</span>
-                    {:else}
-                      <button class="btn small primary" disabled={!!installing} onclick={() => installEngine(engine)}>{installing ? "Installing…" : "Install"}</button>
-                    {/if}
-                  </span>
-                </div>
-              {/each}
-            </div>
-            {#if engineError}
-              <p class="hint error">{engineError}</p>
-            {/if}
-            {#each VOICE_LANGUAGES as [lang, label] (lang)}
-              <div class="vlang">
-                <span class="rlabel">{label}</span>
-                <button
-                  class="btn small"
-                  disabled={voice.tts !== "ready" || testing !== null || monitor.link !== "connected" || !voice.models.find((m) => m.id === voice?.settings.voices[lang])?.installed}
-                  onclick={() => testVoice(lang)}>{testing === lang ? "Speaking…" : "Test"}</button
-                >
-              </div>
-              <div class="ports">
-                {#each voice.models.filter((m) => m.kind === "voice" && m.language === lang) as m (m.id)}
-                  {@const downloading = voice.download?.[0] === m.id}
-                  {@const chosen = voice.settings.voices[lang] === m.id}
-                  <div class="port model" class:checked={chosen}>
-                    <label class="mpick" title={m.license || undefined}>
-                      <input
-                        type="radio"
-                        name={"voice-" + lang}
-                        checked={chosen}
-                        onchange={() => voice && setVoice({ voices: { ...voice.settings.voices, [lang]: m.id } })}
-                      />
-                      <span class="radio"></span>
-                      <span class="mtext">
-                        <span class="pname">{m.id}</span>
-                        <span class="mnote">{m.note}{m.engine && !voice[m.engine] ? ` (install ${m.engine === "kokoro" ? "Kokoro" : "Piper"} above)` : ""}</span>
-                      </span>
-                    </label>
-                    <span class="mside">
-                      {#if m.provider}
-                        {@render cloudSide(voice, m)}
-                      {:else}
-                        <span class="pmeta" title={m.engine === "kokoro" ? "One download for every Kokoro voice" : undefined}>{mb(m.bytes)}{m.engine === "kokoro" ? ", shared" : ""}</span>
-                        {#if downloading}
-                          <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
-                        {:else if m.installed}
-                          <button
-                            class="btn small"
-                            title={m.engine === "kokoro" ? "Delete the files: every Kokoro voice shares them" : "Delete the files"}
-                            onclick={() => removeModel(m.id)}>Delete</button
-                          >
-                        {:else}
-                          <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
-                        {/if}
-                      {/if}
-                    </span>
-                    {#if downloading}
-                      <div class="progress mprogress"><span style:width="{voice.download?.[1] ?? 0}%"></span></div>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
+              <p class="empty">No USB serial ports found.</p>
             {/each}
-          </section>
+          </div>
+        </section>
 
-          <section>
-            <h3>Transcripts</h3>
-            {#each newestFirst as entry (entry.at + "-" + entry.id)}
-              <div class="transcript">
-                <span class="tmeta">{clock(entry.at)}</span>
-                {#if entry.transcript}
-                  <span class="tlang">{entry.transcript.language}</span>
-                  <span class="ttext">{entry.transcript.text}</span>
-                  <span class="tmeta">{(entry.transcript.elapsed_ms / 1000).toFixed(1)} s</span>
-                  {#if entry.reply}
-                    <span class="treply" class:muted={!entry.reply.understood}>
-                      → {entry.reply.text}
-                      {#if entry.reply.by === "rules" && voice.settings.llm}
-                        <span class="taction" title="The language model wasn't available: a fixed phrase answered">fixed phrase</span>
-                      {/if}
-                      {#each entry.reply.actions as action, i (i)}
-                        <span class="taction">{action}</span>
-                      {/each}
-                      {#if entry.spoken?.reason === "barge_in"}
-                        <span class="taction" title="The wake word was said over the answer">interrupted</span>
-                      {/if}
-                    </span>
-                    <span class="tmeta">{entry.spoken ? `${(entry.spoken.first_audio_ms / 1000).toFixed(1)} s` : ""}</span>
-                  {/if}
-                {:else}
-                  <span class="ttext muted">No words heard</span>
-                {/if}
-              </div>
-            {:else}
-              <p class="empty">{voice.settings.enabled ? "Say “Alexa”, then a command." : "Turn voice on to see what the board hears."}</p>
-            {/each}
+        {#if monitor.message && monitor.link !== "connected"}
+          <section class="alert" class:error={monitor.link === "offline"}>
+            <h3>{monitor.link === "offline" ? "Connection lost" : "Waiting"}</h3>
+            <p class="mono">{monitor.message}</p>
+            {#if monitor.permissionDenied}
+              <p class="hint">Linux: add yourself to the <code>dialout</code> group, then log out and back in.</p>
+              <pre>sudo usermod -aG dialout "$USER"</pre>
+            {/if}
           </section>
         {/if}
-      {:else if tab === "device"}
+
         <section>
           <h3>Board</h3>
           {#if target}
@@ -1418,7 +1200,7 @@
               </button>
             </div>
           {:else if boards.length > 1}
-            <p class="hint">More than one Espressif device is plugged in. Pin the DualEye's port in Connection first.</p>
+            <p class="hint">More than one Espressif device is plugged in. Pin the DualEye's port above first.</p>
           {:else}
             <p class="empty">No ESP32-S3 found on USB. Plug the DualEye in with a data cable.</p>
           {/if}
@@ -1515,7 +1297,12 @@
             </details>
           {/if}
         </section>
-      {:else if tab === "sensors"}
+      {:else if tab === "diagnostics"}
+        <div class="rots sub" role="tablist" aria-label="Diagnostics">
+          <button class="rot" class:checked={diag === "sensors"} role="tab" aria-selected={diag === "sensors"} onclick={() => (diag = "sensors")}>Sensors</button>
+          <button class="rot" class:checked={diag === "console"} role="tab" aria-selected={diag === "console"} onclick={() => (diag = "console")}>Board console</button>
+        </div>
+        {#if diag === "sensors"}
         <p class="hint">Every raw value the host can read. The board gets the CPU average, the first GPU, the fastest fan of each kind, RAM and VRAM.</p>
         {#if isMac && powerHelper}
           <section>
@@ -1564,7 +1351,16 @@
         {:else}
           <p class="empty">Reading sensors…</p>
         {/each}
-      {:else}
+        <section>
+          <h3>Stream</h3>
+          <dl class="facts">
+            <div><dt>Rate</dt><dd>1 Hz</dd></div>
+            <div><dt>Baud</dt><dd>115200</dd></div>
+            <div><dt>Format</dt><dd>JSON line · v1</dd></div>
+            <div><dt>Stale after</dt><dd>3 s</dd></div>
+          </dl>
+        </section>
+        {:else}
         <div class="console" bind:this={consoleEl} onscroll={scrolled}>
           {#each monitor.logs as line, i (i)}
             <div class="log" class:warn={line.startsWith("W ")} class:err={line.startsWith("E ")}>{line}</div>
@@ -1572,6 +1368,7 @@
             <p class="empty">Nothing logged by the board yet.</p>
           {/each}
         </div>
+        {/if}
       {/if}
     </div>
   </aside>
@@ -1641,7 +1438,7 @@
   nav {
     position: relative;
     display: grid;
-    grid-template-columns: repeat(7, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     margin: 14px;
     padding: 3px;
     border-radius: 12px;
@@ -1670,7 +1467,7 @@
     top: 3px;
     bottom: 3px;
     left: 3px;
-    width: calc((100% - 6px) / 7);
+    width: calc((100% - 6px) / 5);
     border-radius: 9px;
     background: rgba(255, 255, 255, 0.08);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
@@ -1790,17 +1587,6 @@
     flex: 1;
     min-width: 120px;
   }
-  .keyform {
-    grid-column: 1 / -1;
-    margin-top: 8px;
-  }
-  /* Not the hidden radio of `.port input`. */
-  .port .keyform .ttext {
-    position: static;
-    opacity: 1;
-    pointer-events: auto;
-    font-family: var(--mono);
-  }
   .tunit {
     font: 500 11.5px/1 var(--sans);
     color: var(--faint);
@@ -1879,54 +1665,6 @@
     color: var(--faint);
   }
 
-  .faces {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
-  }
-  .face {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 0 9px;
-    border-radius: 12px;
-    border: 1px solid var(--line);
-    background: rgba(255, 255, 255, 0.02);
-    color: var(--dim);
-    cursor: pointer;
-    transition:
-      border-color 200ms,
-      background 200ms,
-      color 200ms;
-  }
-  .face:hover {
-    background: rgba(255, 255, 255, 0.04);
-  }
-  .face.checked {
-    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
-    color: var(--text);
-  }
-  .face:focus-visible {
-    outline: 1.5px solid var(--accent);
-  }
-  .thumb {
-    border-radius: 50%;
-    line-height: 0;
-    box-shadow:
-      0 0 0 1px #000,
-      0 0 0 2px rgba(255, 255, 255, 0.08);
-  }
-  .fname {
-    font: 550 11.5px/1 var(--sans);
-  }
-  .fblurb {
-    margin: 10px 0 0;
-    font: 400 12px/1.4 var(--sans);
-    color: var(--faint);
-  }
-
   .rotation {
     display: flex;
     align-items: center;
@@ -1962,10 +1700,6 @@
       background 200ms,
       color 200ms;
   }
-  .rot svg {
-    width: 12px;
-    height: 12px;
-  }
   .rot:hover {
     color: var(--dim);
   }
@@ -1979,6 +1713,286 @@
 
   .voice {
     --accent: #30d5f0;
+  }
+  .voice.dimmed .persona {
+    opacity: 0.5;
+  }
+  .switch.master {
+    align-items: flex-start;
+    margin-bottom: 14px;
+  }
+  .switch.master .track {
+    flex: none;
+    margin-top: 1px;
+  }
+  .switch.master .slabel {
+    font-size: 14px;
+  }
+  .pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: -2px 0 12px 42px;
+  }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 9px 4px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.025);
+    font: 550 11px/1 var(--sans);
+    color: var(--dim);
+  }
+  .pill .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--faint);
+  }
+  .pill.ready .dot {
+    background: #5ee38a;
+    box-shadow: 0 0 6px #5ee38a;
+  }
+  .pill.starting .dot {
+    background: var(--warm);
+    animation: blink 1s ease-in-out infinite;
+  }
+  .pill.error {
+    color: var(--hot);
+  }
+  .pill.error .dot {
+    background: var(--hot);
+  }
+  .pill.board {
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 10.5px;
+  }
+  @keyframes blink {
+    50% {
+      opacity: 0.3;
+    }
+  }
+
+  .persona {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .pcard {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 9px 10px;
+    border-radius: 11px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+    transition:
+      border-color 180ms,
+      background 180ms;
+  }
+  .pcard:hover {
+    background: rgba(255, 255, 255, 0.045);
+  }
+  .pcard.checked {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .pcard:focus-visible {
+    outline: 1.5px solid var(--accent);
+  }
+  .pcard b {
+    font: 600 12.5px/1.2 var(--sans);
+  }
+  .pcard small {
+    font: 450 11px/1.3 var(--sans);
+    color: var(--faint);
+  }
+  .custom {
+    position: relative;
+    margin-bottom: 10px;
+  }
+  .custom textarea {
+    width: 100%;
+    resize: vertical;
+    padding: 9px 11px 20px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text);
+    font: 450 12.5px/1.45 var(--sans);
+    user-select: text;
+  }
+  .custom textarea:focus-visible {
+    outline: 1.5px solid var(--accent);
+    outline-offset: -1px;
+  }
+  .custom .pmeta {
+    position: absolute;
+    right: 10px;
+    bottom: 9px;
+  }
+
+  .recbox {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px dashed color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .recbox .hint {
+    margin: 0;
+  }
+  .mrow {
+    padding: 12px 0;
+    border-top: 1px solid var(--line);
+  }
+  .mrow:first-of-type {
+    border-top: 0;
+    padding-top: 2px;
+  }
+  .mrow.off {
+    opacity: 0.45;
+  }
+  .mhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .select {
+    position: relative;
+  }
+  .select select {
+    width: 100%;
+    height: 34px;
+    padding: 0 32px 0 11px;
+    appearance: none;
+    -webkit-appearance: none;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--text);
+    font: 500 12.5px/1 var(--sans);
+    cursor: pointer;
+    transition:
+      border-color 180ms,
+      background 180ms;
+  }
+  .select select:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.07);
+  }
+  .select select:focus-visible {
+    outline: 1.5px solid var(--accent);
+    outline-offset: -1px;
+  }
+  .select select:disabled {
+    cursor: default;
+  }
+  .select svg {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    translate: 0 -50%;
+    color: var(--dim);
+    pointer-events: none;
+  }
+  .mstatus {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .chip {
+    padding: 4px 8px;
+    border-radius: 999px;
+    font: 600 10.5px/1 var(--sans);
+    white-space: nowrap;
+  }
+  .chip.ready {
+    color: #5ee38a;
+    background: rgba(94, 227, 138, 0.1);
+  }
+  .chip.online {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .hint.small {
+    margin: 6px 0 0;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .more {
+    margin-top: 6px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .more summary {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    font: 550 12.5px/1 var(--sans);
+    color: var(--dim);
+    list-style: none;
+  }
+  .more summary::-webkit-details-marker {
+    display: none;
+  }
+  .more summary::before {
+    content: "›";
+    display: inline-block;
+    width: 14px;
+    margin-right: 4px;
+    transition: rotate 180ms;
+  }
+  .more[open] summary::before {
+    rotate: 90deg;
+  }
+  .more summary .pmeta {
+    margin-left: auto;
+  }
+  .more[open] summary {
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+  .provider {
+    padding: 11px 12px;
+    margin-bottom: 6px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .phead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .tform .key {
+    font-family: var(--mono);
+  }
+  .rots.sub {
+    grid-template-columns: 1fr 1fr;
+  }
+  .rots.sub .rot {
+    justify-content: center;
+    font-family: var(--sans);
   }
   .switch {
     display: flex;
@@ -2031,12 +2045,6 @@
   .slabel {
     font: 550 13px/1.2 var(--sans);
   }
-  .facts dd.good {
-    color: #5ee38a;
-  }
-  .facts dd.bad {
-    color: var(--hot);
-  }
   .langs {
     grid-template-columns: repeat(3, 1fr);
   }
@@ -2068,35 +2076,11 @@
     grid-template-columns: 1fr auto;
     cursor: default;
   }
-  .mpick {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-    cursor: pointer;
-  }
   .mtext {
     display: flex;
     flex-direction: column;
     gap: 4px;
     min-width: 0;
-  }
-  .rec {
-    margin-left: 6px;
-    padding: 1px 5px;
-    border-radius: 4px;
-    font: 600 9.5px/1.4 var(--sans);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    vertical-align: 1px;
-  }
-  .hwbox {
-    margin: 4px 0 12px;
-  }
-  .hwbox .hint {
-    margin: 4px 0 8px;
   }
   .mnote {
     font: 450 11px/1.35 var(--sans);
@@ -2176,12 +2160,6 @@
   .volume .pmeta {
     text-align: right;
   }
-  .vlang {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin: 14px 0 8px;
-  }
 
   .claude.dimmed {
     opacity: 0.7;
@@ -2205,22 +2183,6 @@
   }
   .actions.inline {
     margin: 0;
-  }
-  label.btn {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    cursor: pointer;
-  }
-  label.btn input {
-    position: absolute;
-    inset: 0;
-    opacity: 0;
-    cursor: pointer;
-  }
-  label.btn.disabled {
-    opacity: 0.45;
-    pointer-events: none;
   }
   .alerts .rot:disabled {
     opacity: 0.45;

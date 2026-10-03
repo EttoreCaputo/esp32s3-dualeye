@@ -50,6 +50,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use dualeye_core::agent;
 use dualeye_core::claude::alerts::AlertSettings;
 use dualeye_core::claude::hooks::{self, HooksStatus};
 use dualeye_core::claude::statusline::{self, LinkStatus};
@@ -117,6 +118,10 @@ struct VoiceSettings {
     llm: bool,
     /// A `models::MODELS` id of kind `llm`, or a cloud model's.
     llm_model: String,
+    /// How the language model talks: a preset of `agent::personality_prompt`, or `custom`.
+    personality: String,
+    /// The person's own description, for `custom`.
+    personality_custom: String,
 }
 
 /// This computer and the models for it, with what llama-server says it can
@@ -151,6 +156,8 @@ impl Default for VoiceSettings {
             voices,
             llm: rec.llm.is_some(),
             llm_model: rec.llm.unwrap_or(models::DEFAULT_LLM).into(),
+            personality: "cute".into(),
+            personality_custom: String::new(),
         }
     }
 }
@@ -341,6 +348,9 @@ fn apply_voice(state: &AppState) {
         |config| Arc::new(Agent::new(Arc::new(Llm::new(config)))),
         |agent: &Arc<Agent>| agent.llm().warm_up().map_err(|e| e.to_string()),
     );
+    if let Some(agent) = &agent {
+        agent.set_personality(&agent::personality_prompt(&settings.personality, &settings.personality_custom));
+    }
     let dump_dir = settings.keep_recordings.then(voice::default_dump_dir).flatten();
     *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt, tts, agent, follow_up: settings.follow_up };
 }

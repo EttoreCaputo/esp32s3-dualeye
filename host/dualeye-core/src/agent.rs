@@ -29,28 +29,70 @@ const MEMORY_TURNS: usize = 4;
 const MEMORY_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_TOKENS: u32 = 256;
 
+/// The system prompt: who the model plays (`{personality}`, from
+/// [`personality_prompt`]), the tools it has (`{tools}`, from the tools
+/// themselves) and how to behave. Every request starts with it, so it is
+/// cached: keep it the same from one request to the next.
 const SYSTEM_PROMPT: &str = "\
-You are DualEye, a cute desk pet with two round screens. \
-The user can speaks Italian or English.
+You are DualEye, a small companion that lives on the user's desk: a board with two round screens, \
+left and right, a microphone and a speaker, connected to the user's computer. The user talks to you \
+by voice. Their words reach you through speech recognition, so they may contain small mistakes: \
+go by what they mean.
 
-Rules:
-1. To do something, call a tool. Never say it is done without calling it.
-2. Pick the tool:
-- timer, countdown: set_timer
-- ricordami, remind me: set_reminder
-- pomodoro: pomodoro
-- stop, cancel or pause a timer: control_timer
-- watch face: set_face
-- open an app (apri, avvia): open_app
-- music: play, pause, next or previous song: media_control
-- what song is playing: now_playing
-- scrivi, write: show_text
-- temperature, load, fans, memory: get_metrics
-- time or date: get_time
-- louder, quieter, brighter, dimmer: get_state, then set the new value
-3. Call each tool once. Never make numbers up.
-4. Then reply with one short sentence in the user's language, plain words for speech: no markdown, no emoji. \
-If you can't do it, say so.";
+{personality}
+Your personality shapes how you talk, never what you do.
+
+Your tools:
+{tools}
+
+How to behave:
+- When the user asks for something one of your tools does, call it, then confirm briefly. \
+Never say something is done unless the tool call worked: a result starting with \"error\" means it failed.
+- When the answer depends on a fact (a measurement, the time, a setting, a timer), read it with \
+a tool instead of guessing.
+- For a change relative to the current value, read the current value first, then set the new one.
+- Call each tool once per request, with what the user asked for.
+- When the user is just chatting (a greeting, a question about you, a joke, small talk), \
+answer in character without calling any tool.
+- When they ask for something no tool can do, say so briefly.
+- When a request is unclear, ask one short question.
+
+How to reply:
+- Work out which language the user is speaking and always reply in that same language.
+- Keep it to one or two short sentences, meant to be spoken aloud: no markdown, lists, emoji or symbols.";
+
+/// A personality for [`Agent::set_personality`]: one of the app's presets,
+/// or `custom` with the person's own words.
+pub fn personality_prompt(id: &str, custom: &str) -> String {
+    let preset = match id {
+        "playful" => "Personality: playful and funny. You like light jokes and puns, and tease the user gently.",
+        "calm" => "Personality: calm and gentle. You speak softly and reassuringly, never in a hurry.",
+        "sassy" => "Personality: a sassy cat. Dry humour and a little sarcasm, but you always do what is asked.",
+        "butler" => "Personality: a refined butler. Polite and formal, using the formal form of address where the language has one.",
+        "minimal" => "Personality: brief and practical. Only say what you did or what was asked, no small talk.",
+        "custom" if !custom.trim().is_empty() => {
+            let custom: String = custom.trim().chars().take(MAX_PERSONALITY).collect();
+            return format!("Personality, as the user described it: {custom}");
+        }
+        _ => "Personality: a cute, cheerful desk pet. Warm, kind and a little playful.",
+    };
+    preset.to_string()
+}
+
+/// Characters of a custom personality kept for the prompt.
+pub const MAX_PERSONALITY: usize = 300;
+
+/// [`SYSTEM_PROMPT`] with a personality and the tools (OpenAI-style functions).
+fn system_prompt(personality: &str, tools: &[Value]) -> String {
+    let list: Vec<String> = tools
+        .iter()
+        .map(|t| {
+            let f = &t["function"];
+            format!("- {}: {}", f["name"].as_str().unwrap_or_default(), f["description"].as_str().unwrap_or_default())
+        })
+        .collect();
+    SYSTEM_PROMPT.replace("{personality}", personality).replace("{tools}", &list.join("\n"))
+}
 
 /// Where the agent's tools come from, and what runs them.
 pub trait Toolbox {
@@ -95,6 +137,8 @@ struct Memory {
 pub struct Agent {
     llm: std::sync::Arc<Llm>,
     memory: Mutex<Memory>,
+    /// The personality's part of the system prompt.
+    personality: Mutex<String>,
     /// The server has the system prompt and the tools in its cache.
     primed: AtomicBool,
 }
@@ -112,7 +156,22 @@ pub fn is_read_only(tool: &str) -> bool {
 
 impl Agent {
     pub fn new(llm: std::sync::Arc<Llm>) -> Self {
-        Self { llm, memory: Mutex::default(), primed: AtomicBool::new(false) }
+        Self { llm, memory: Mutex::default(), personality: Mutex::new(personality_prompt("", "")), primed: AtomicBool::new(false) }
+    }
+
+    /// Talk with this personality ([`personality_prompt`]) from the next transcript on.
+    pub fn set_personality(&self, personality: &str) {
+        let mut current = self.personality.lock().unwrap();
+        if *current != personality {
+            *current = personality.to_string();
+            // Another prompt: the server's cache has the old one.
+            self.primed.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// The system prompt every request starts with, for these tools.
+    pub fn system_prompt(&self, tools: &[Value]) -> String {
+        system_prompt(&self.personality.lock().unwrap(), tools)
     }
 
     /// Have the server read the system prompt and the tools, which every
@@ -128,9 +187,10 @@ impl Agent {
             // No board yet: the prompt would be another one.
             return Ok(());
         }
+        let tools: Vec<Value> = tools.iter().map(function).chain([time_tool()]).collect();
         let request = json!({
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": "Ciao"}],
-            "tools": tools.iter().map(function).chain([time_tool()]).collect::<Vec<_>>(),
+            "messages": [{"role": "system", "content": self.system_prompt(&tools)}, {"role": "user", "content": "Ciao"}],
+            "tools": tools,
             "max_tokens": 1,
             "chat_template_kwargs": {"enable_thinking": false},
         });
@@ -152,7 +212,7 @@ impl Agent {
     pub fn respond(&self, text: &str, language: &str, toolbox: &dyn Toolbox) -> Result<Turn, LlmError> {
         let started = Instant::now();
         let tools: Vec<Value> = toolbox.tools().iter().map(function).chain([time_tool()]).collect();
-        let mut messages = vec![json!({"role": "system", "content": SYSTEM_PROMPT})];
+        let mut messages = vec![json!({"role": "system", "content": self.system_prompt(&tools)})];
         {
             let mut memory = self.memory.lock().unwrap();
             if memory.last.is_some_and(|t| t.elapsed() > MEMORY_TIMEOUT) {
@@ -373,6 +433,18 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(args(&calls[0]), json!({"minutes": 10, "label": "pasta"}));
         assert_eq!(args(&calls[1]), json!({"action": "start"}));
+    }
+
+    #[test]
+    fn personality_goes_in_the_prompt() {
+        let tools = [time_tool()];
+        let prompt = system_prompt(&personality_prompt("butler", ""), &tools);
+        assert!(prompt.contains("refined butler") && !prompt.contains("{personality}"));
+        assert!(prompt.contains("- get_time: The current local time") && !prompt.contains("{tools}"));
+        assert!(personality_prompt("unknown", "").contains("cute"));
+        assert!(personality_prompt("custom", "  ").contains("cute"));
+        let long = "a".repeat(MAX_PERSONALITY + 50);
+        assert!(personality_prompt("custom", &long).ends_with(&"a".repeat(MAX_PERSONALITY)));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 <script lang="ts">
   import Board from "./lib/Board.svelte";
-  import Drawer from "./lib/Drawer.svelte";
+  import Drawer, { type Tab } from "./lib/Drawer.svelte";
+  import FacePicker from "./lib/FacePicker.svelte";
   import Telemetry from "./lib/Telemetry.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import UpdateBanner from "./lib/UpdateBanner.svelte";
@@ -10,7 +11,11 @@
   monitor.start();
 
   let settings = $state(false);
-  let drawerTab = $state<"connection" | "display" | "voice" | "device" | "sensors" | "console">("connection");
+  let drawerTab = $state<Tab>("voice");
+  /** The screen whose faces are open, and where it is. */
+  let picking = $state<{ id: DeviceId; anchor: { x: number; y: number } } | null>(null);
+  const openPicker = (id: DeviceId, rect: DOMRect) =>
+    (picking = picking?.id === id ? null : { id, anchor: { x: rect.left + rect.width / 2, y: rect.bottom } });
   let pixels = $state(false);
   let heroW = $state(0);
   let winH = $state(0);
@@ -81,7 +86,12 @@
 
 <div class="app">
   <div class="backdrop" aria-hidden="true"></div>
-  <TitleBar onSettings={() => (settings = true)} />
+  <TitleBar
+    onSettings={() => {
+      picking = null;
+      settings = true;
+    }}
+  />
   <UpdateBanner
     onUpdate={() => {
       drawerTab = "device";
@@ -91,14 +101,20 @@
 
   <section class="hero" bind:clientWidth={heroW}>
     <div class="board" class:off={board === "off"}>
-      <Board cpu={screen("cpu")} gpu={screen("gpu")} {board} {size} cpuGlow={glow("cpu")} gpuGlow={glow("gpu")} {pixels} {rotation} voice={monitor.voice} eyes={monitor.eyes} />
+      <Board cpu={screen("cpu")} gpu={screen("gpu")} {board} {size} cpuGlow={glow("cpu")} gpuGlow={glow("gpu")} {pixels} {rotation} voice={monitor.voice} eyes={monitor.eyes} onpick={openPicker} picking={picking?.id ?? null} />
     </div>
 
     <div class="caption">
       <span class="state {board}"></span>
       <span>{caption}</span>
       {#if board === "off"}
-        <button class="link" onclick={() => (settings = true)}>Connection settings</button>
+        <button
+          class="link"
+          onclick={() => {
+            drawerTab = "device";
+            settings = true;
+          }}>Connection settings</button
+        >
       {/if}
     </div>
 
@@ -109,7 +125,7 @@
     </div>
     <div class="spec" aria-hidden="true">
       ESP32-S3 · 2 × GC9A01 · 240 × 240
-      {#if pixels}<span class="tip">Hover a screen to inspect its pixels</span>{/if}
+      <span class="tip">{pixels ? "Hover a screen to inspect its pixels" : "Click a screen to change its face"}</span>
     </div>
   </section>
 
@@ -118,6 +134,9 @@
     <Telemetry id="gpu" lcd={2} metrics={monitor.last?.gpu} fan={fanRpm(monitor.last, "gpu")} samples={monitor.history} />
   </section>
 
+  {#if picking}
+    <FacePicker id={picking.id} anchor={picking.anchor} onclose={() => (picking = null)} />
+  {/if}
   <Drawer bind:open={settings} bind:tab={drawerTab} />
 </div>
 

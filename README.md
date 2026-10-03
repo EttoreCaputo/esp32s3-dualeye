@@ -49,7 +49,7 @@ Closing the window keeps the app running in the tray, so the screens stay live.
 
 ## Watch faces
 
-Each screen shows one of thirteen faces, chosen independently in Settings → **Display**; any face goes on either screen:
+Each screen shows one of thirteen faces: click a screen in the app's window to pick its face, turn it, or put the same face on the other screen too. Any face goes on either screen:
 
 | Face | Shows |
 |------|-------|
@@ -79,7 +79,7 @@ The timers live on the computer (`timers.json` in DualEye's data folder), so the
 
 ### Music
 
-The **Music** face shows what's playing: the cover over the whole screen, the position on a thin ring round the edge, the title and the artist at the bottom. Paused, the cover dims and a pause sign shows; a track without a cover gets a record instead. With the face on, Settings → **Display** has play, pause and skip buttons, and the voice works too: *"Alexa, metti in pausa la musica"*, *"prossima canzone"*, *"next song"*, *"riprendi"*, *"cosa sta suonando?"*.
+The **Music** face shows what's playing: the cover over the whole screen, the position on a thin ring round the edge, the title and the artist at the bottom. Paused, the cover dims and a pause sign shows; a track without a cover gets a record instead. With the face on, clicking its screen shows play, pause and skip buttons, and the voice works too: *"Alexa, metti in pausa la musica"*, *"prossima canzone"*, *"next song"*, *"riprendi"*, *"cosa sta suonando?"*.
 
 Where it comes from:
 
@@ -101,7 +101,7 @@ In the same tab you can turn each screen by 0°, 90°, 180° or 270° if the boa
 
 ### Claude Code faces
 
-The Claude faces work out of the box: the app counts the tokens in Claude Code's transcripts on this computer (`~/.claude/projects`) and notices when Claude is working. To see your plan's 5-hour and weekly limits too (Pro and Max), press **Connect status line** in Settings → **Display**. It points Claude Code's status line at the app, keeping a backup of your settings (`settings.json.dualeye-backup`) and still printing your previous status line; **Disconnect** puts it back.
+The Claude faces work out of the box: the app counts the tokens in Claude Code's transcripts on this computer (`~/.claude/projects`) and notices when Claude is working. To see your plan's 5-hour and weekly limits too (Pro and Max), press **Connect status line** in Settings → **Claude**. It points Claude Code's status line at the app, keeping a backup of your settings (`settings.json.dualeye-backup`) and still printing your previous status line; **Disconnect** puts it back.
 
 ### Claude alerts
 
@@ -113,7 +113,7 @@ The board can also tell you what Claude Code is up to, so you can leave it worki
 
 The eyes react (surprised, happy, suspicious), the message shows over the watch face for 10 s and, with voice on and **Answer out loud**, the board says it in Italian or English. An alert waits for a voice conversation to end before it plays.
 
-Press **Connect hooks** in Settings → **Display** → **Claude alerts**. It adds the app to Claude Code's hooks (`UserPromptSubmit`, `Stop` and `Notification`) in `~/.claude/settings.json`, keeping your own hooks and a backup. The hooks run in the background, so Claude never waits on them, and they do nothing while the app is closed. **Try it** plays a sample alert; **Disconnect** removes only DualEye's hooks. Claude Code sessions that were already open may need a restart to pick the hooks up.
+Press **Connect hooks** in Settings → **Claude** → **Claude alerts**. It adds the app to Claude Code's hooks (`UserPromptSubmit`, `Stop` and `Notification`) in `~/.claude/settings.json`, keeping your own hooks and a backup. The hooks run in the background, so Claude never waits on them, and they do nothing while the app is closed. **Try it** plays a sample alert; **Disconnect** removes only DualEye's hooks. Claude Code sessions that were already open may need a restart to pick the hooks up.
 
 ## Voice assistant
 
@@ -123,9 +123,9 @@ Say **"Alexa"** to the board, then a command in Italian or English: *"metti la f
 
 In the app, open Settings → **Voice**:
 
-1. Turn on **Transcribe what the board hears**.
-2. Under **This computer** the app says what it found (processor, memory, GPU) and which models suit it; **Use …** picks them and downloads what's missing (about 3 GB for the default pair, once).
-3. Under **Voices**, install the program that speaks the answers (once), and download a voice for each language (the defaults are ticked). **Piper** is light and quick (about 100 MB); **Kokoro** sounds warmer and livelier, but takes about a second for each sentence instead of a fifth, and its voices share one 354 MB model. You can pick one engine for Italian and the other for English.
+1. Turn on **Voice assistant**.
+2. Under **Models** the app says which models suit this computer; **Use …** picks them and downloads what's missing (about 3 GB for the default pair, once). Each model has its own list: **Hearing** (speech to text), **Understanding** (the language model) and a **Voice** for each language, with a **Download** or **Install** button when something is still missing.
+3. For each voice, install the program that speaks it (once) and download it. **Piper** is light and quick (about 100 MB); **Kokoro** sounds warmer and livelier, but takes about a second for each sentence instead of a fifth, and its voices share one 354 MB model. You can pick one engine for Italian and the other for English.
 4. Say "Alexa", wait for the cyan eyes, and talk.
 
 ### Talking to it
@@ -141,6 +141,7 @@ After the wake word the screens turn into two animated eyes (the app's mirror sh
 
 They close and the watch faces come back when the conversation ends. While nobody is talking they also come out on their own every minute or two for a few seconds (a wink, a yawn, a look around, a dizzy spin...); turn off **Let the eyes play now and then while idle** in the Voice tab (firmware 1.0.2) to keep the faces still. Turn off **Show animated eyes while talking** in the Voice tab (firmware 1.0.1) for a ring round the faces instead, in the same colours: cyan with an arc that follows your voice, amber turning, green with the speaker's level, red.
 
+- **Personality.** Pick how it talks under **Personality**: cute (the default), playful, calm, sassy, a formal butler, minimal, or describe one of your own. It changes only the words, never what it does.
 - **Follow-ups.** After an answer the board keeps listening for 4 s, so *"e anche a destra"* or *"a bit more"* works straight away; the last exchanges are remembered for 3 minutes. Turn it off with **Keep listening after an answer**.
 - **Interrupting.** Say "Alexa" while the board talks: it stops and listens.
 - **Opening apps.** *"Alexa, apri Spotify"*, *"avvia la calcolatrice"*, *"open Safari"*, *"launch Visual Studio Code"*: the app installed on the computer whose name is closest to what was said opens (Whisper's spellings and Italian names like *calcolatrice* or *impostazioni* work too). Only installed apps can be opened: the Applications folders on macOS, the Start menu on Windows, the `.desktop` entries on Linux.
@@ -165,7 +166,7 @@ The language model stays loaded while voice is on: about 3 GB of memory for `qwe
 
 ### Cloud models
 
-A computer too slow for the local models can have an online service run them instead. [Groq](https://console.groq.com) does all three for free, within daily limits: paste an API key from [console.groq.com/keys](https://console.groq.com/keys) under **Cloud services** in the Voice tab (or set `GROQ_API_KEY`), then pick its models next to the local ones. Cloud and local mix freely: Groq's Whisper with a local voice, for example.
+A computer too slow for the local models can have an online service run them instead. [Groq](https://console.groq.com) does all three for free, within daily limits: paste an API key from [console.groq.com/keys](https://console.groq.com/keys) under **Models** → **Online services** in the Voice tab (or set `GROQ_API_KEY`), then pick its models next to the local ones. Cloud and local mix freely: Groq's Whisper with a local voice, for example.
 
 | What | Groq models | Free plan, roughly |
 |------|-------------|--------------------|

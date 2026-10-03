@@ -8,7 +8,7 @@
   import type { Rotations, Screen } from "./firmware";
   import type { BoardState, VoiceState } from "./monitor.svelte";
 
-  let { cpu, gpu, board, size, cpuGlow, gpuGlow, pixels = false, rotation = { cpu: 0, gpu: 0 }, voice = "idle", eyes = true }: {
+  let { cpu, gpu, board, size, cpuGlow, gpuGlow, pixels = false, rotation = { cpu: 0, gpu: 0 }, voice = "idle", eyes = true, onpick, picking = null }: {
     cpu: Screen;
     gpu: Screen;
     /** How the board has turned each screen: shown as a badge, the mirror stays upright to stay readable. */
@@ -22,7 +22,23 @@
     voice?: VoiceState;
     /** The board draws eyes over the whole screens instead of the ring (ui_eyes.c). */
     eyes?: boolean;
+    /** A screen was clicked, to pick its face: where it is on the page. */
+    onpick?: (id: "cpu" | "gpu", rect: DOMRect) => void;
+    /** The screen whose faces are open. */
+    picking?: "cpu" | "gpu" | null;
   } = $props();
+
+  // In Pixels mode the pointer inspects instead.
+  const pickable = $derived(!!onpick && !pixels);
+  function pick(id: "cpu" | "gpu", e: Event) {
+    if (pickable) onpick?.(id, (e.currentTarget as HTMLElement).getBoundingClientRect());
+  }
+  function pickKey(id: "cpu" | "gpu", e: KeyboardEvent) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      pick(id, e);
+    }
+  }
 
   let tiltX = $state(0);
   let tiltY = $state(0);
@@ -84,10 +100,25 @@
   <div class="board">
     <div class="module">
       <div class="bezel">
-        <div class="well" class:inspect={pixels} role="presentation" onpointermove={(e) => inspect("cpu", e)} onpointerleave={() => (loupe = null)}>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <div
+          class="well"
+          class:inspect={pixels}
+          class:pickable
+          class:picking={picking === "cpu"}
+          role={pickable ? "button" : "presentation"}
+          tabindex={pickable ? 0 : undefined}
+          aria-label={pickable ? "Left screen: change its face" : undefined}
+          title={pickable ? "Change this screen's face" : undefined}
+          onclick={(e) => pick("cpu", e)}
+          onkeydown={(e) => pickKey("cpu", e)}
+          onpointermove={(e) => inspect("cpu", e)}
+          onpointerleave={() => (loupe = null)}
+        >
           <Eye id="cpu" screen={cpu} {board} size={lcd} />
           {#if lit && eyes}<VoiceEyes eye={0} size={lcd} {voice} />{:else if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
           <div class="glass"></div>
+          {#if pickable}<div class="ring" aria-hidden="true"><span>Change face</span></div>{/if}
           {#if pixels && loupe?.id === "cpu"}
             <div class="loupe" style:left="{loupe.x}px" style:top="{loupe.y}px" style:--l="{LOUPE}px">
               <div class="lens" style:transform="translate({LOUPE / 2 - loupe.x * ZOOM}px, {LOUPE / 2 - loupe.y * ZOOM}px)">
@@ -144,10 +175,25 @@
 
     <div class="module">
       <div class="bezel">
-        <div class="well" class:inspect={pixels} role="presentation" onpointermove={(e) => inspect("gpu", e)} onpointerleave={() => (loupe = null)}>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <div
+          class="well"
+          class:inspect={pixels}
+          class:pickable
+          class:picking={picking === "gpu"}
+          role={pickable ? "button" : "presentation"}
+          tabindex={pickable ? 0 : undefined}
+          aria-label={pickable ? "Right screen: change its face" : undefined}
+          title={pickable ? "Change this screen's face" : undefined}
+          onclick={(e) => pick("gpu", e)}
+          onkeydown={(e) => pickKey("gpu", e)}
+          onpointermove={(e) => inspect("gpu", e)}
+          onpointerleave={() => (loupe = null)}
+        >
           <Eye id="gpu" screen={gpu} {board} size={lcd} />
           {#if lit && eyes}<VoiceEyes eye={1} size={lcd} {voice} />{:else if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
           <div class="glass"></div>
+          {#if pickable}<div class="ring" aria-hidden="true"><span>Change face</span></div>{/if}
           {#if pixels && loupe?.id === "gpu"}
             <div class="loupe" style:left="{loupe.x}px" style:top="{loupe.y}px" style:--l="{LOUPE}px">
               <div class="lens" style:transform="translate({LOUPE / 2 - loupe.x * ZOOM}px, {LOUPE / 2 - loupe.y * ZOOM}px)">
@@ -255,6 +301,59 @@
 
   .well.inspect {
     cursor: none;
+  }
+  .well.pickable {
+    cursor: pointer;
+    outline: none;
+  }
+  /* What a click does: a ring round the screen and a label on it. */
+  .ring {
+    position: absolute;
+    inset: calc(var(--d) * -0.035);
+    z-index: 4;
+    border-radius: 50%;
+    pointer-events: none;
+    box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.5);
+    opacity: 0;
+    scale: 0.98;
+    transition:
+      opacity 200ms,
+      scale 200ms;
+    display: grid;
+    align-items: end;
+    justify-items: center;
+  }
+  .ring span {
+    margin-bottom: calc(var(--d) * 0.13);
+    padding: 4px 9px;
+    border-radius: 999px;
+    background: rgba(10, 11, 13, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: var(--text);
+    font: 550 10.5px/1 var(--sans);
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    line-height: 1;
+    translate: 0 4px;
+    transition: translate 200ms;
+  }
+  .well.pickable:hover .ring,
+  .well.pickable:focus-visible .ring,
+  .well.picking .ring {
+    opacity: 1;
+    scale: 1;
+  }
+  .well.pickable:hover .ring span,
+  .well.pickable:focus-visible .ring span {
+    translate: 0 0;
+  }
+  .well.picking .ring {
+    box-shadow:
+      0 0 0 2px rgba(255, 255, 255, 0.85),
+      0 0 24px rgba(255, 255, 255, 0.18);
+  }
+  .well.picking .ring span {
+    opacity: 0;
   }
   .loupe {
     position: absolute;

@@ -169,7 +169,11 @@ export type VoiceSettings = {
   /** Understand with a local language model (else fixed phrases). */
   llm: boolean;
   llm_model: string;
+  /** How the language model talks: a preset id, or `custom` with `personality_custom`. */
+  personality: Personality;
+  personality_custom: string;
 };
+export type Personality = "cute" | "playful" | "calm" | "sassy" | "butler" | "minimal" | "custom";
 export type ModelInfo = {
   id: string;
   kind: "whisper" | "voice" | "llm";
@@ -841,6 +845,8 @@ const previewVoice: VoiceInfo = {
     voices: { it: "it_IT-paola-medium", en: "en_GB-alba-medium" },
     llm: true,
     llm_model: "qwen3-4b-2507",
+    personality: "cute",
+    personality_custom: "",
   },
   server: "/opt/homebrew/bin/whisper-server",
   models: [
