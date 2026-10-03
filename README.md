@@ -163,15 +163,27 @@ The app picks the models from the hardware it finds:
 
 The language model stays loaded while voice is on: about 3 GB of memory for `qwen3-4b-2507`, 1.5 GB for `qwen3.5-2b`.
 
+### Cloud models
+
+A computer too slow for the local models can have an online service run them instead. [Groq](https://console.groq.com) does all three for free, within daily limits: paste an API key from [console.groq.com/keys](https://console.groq.com/keys) under **Cloud services** in the Voice tab (or set `GROQ_API_KEY`), then pick its models next to the local ones. Cloud and local mix freely: Groq's Whisper with a local voice, for example.
+
+| What | Groq models | Free plan, roughly |
+|------|-------------|--------------------|
+| Speech | `groq:whisper-large-v3-turbo`, `groq:whisper-large-v3` | 2,000 commands a day |
+| Language model | `groq:openai/gpt-oss-20b`, `groq:openai/gpt-oss-120b`, `groq:qwen/qwen3.8-27b`, `groq:llama-3.3-70b-versatile` | about 5 commands a minute (8K tokens a minute) |
+| Voice | `groq:hannah`, `diana`, `autumn`, `troy`, `austin`, `daniel` (Orpheus, English only) | 100 sentences a day |
+
+When the language model hits its limit, the fixed phrases answer instead. The key is kept in `keys.json` in DualEye's data folder, readable by you only.
+
 ### Privacy
 
-Nothing you say leaves your computer. There is no account, no cloud service and no telemetry.
+Unless you pick a [cloud model](#cloud-models), nothing you say leaves your computer. There is no account and no telemetry.
 
 - **The board** only listens for the wake word on its own; before it, nothing is sent. Muting the mic stops even that.
 - **Audio** goes over USB to the app, is kept in memory until it is transcribed, then dropped. It is written to disk only if you turn on **Keep recordings** (for debugging).
 - **Transcripts and answers** are shown in the Voice tab (the last 50) and forgotten when the app quits.
-- **Speech recognition, the language model and the voice** run as local programs reachable from this computer only (`127.0.0.1`).
-- **The network** is used only to download what you ask for: models from Hugging Face and Kokoro's from GitHub (checked against a SHA-256), Piper and Kokoro from PyPI, and Python the first time the app flashes the board.
+- **Speech recognition, the language model and the voice** run as local programs reachable from this computer only (`127.0.0.1`). A cloud model gets what it works on instead: the recording for speech, the transcript, the board's state and the conversation's last few exchanges for the language model, the answer for the voice.
+- **The network** is used only to reach the cloud models you pick and to download what you ask for: models from Hugging Face and Kokoro's from GitHub (checked against a SHA-256), Piper and Kokoro from PyPI, and Python the first time the app flashes the board.
 
 ### Troubleshooting
 
@@ -266,6 +278,8 @@ dualeye models download kokoro-if_sara           # its Italian voice: the model 
 dualeye --stt --tts                              # spoken answers, fixed phrases
 dualeye models download qwen3-4b-2507            # the language model, 2.5 GB
 dualeye --stt --tts --llm                        # ...understood by the language model
+dualeye cloud key groq                           # save a Groq API key (pasted on stdin)
+dualeye --stt groq:whisper-large-v3-turbo --tts --llm groq:openai/gpt-oss-20b   # ...or let Groq run the models
 dualeye ask "metti rings a sinistra"             # type a command instead of saying it
 dualeye eval                                     # the eval set on a simulated board
 dualeye say "Ciao!"                              # speak through the running app or dualeye --tts
@@ -280,7 +294,7 @@ dualeye call set_wake_word --word hiesp          # "Hi ESP" instead of "Alexa"
 dualeye call set_mic --muted true
 ```
 
-`--stt` takes a model from `dualeye models` or a ggml file, `--stt-language it|en` skips language detection, `--voice-dump` keeps each utterance as a WAV file, `--llm` takes a model or a GGUF file, `--llm-gpu-layers 0` keeps it on the CPU, `--tts-voice ID` picks another voice for its language, `--no-follow-up` turns off listening after an answer, and `--no-follow-pointer` keeps the eyes face from following the mouse.
+`--stt` takes a model from `dualeye models` or a ggml file, and `--stt`, `--llm` and `--tts-voice` a cloud model too (`dualeye cloud` lists them), `--stt-language it|en` skips language detection, `--voice-dump` keeps each utterance as a WAV file, `--llm` takes a model or a GGUF file, `--llm-gpu-layers 0` keeps it on the CPU, `--tts-voice ID` picks another voice for its language, `--no-follow-up` turns off listening after an answer, and `--no-follow-pointer` keeps the eyes face from following the mouse.
 
 ### What each OS provides
 
@@ -427,6 +441,8 @@ esptool --chip esp32s3 --port /dev/ttyACM0 write-flash 0x0 build/merged-binary.b
 The board runs Espressif's [ESP-SR](https://github.com/espressif/esp-sr) on core 1 (echo cancellation and voice activity on the mic and the speaker loopback, then WakeNet), with the UI on core 0; its models sit in the `model` partition ([partitions.csv](partitions.csv)). After the wake word it streams what it hears over USB until you stop talking; [whisper.cpp](https://github.com/ggml-org/whisper.cpp) transcribes it, a small language model in llama.cpp's `llama-server` calls the board's tools (the ones MCP offers, plus the computer's sensors and the time) and writes a one-sentence answer, and [Piper](https://github.com/OHF-Voice/piper1-gpl) or [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) speaks it a sentence at a time.
 
 The whisper-server and llama-server the app ships use Metal on Apple silicon and the processor elsewhere. To use an NVIDIA card, install CUDA builds of llama.cpp (and whisper.cpp) and point the app at them with `DUALEYE_LLAMA_SERVER` (and `DUALEYE_WHISPER_SERVER`). If the board wakes itself while it talks, build the firmware without barge-in (`CONFIG_DUALEYE_VOICE_BARGE_IN`).
+
+Cloud models live in [`cloud`](host/dualeye-core/src/cloud/mod.rs): each service is a `Provider` (its URL, API, key variable and models), and `Stt`, `Llm` and `Tts` send a `provider:model` to it instead of starting a local server. Another service that speaks OpenAI's API (OpenAI itself, OpenRouter, Together, Mistral...) is one more entry in `PROVIDERS`; one with an API of its own is another `Api` and a module like [`cloud/openai.rs`](host/dualeye-core/src/cloud/openai.rs).
 
 `dualeye eval` runs about 50 Italian and English commands ([eval/commands.json](host/dualeye-core/eval/commands.json)) against a simulated board and checks where the board ends up; `--set holdout` runs other phrasings, `--rules` the fixed phrases. On an M1 Pro:
 

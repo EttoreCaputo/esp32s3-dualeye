@@ -5,8 +5,8 @@
 //! puts the frames back together, filling any it lost with silence so the
 //! timing stays right, and the bridge's voice thread takes each finished
 //! [`Utterance`]: it keeps a WAV copy when asked, transcribes it with
-//! [`Stt`] when there's speech, acts on the words with the local language
-//! model ([`Agent`]), or the rules of [`intents`] without one or when it
+//! [`Stt`] when there's speech, acts on the words with the language model
+//! ([`Agent`]), or the rules of [`intents`] without one or when it
 //! fails, and answers with [`Tts`] through the board's speaker
 //! ([`Speaker`]), or puts the eyes back to idle. When something fails, or
 //! Whisper heard no words, the board shows `error` (a red ring and a short

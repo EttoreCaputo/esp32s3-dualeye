@@ -1,5 +1,6 @@
 //! Speech-to-text with a [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-//! `whisper-server` sidecar on `127.0.0.1`.
+//! `whisper-server` sidecar on `127.0.0.1`, or a provider's Whisper
+//! ([`crate::cloud`]), which answers the same way.
 //!
 //! [`Stt`] starts the server in the background with the model loaded, so the
 //! first utterance doesn't wait for it, restarts it if it dies, and stops it
@@ -15,7 +16,7 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::cloud::{self, CloudError};
 use crate::sidecar::{self, Process};
 use crate::snapshot::Face;
 use crate::voice;
@@ -67,13 +69,41 @@ impl FromStr for SttLanguage {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SttConfig {
-    /// The `whisper-server` binary.
-    pub server: PathBuf,
-    /// A ggml Whisper model (multilingual, e.g. `ggml-small.bin`).
-    pub model: PathBuf,
+    pub engine: SttEngine,
     pub language: SttLanguage,
+}
+
+impl SttEngine {
+    /// The local model's file.
+    pub fn model_path(&self) -> Option<&Path> {
+        match self {
+            SttEngine::Local { model, .. } => Some(model),
+            SttEngine::Cloud(_) => None,
+        }
+    }
+
+    /// What it is, for a log: the model's path, or the cloud model's id.
+    pub fn label(&self) -> String {
+        match self {
+            SttEngine::Local { model, .. } => model.display().to_string(),
+            SttEngine::Cloud(client) => client.model.id(),
+        }
+    }
+}
+
+/// What transcribes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SttEngine {
+    Local {
+        /// The `whisper-server` binary.
+        server: PathBuf,
+        /// A ggml Whisper model (multilingual, e.g. `ggml-small.bin`).
+        model: PathBuf,
+    },
+    /// A provider's Whisper, with its key.
+    Cloud(cloud::Client),
 }
 
 /// Where Whisper models are kept: `models/` in DualEye's data folder.
@@ -105,6 +135,7 @@ pub enum SttError {
     Io(io::Error),
     /// The server answered something unexpected.
     Invalid(String),
+    Cloud(CloudError),
 }
 
 impl fmt::Display for SttError {
@@ -113,6 +144,7 @@ impl fmt::Display for SttError {
             SttError::Server(why) => write!(f, "whisper-server: {why}"),
             SttError::Io(e) => write!(f, "whisper-server: {e}"),
             SttError::Invalid(why) => write!(f, "whisper-server: {why}"),
+            SttError::Cloud(e) => e.fmt(f),
         }
     }
 }
@@ -146,9 +178,13 @@ impl Stt {
         self.server.lock().unwrap().take();
     }
 
-    /// Start the server now (it takes a few seconds to load the model).
+    /// Start the server now (it takes a few seconds to load the model); for
+    /// a cloud model, check its key.
     pub fn warm_up(&self) -> Result<(), SttError> {
-        self.addr().map(|_| ())
+        match &self.config.engine {
+            SttEngine::Local { .. } => self.addr().map(|_| ()),
+            SttEngine::Cloud(client) => client.check().map_err(SttError::Cloud),
+        }
     }
 
     /// Transcribe 16 kHz mono samples.
@@ -170,6 +206,10 @@ impl Stt {
 
     fn request(&self, wav: &[u8], lang: &str) -> Result<Value, SttError> {
         let prompt = vocabulary_prompt(lang);
+        if let SttEngine::Cloud(client) = &self.config.engine {
+            let lang = (lang != "auto").then_some(lang);
+            return client.transcribe(wav, lang, &prompt).map_err(SttError::Cloud);
+        }
         let fields = [("language", lang), ("response_format", "verbose_json"), ("temperature", "0"), ("prompt", &prompt)];
         let (content_type, body) = multipart(wav, &fields)?;
         // A server that died since the last request gets one restart.
@@ -195,7 +235,8 @@ impl Stt {
             }
             *server = None;
         }
-        let s = start(&self.config)?;
+        let SttEngine::Local { server: program, model } = &self.config.engine else { return Err(SttError::Server("a cloud model has no server".into())) };
+        let s = start(program, model)?;
         let addr = s.addr;
         *server = Some(s);
         Ok(addr)
@@ -208,12 +249,12 @@ impl fmt::Debug for Stt {
     }
 }
 
-fn start(config: &SttConfig) -> Result<Process, SttError> {
-    if !config.model.is_file() {
-        return Err(SttError::Server(format!("no model at {}", config.model.display())));
+fn start(server: &Path, model: &Path) -> Result<Process, SttError> {
+    if !model.is_file() {
+        return Err(SttError::Server(format!("no model at {}", model.display())));
     }
-    let mut cmd = Command::new(&config.server);
-    cmd.arg("--model").arg(&config.model).args(["--language", "auto"]);
+    let mut cmd = Command::new(server);
+    cmd.arg("--model").arg(model).args(["--language", "auto"]);
     // Its log goes next to the models, for when it won't start. The pid file
     // lets the next host stop one a killed host left running.
     let dir = models_dir();
@@ -222,7 +263,7 @@ fn start(config: &SttConfig) -> Result<Process, SttError> {
 }
 
 /// A multipart form with the fields and the WAV as `file`.
-fn multipart(wav: &[u8], fields: &[(&str, &str)]) -> io::Result<(String, Vec<u8>)> {
+pub(crate) fn multipart(wav: &[u8], fields: &[(&str, &str)]) -> io::Result<(String, Vec<u8>)> {
     let boundary = "dualeye-7b3f9c2e";
     let mut body = Vec::with_capacity(wav.len() + 1024);
     for (name, value) in fields {
@@ -266,14 +307,15 @@ fn parse_reply(reply: &Value) -> Result<Transcript, SttError> {
     })
 }
 
-/// whisper-server names the language (`italian`); the code (`it`) is shorter.
+/// whisper-server names the language (`italian`, a provider maybe
+/// `Italian`); the code (`it`) is shorter.
 fn language_code(name: &str) -> String {
-    match name {
-        "italian" => "it",
-        "english" => "en",
-        other => other,
+    let name = name.to_lowercase();
+    match name.as_str() {
+        "italian" => "it".to_string(),
+        "english" => "en".to_string(),
+        _ => name,
     }
-    .to_string()
 }
 
 #[cfg(test)]

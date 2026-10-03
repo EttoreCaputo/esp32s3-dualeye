@@ -21,6 +21,8 @@
 //!   dualeye --stt --tts           # voice commands with spoken replies
 //!   dualeye models download qwen3-4b-2507        # a language model, for `dualeye --llm`
 //!   dualeye --stt --tts --llm     # ...understood by a local language model (llama-server)
+//!   dualeye cloud key groq        # save a Groq API key (read from stdin), for cloud models
+//!   dualeye --stt groq:whisper-large-v3-turbo --llm groq:openai/gpt-oss-20b   # ...run by Groq instead
 //!   dualeye ask "metti rings a sinistra"         # type a command to the language model
 //!   dualeye eval                  # run the voice commands' eval set against the language model
 //!   dualeye say "Ciao!"           # speak through a running bridge's speaker
@@ -36,12 +38,13 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
 use dualeye_core::claude::{hooks, statusline};
+use dualeye_core::cloud::{self, CloudRef, Provider};
 use dualeye_core::hardware::{self, Hardware};
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::tts::{self, Tts, TtsConfig};
-use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage};
+use dualeye_core::stt::{self, Stt, SttConfig, SttEngine, SttLanguage};
 use dualeye_core::eval::{self, EvalSet, Responder};
-use dualeye_core::llm::{self, Llm, LlmConfig};
+use dualeye_core::llm::{self, Llm, LlmConfig, LocalLlm};
 use dualeye_core::timers::{self, Timers};
 use dualeye_core::voice::{self, VoiceConfig};
 use dualeye_core::{
@@ -110,8 +113,8 @@ struct Args {
     #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "")]
     voice_dump: Option<std::path::PathBuf>,
     /// Transcribe what the board hears with whisper.cpp (`whisper-server` on
-    /// the PATH): a model from `dualeye models` (default: small), or a ggml
-    /// model file
+    /// the PATH): a model from `dualeye models` (default: small), a ggml
+    /// model file, or a cloud model (`groq:whisper-large-v3-turbo`)
     #[arg(long, value_name = "MODEL|FILE", num_args = 0..=1, default_missing_value = "small")]
     stt: Option<String>,
     /// Language to transcribe in: auto (Italian or English), it or en
@@ -123,7 +126,8 @@ struct Args {
     #[arg(long)]
     tts: bool,
     /// A voice from `dualeye models` for its language, instead of the
-    /// default one (repeat for Italian and English)
+    /// default one (repeat for Italian and English); a cloud one like
+    /// `groq:hannah` too
     #[arg(long, value_name = "VOICE", requires = "tts")]
     tts_voice: Vec<String>,
     /// After a spoken answer, don't listen for a few seconds more without
@@ -137,8 +141,9 @@ struct Args {
 #[derive(clap::Args, Clone)]
 struct LlmArgs {
     /// Understand voice commands with a local language model (llama.cpp's
-    /// `llama-server` on the PATH): a model from `dualeye models`, or a GGUF
-    /// file. Without it, a few fixed phrases are understood
+    /// `llama-server` on the PATH): a model from `dualeye models`, a GGUF
+    /// file, or a cloud model (`groq:openai/gpt-oss-20b`). Without it, a few
+    /// fixed phrases are understood
     #[arg(long, value_name = "MODEL|FILE", num_args = 0..=1, default_missing_value = models::DEFAULT_LLM)]
     llm: Option<String>,
     /// Layers of the language model on the GPU; 0 runs it on the CPU
@@ -186,6 +191,11 @@ enum Command {
     Models {
         #[command(subcommand)]
         action: Option<ModelsAction>,
+    },
+    /// List the online services and whether each has an API key, or set one
+    Cloud {
+        #[command(subcommand)]
+        action: Option<CloudAction>,
     },
     /// Show whether Piper (text-to-speech, for `--tts`) is installed, or install it
     Piper {
@@ -286,6 +296,20 @@ enum EngineAction {
 }
 
 #[derive(Subcommand)]
+enum CloudAction {
+    /// Save a provider's API key in DualEye's data folder, read from stdin
+    /// so it stays out of the shell's history (its environment variable,
+    /// like GROQ_API_KEY, wins over it)
+    Key {
+        /// groq
+        provider: String,
+        /// Forget the saved key instead
+        #[arg(long)]
+        forget: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ModelsAction {
     /// Download a model and check its SHA-256
     Download { id: String },
@@ -299,6 +323,7 @@ fn main() -> ExitCode {
         Some(Command::Tools { port, json }) => return tools(port, json),
         Some(Command::Call { port, json, tool, args }) => return call(port, json, &tool, &args),
         Some(Command::Models { action }) => return models_command(action),
+        Some(Command::Cloud { action }) => return cloud_command(action),
         Some(Command::Piper { action }) => return engine_command(tts::Engine::Piper, action),
         Some(Command::Kokoro { action }) => return engine_command(tts::Engine::Kokoro, action),
         Some(Command::Ask { text, language, port, llm }) => return ask(&text, language.as_deref(), port, &llm),
@@ -519,8 +544,11 @@ fn main() -> ExitCode {
 
 /// `--llm qwen3-4b-2507` (a model from `dualeye models`) or `--llm path/to/model.gguf`.
 fn llm_config(args: &LlmArgs) -> Result<LlmConfig, String> {
-    let server = llm::find_server().ok_or("llama-server not found: install llama.cpp (brew install llama.cpp)")?;
     let model = args.llm.as_deref().unwrap_or(models::DEFAULT_LLM);
+    if cloud::is_cloud_id(model) {
+        return cloud::Client::new(model, Kind::Llm).map(LlmConfig::Cloud);
+    }
+    let server = llm::find_server().ok_or("llama-server not found: install llama.cpp (brew install llama.cpp)")?;
     let path = match Model::by_id(model) {
         Some(m) if m.kind == Kind::Llm && m.is_installed() => m.path().ok_or("no data folder for the models")?,
         Some(m) if m.kind == Kind::Llm => return Err(format!("the {model} model isn't downloaded: dualeye models download {model}")),
@@ -530,7 +558,7 @@ fn llm_config(args: &LlmArgs) -> Result<LlmConfig, String> {
             return Err(format!("{model}: not a language model ({}) or a GGUF file", ids.join(", ")));
         }
     };
-    Ok(LlmConfig { server, model: path, gpu_layers: args.llm_gpu_layers })
+    Ok(LlmConfig::Local(LocalLlm { server, model: path, gpu_layers: args.llm_gpu_layers }))
 }
 
 fn agent(args: &LlmArgs) -> Result<Arc<Agent>, String> {
@@ -711,7 +739,7 @@ fn ask(text: &str, language: Option<&str>, port: Option<String>, args: &LlmArgs)
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("loading {}", agent.llm().config().model.display());
+    eprintln!("loading {}", agent.llm().config().label());
     if let Err(e) = agent.llm().warm_up() {
         eprintln!("{e}");
         return ExitCode::FAILURE;
@@ -760,7 +788,7 @@ fn eval(args: &LlmArgs, rules: bool, set: &str, language: Option<&str>, verbose:
         }
     };
     if let Some(agent) = &agent {
-        eprintln!("loading {}", agent.llm().config().model.display());
+        eprintln!("loading {}", agent.llm().config().label());
         if let Err(e) = agent.llm().warm_up() {
             eprintln!("{e}");
             return ExitCode::FAILURE;
@@ -829,6 +857,9 @@ fn eval(args: &LlmArgs, rules: bool, set: &str, language: Option<&str>, verbose:
 
 /// `--stt small` (a model from `dualeye models`) or `--stt path/to/ggml-model.bin`.
 fn stt_config(model: &str, language: SttLanguage) -> Result<SttConfig, String> {
+    if cloud::is_cloud_id(model) {
+        return Ok(SttConfig { engine: SttEngine::Cloud(cloud::Client::new(model, Kind::Whisper)?), language });
+    }
     let server = stt::find_server().ok_or("whisper-server not found: install whisper.cpp (brew install whisper-cpp)")?;
     let file = std::path::Path::new(model);
     let model = if file.is_file() {
@@ -840,13 +871,17 @@ fn stt_config(model: &str, language: SttLanguage) -> Result<SttConfig, String> {
         }
         known.path().ok_or("no data folder for the models")?
     };
-    Ok(SttConfig { server, model, language })
+    Ok(SttConfig { engine: SttEngine::Local { server, model }, language })
 }
 
 /// `--tts`: the default voices, or those `--tts-voice` names.
 fn tts_config(voices: &[String]) -> Result<TtsConfig, String> {
     let mut config = TtsConfig::with_default_voices();
     for id in voices {
+        if let Some(r) = CloudRef::by_id(id).filter(|r| r.model.kind == Kind::Voice) {
+            config.voices.insert(r.model.language.unwrap_or("en").to_string(), id.clone());
+            continue;
+        }
         let m = Model::by_id(id).filter(|m| m.kind == Kind::Voice).ok_or_else(|| format!("{id}: not a voice; see dualeye models"))?;
         if !m.is_installed() {
             return Err(format!("the {id} voice isn't downloaded: dualeye models download {id}"));
@@ -860,7 +895,63 @@ fn tts_config(voices: &[String]) -> Result<TtsConfig, String> {
     if let Some(e) = config.engines().find(|e| !config.pythons.contains_key(e)) {
         return Err(format!("{} isn't installed: dualeye {} install", e.name(), e.key()));
     }
-    Ok(config)
+    TtsConfig::new(config.pythons, config.voices)
+}
+
+fn cloud_command(action: Option<CloudAction>) -> ExitCode {
+    match action {
+        None => {
+            for p in cloud::PROVIDERS {
+                let key = match p.key_source() {
+                    Some((_, cloud::KeySource::Env)) => format!("key from {}", p.key_env),
+                    Some((_, cloud::KeySource::Saved)) => "key saved".to_string(),
+                    None => format!("no key: get one at {}, then dualeye cloud key {}", p.keys_url, p.id),
+                };
+                println!("{:<8} {}. {key}", p.id, p.note);
+                let models: Vec<String> = p.models.iter().map(|m| format!("{}:{}", p.id, m.id)).collect();
+                println!("         {}", models.join(", "));
+            }
+        }
+        Some(CloudAction::Key { provider, forget }) => {
+            let Some(p) = Provider::by_id(&provider) else {
+                let ids: Vec<&str> = cloud::PROVIDERS.iter().map(|p| p.id).collect();
+                eprintln!("unknown provider {provider:?}: {}", ids.join(", "));
+                return ExitCode::FAILURE;
+            };
+            let key = if forget {
+                None
+            } else {
+                eprintln!("{} API key ({}):", p.name, p.keys_url);
+                let mut line = String::new();
+                if std::io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
+                    eprintln!("no key read");
+                    return ExitCode::FAILURE;
+                }
+                Some(line)
+            };
+            if let Err(e) = cloud::set_api_key(p, key.as_deref()) {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+            if key.is_some() {
+                // Listing the models is free: it only proves the key works.
+                let check = p.models.first().map(|m| cloud::Client::new(&format!("{}:{}", p.id, m.id), m.kind));
+                match check {
+                    Some(Ok(client)) => match client.check() {
+                        Ok(()) => println!("{} key saved and working", p.name),
+                        Err(e) => {
+                            eprintln!("saved, but {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    _ => println!("{} key saved", p.name),
+                }
+            } else {
+                println!("{} key forgotten", p.name);
+            }
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn engine_command(engine: tts::Engine, action: Option<EngineAction>) -> ExitCode {
@@ -920,6 +1011,10 @@ fn models_command(action: Option<ModelsAction>) -> ExitCode {
                     if kind != Kind::Whisper {
                         println!("  {:<22}                     license: {}", "", m.license);
                     }
+                }
+                for r in CloudRef::of_kind(kind) {
+                    let key = if r.provider.api_key().is_some() { "key set" } else { "no key" };
+                    println!("  {:<22} cloud     {key:<9}  {}", r.id(), r.model.note);
                 }
             }
             if let Some(dir) = stt::models_dir() {

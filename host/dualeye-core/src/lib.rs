@@ -17,6 +17,7 @@ pub mod agent;
 pub mod apps;
 pub mod bridge;
 pub mod claude;
+pub mod cloud;
 #[cfg(feature = "download")]
 pub mod download;
 pub mod eval;

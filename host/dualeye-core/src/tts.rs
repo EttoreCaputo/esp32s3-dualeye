@@ -11,6 +11,10 @@
 //! engine: each request names the one for its language. Voices come from
 //! [`crate::models`]; Piper's 22 kHz and Kokoro's 24 kHz are resampled to
 //! the board's 16 kHz.
+//!
+//! A voice can also be a provider's ([`crate::cloud`], `groq:hannah`): no
+//! server here, just a request per sentence (split further where the
+//! provider takes less text at once).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -24,6 +28,7 @@ use std::time::Duration;
 use serde_json::json;
 
 pub use crate::models::Engine;
+use crate::cloud::{self, CloudError};
 use crate::flasher::{self, FlashEvent};
 use crate::models::{self, Kind, Model};
 use crate::sidecar::{self, Process};
@@ -149,8 +154,11 @@ fn python_minor(python: &Path) -> Option<u32> {
 pub struct TtsConfig {
     /// Each engine's virtualenv interpreter: those of `voices` must be here.
     pub pythons: BTreeMap<Engine, PathBuf>,
-    /// Voice by language (`it`, `en`): ids from [`crate::models`], downloaded.
+    /// Voice by language (`it`, `en`): ids from [`crate::models`],
+    /// downloaded, or of [`crate::cloud`] models.
     pub voices: BTreeMap<String, String>,
+    /// The cloud voices among `voices`, by id, with their provider's key.
+    pub clients: BTreeMap<String, cloud::Client>,
 }
 
 impl TtsConfig {
@@ -162,7 +170,18 @@ impl TtsConfig {
             .filter_map(|lang| models::default_voice(lang).map(|v| (lang.to_string(), v.to_string())))
             .filter(|(_, v)| Model::by_id(v).is_some_and(Model::is_installed))
             .collect();
-        Self { pythons: installed_engines(), voices }
+        Self { pythons: installed_engines(), voices, clients: BTreeMap::new() }
+    }
+
+    /// `voices`, local or cloud, with the engines in `pythons`. Fails on a
+    /// cloud voice whose provider has no key.
+    pub fn new(pythons: BTreeMap<Engine, PathBuf>, voices: BTreeMap<String, String>) -> Result<Self, String> {
+        let clients = voices
+            .values()
+            .filter(|v| cloud::is_cloud_id(v))
+            .map(|v| cloud::Client::new(v, Kind::Voice).map(|c| (v.clone(), c)))
+            .collect::<Result<_, _>>()?;
+        Ok(Self { pythons, voices, clients })
     }
 
     /// The engines its voices need.
@@ -183,6 +202,10 @@ pub struct TtsError(String);
 impl TtsError {
     fn new(engine: Engine, why: impl fmt::Display) -> Self {
         TtsError(format!("{}: {why}", engine.key()))
+    }
+
+    fn cloud(e: CloudError) -> Self {
+        TtsError(e.to_string())
     }
 }
 
@@ -227,10 +250,14 @@ impl Tts {
     }
 
     /// Start the servers and load every voice (Piper loads one on its first
-    /// request, which takes most of a second).
+    /// request, which takes most of a second). A cloud voice's key is only
+    /// checked: each sentence spoken counts against a free plan.
     pub fn warm_up(&self) -> Result<(), TtsError> {
         for voice in self.config.voices.values() {
-            self.request("Ok.", voice)?;
+            match self.config.clients.get(voice) {
+                Some(client) => client.check().map_err(TtsError::cloud)?,
+                None => drop(self.request("Ok.", voice)?),
+            }
         }
         Ok(())
     }
@@ -242,6 +269,15 @@ impl Tts {
             return Ok(Vec::new());
         }
         let voice = self.voice_for(language).ok_or_else(|| TtsError::new(Engine::Piper, "no voice downloaded"))?.to_string();
+        if let Some(client) = self.config.clients.get(&voice) {
+            let mut out = Vec::new();
+            for piece in cloud::chunks(text, client.model.model.max_chars) {
+                let wav = client.speak(&piece).map_err(TtsError::cloud)?;
+                let (rate, samples) = parse_wav(&wav).ok_or_else(|| TtsError(format!("{}: not a 16-bit mono WAV", client.model.provider.name)))?;
+                out.extend(resample(&samples, rate, SAMPLE_RATE));
+            }
+            return Ok(out);
+        }
         let wav = self.request(text, &voice)?;
         let engine = Model::by_id(&voice).and_then(Model::engine).unwrap_or(Engine::Piper);
         let (rate, samples) = parse_wav(&wav).ok_or_else(|| TtsError::new(engine, "not a 16-bit mono WAV"))?;

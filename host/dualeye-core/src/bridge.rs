@@ -212,14 +212,14 @@ pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
     if let Some(agent) = agent {
         let sink = on_event.clone();
         let _ = thread::Builder::new().name("dualeye-llm-start".into()).spawn(move || match agent.llm().warm_up() {
-            Ok(()) => sink(BridgeEvent::BoardLog { line: format!("host: language model ready ({})", agent.llm().config().model.display()) }),
+            Ok(()) => sink(BridgeEvent::BoardLog { line: format!("host: language model ready ({})", agent.llm().config().label()) }),
             Err(e) => sink(BridgeEvent::VoiceError { message: e.to_string() }),
         });
     }
     if let Some(stt) = stt {
         let sink = on_event.clone();
         let _ = thread::Builder::new().name("dualeye-stt-start".into()).spawn(move || match stt.warm_up() {
-            Ok(()) => sink(BridgeEvent::BoardLog { line: format!("host: speech-to-text ready ({})", stt.config().model.display()) }),
+            Ok(()) => sink(BridgeEvent::BoardLog { line: format!("host: speech-to-text ready ({})", stt.config().engine.label()) }),
             Err(e) => sink(BridgeEvent::VoiceError { message: e.to_string() }),
         });
     }

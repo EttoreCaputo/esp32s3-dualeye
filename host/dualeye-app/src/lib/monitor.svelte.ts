@@ -179,7 +179,19 @@ export type ModelInfo = {
   bytes: number;
   note: string;
   license: string;
+  /** Downloaded; for a cloud model, its provider has an API key. */
   installed: boolean;
+  /** The online service that runs it (`groq`), for a cloud model: its id is `provider:model`. */
+  provider: string | null;
+};
+export type ProviderInfo = {
+  id: string;
+  name: string;
+  note: string;
+  keys_url: string;
+  key_env: string;
+  /** Where its API key comes from: its environment variable, or saved by the app. */
+  key: "env" | "saved" | null;
 };
 export type SttStatus = "off" | "starting" | "ready" | "error";
 export type TtsEngine = "piper" | "kokoro";
@@ -203,6 +215,7 @@ export type VoiceInfo = {
   llm: SttStatus;
   llm_error: string | null;
   download: [string, number] | null;
+  providers: ProviderInfo[];
   hardware: Hardware;
   recommendation: Recommendation;
 };
@@ -678,6 +691,17 @@ class Monitor {
     return invoke<VoiceInfo>("set_voice", { settings });
   }
 
+  /** Save a provider's API key (null forgets it); fails if the provider refuses it. */
+  async setApiKey(provider: string, key: string | null): Promise<VoiceInfo> {
+    if (this.preview) {
+      const p = previewVoice.providers.find((p) => p.id === provider);
+      if (p && p.key !== "env") p.key = key ? "saved" : null;
+      for (const m of previewVoice.models) if (m.provider === provider) m.installed = !!p?.key;
+      return this.setVoice(previewVoice.settings);
+    }
+    return invoke<VoiceInfo>("set_api_key", { provider, key });
+  }
+
   async downloadModel(id: string) {
     if (this.preview) {
       // Kokoro's voices share their files.
@@ -802,6 +826,10 @@ let previewVolume = 60;
 let previewEyes = true;
 let previewIdleEyes = true;
 
+function previewCloud(kind: ModelInfo["kind"], language: string | null, models: [string, string][]): ModelInfo[] {
+  return models.map(([id, note]) => ({ id: `groq:${id}`, kind, language, engine: null, bytes: 0, note, license: "", installed: false, provider: "groq" }));
+}
+
 const previewVoice: VoiceInfo = {
   settings: {
     enabled: false,
@@ -816,19 +844,31 @@ const previewVoice: VoiceInfo = {
   },
   server: "/opt/homebrew/bin/whisper-server",
   models: [
-    { id: "base", kind: "whisper", language: null, engine: null, bytes: 147_951_465, note: "Fastest, for slow CPUs; often wrong in Italian", license: "MIT", installed: false },
-    { id: "small", kind: "whisper", language: null, engine: null, bytes: 487_601_967, note: "Good balance: about 0.7 s a command on an M1 Pro", license: "MIT", installed: true },
-    { id: "large-v3-turbo-q5_0", kind: "whisper", language: null, engine: null, bytes: 574_041_195, note: "Most accurate; wants a GPU (Apple silicon, NVIDIA)", license: "MIT", installed: false },
-    { id: "it_IT-paola-medium", kind: "voice", language: "it", engine: "piper", bytes: 63_518_137, note: "Italian, woman's voice, natural", license: "Dataset CC0 1.0 (paolapersico1/Voice-Dataset-Italian); fine-tuned from lessac", installed: true },
-    { id: "it_IT-riccardo-x_low", kind: "voice", language: "it", engine: "piper", bytes: 28_134_952, note: "Italian, man's voice, smaller and flatter", license: "Dataset M-AILABS (BSD-style); trained from scratch", installed: false },
-    { id: "en_GB-alba-medium", kind: "voice", language: "en", engine: "piper", bytes: 63_206_182, note: "British English, woman's voice", license: "Dataset CC BY 4.0 (Edinburgh DataShare 10283/3270); fine-tuned from lessac", installed: false },
-    { id: "en_US-ljspeech-medium", kind: "voice", language: "en", engine: "piper", bytes: 63_536_351, note: "American English, woman's voice", license: "Dataset public domain (LJ Speech)", installed: false },
-    { id: "kokoro-if_sara", kind: "voice", language: "it", engine: "kokoro", bytes: 353_746_785, note: "Italian, woman's voice, Kokoro: warmer and livelier, slower to speak", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false },
-    { id: "kokoro-im_nicola", kind: "voice", language: "it", engine: "kokoro", bytes: 353_746_785, note: "Italian, man's voice, Kokoro", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false },
-    { id: "kokoro-af_heart", kind: "voice", language: "en", engine: "kokoro", bytes: 353_746_785, note: "American English, woman's voice, Kokoro: its best", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false },
-    { id: "kokoro-bf_emma", kind: "voice", language: "en", engine: "kokoro", bytes: 353_746_785, note: "British English, woman's voice, Kokoro", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false },
-    { id: "qwen3-4b-2507", kind: "llm", language: null, engine: null, bytes: 2_497_281_120, note: "Most accurate: all 53 test commands right, about 0.9 s each on an M1 Pro", license: "Apache-2.0", installed: true },
-    { id: "qwen3.5-2b", kind: "llm", language: null, engine: null, bytes: 1_280_835_840, note: "Lighter and faster (0.65 s); more mistakes, often answers in English", license: "Apache-2.0", installed: false },
+    { id: "base", kind: "whisper", language: null, engine: null, bytes: 147_951_465, note: "Fastest, for slow CPUs; often wrong in Italian", license: "MIT", installed: false, provider: null },
+    { id: "small", kind: "whisper", language: null, engine: null, bytes: 487_601_967, note: "Good balance: about 0.7 s a command on an M1 Pro", license: "MIT", installed: true, provider: null },
+    { id: "large-v3-turbo-q5_0", kind: "whisper", language: null, engine: null, bytes: 574_041_195, note: "Most accurate; wants a GPU (Apple silicon, NVIDIA)", license: "MIT", installed: false, provider: null },
+    { id: "it_IT-paola-medium", kind: "voice", language: "it", engine: "piper", bytes: 63_518_137, note: "Italian, woman's voice, natural", license: "Dataset CC0 1.0 (paolapersico1/Voice-Dataset-Italian); fine-tuned from lessac", installed: true, provider: null },
+    { id: "it_IT-riccardo-x_low", kind: "voice", language: "it", engine: "piper", bytes: 28_134_952, note: "Italian, man's voice, smaller and flatter", license: "Dataset M-AILABS (BSD-style); trained from scratch", installed: false, provider: null },
+    { id: "en_GB-alba-medium", kind: "voice", language: "en", engine: "piper", bytes: 63_206_182, note: "British English, woman's voice", license: "Dataset CC BY 4.0 (Edinburgh DataShare 10283/3270); fine-tuned from lessac", installed: false, provider: null },
+    { id: "en_US-ljspeech-medium", kind: "voice", language: "en", engine: "piper", bytes: 63_536_351, note: "American English, woman's voice", license: "Dataset public domain (LJ Speech)", installed: false, provider: null },
+    { id: "kokoro-if_sara", kind: "voice", language: "it", engine: "kokoro", bytes: 353_746_785, note: "Italian, woman's voice, Kokoro: warmer and livelier, slower to speak", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false, provider: null },
+    { id: "kokoro-im_nicola", kind: "voice", language: "it", engine: "kokoro", bytes: 353_746_785, note: "Italian, man's voice, Kokoro", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false, provider: null },
+    { id: "kokoro-af_heart", kind: "voice", language: "en", engine: "kokoro", bytes: 353_746_785, note: "American English, woman's voice, Kokoro: its best", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false, provider: null },
+    { id: "kokoro-bf_emma", kind: "voice", language: "en", engine: "kokoro", bytes: 353_746_785, note: "British English, woman's voice, Kokoro", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false, provider: null },
+    { id: "qwen3-4b-2507", kind: "llm", language: null, engine: null, bytes: 2_497_281_120, note: "Most accurate: all 53 test commands right, about 0.9 s each on an M1 Pro", license: "Apache-2.0", installed: true, provider: null },
+    { id: "qwen3.5-2b", kind: "llm", language: null, engine: null, bytes: 1_280_835_840, note: "Lighter and faster (0.65 s); more mistakes, often answers in English", license: "Apache-2.0", installed: false, provider: null },
+    ...previewCloud("whisper", null, [
+      ["whisper-large-v3-turbo", "Whisper large v3 turbo on Groq: fast and accurate, 2,000 a day free"],
+      ["whisper-large-v3", "Whisper large v3 on Groq: a little more accurate, slower"],
+    ]),
+    ...previewCloud("llm", null, [
+      ["openai/gpt-oss-20b", "GPT-OSS 20B on Groq: fast, good at tools; about 5 commands a minute free"],
+      ["llama-3.3-70b-versatile", "Llama 3.3 70B on Groq: good Italian, no thinking"],
+    ]),
+    ...previewCloud("voice", "en", [
+      ["hannah", "Orpheus on Groq, English, woman's voice; 100 sentences a day free"],
+      ["troy", "Orpheus on Groq, English, man's voice"],
+    ]),
   ],
   stt: "off",
   stt_error: null,
@@ -842,6 +882,9 @@ const previewVoice: VoiceInfo = {
   llm: "off",
   llm_error: null,
   download: null,
+  providers: [
+    { id: "groq", name: "Groq", note: "Free with daily limits; what you say is sent to Groq", keys_url: "https://console.groq.com/keys", key_env: "GROQ_API_KEY", key: null },
+  ],
   hardware: { cpu: "Apple M1 Pro", cores: 8, memory_mb: 16_384, gpu: { kind: "apple" } },
   recommendation: { whisper: "small", llm: "qwen3-4b-2507", speed: "fast", why: "Apple silicon with enough memory runs the recommended models on its GPU." },
 };

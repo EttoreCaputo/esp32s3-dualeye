@@ -33,6 +33,7 @@
     type TimerInfo,
     type TimerKind,
     type TtsEngine,
+    type ModelInfo,
     type VoiceInfo,
     type VoiceSettings,
   } from "./monitor.svelte";
@@ -309,6 +310,27 @@
       if (id && voice && !voice.models.find((m) => m.id === id)?.installed) await download(id);
     }
   }
+
+  /** API keys being typed, by provider. */
+  let keyDrafts = $state<Record<string, string>>({});
+  let keyError = $state("");
+  let savingKey = $state<string | null>(null);
+
+  async function saveKey(provider: string, key: string | null) {
+    keyError = "";
+    savingKey = provider;
+    try {
+      voice = await monitor.setApiKey(provider, key);
+      keyDrafts[provider] = "";
+    } catch (e) {
+      keyError = String(e);
+      voice = await monitor.voiceInfo();
+    } finally {
+      savingKey = null;
+    }
+  }
+
+  const providerName = (v: VoiceInfo, id: string | null) => v.providers.find((p) => p.id === id)?.name ?? id ?? "";
 
   async function removeModel(id: string) {
     voiceError = "";
@@ -1010,7 +1032,7 @@
         <p class="hint">
           After its wake word, <b>“Alexa”</b>, the board sends what you say to this computer. With voice on, whisper.cpp transcribes it
           here, in Italian or English, a small language model works out what to do (“metti la faccia rings a sinistra”, “what's the
-          temperature?”) and Piper or Kokoro answers through the board's speaker. Nothing leaves the computer.
+          temperature?”) and Piper or Kokoro answers through the board's speaker. Nothing leaves the computer unless you pick a cloud model below.
         </p>
         {#if !voice}
           <p class="empty">Loading…</p>
@@ -1120,6 +1142,57 @@
             </label>
           </section>
 
+          {#snippet cloudSide(v: VoiceInfo, m: ModelInfo)}
+            <span class="pmeta" title={m.installed ? "Runs online: what you say is sent there" : "Add its API key under Cloud services"}
+              >{providerName(v, m.provider)} · {m.installed ? "cloud" : "no key"}</span
+            >
+          {/snippet}
+
+          <section>
+            <h3>Cloud services</h3>
+            <p class="hint">
+              Instead of this computer, an online service can transcribe, understand and speak: no downloads, but what you say leaves this
+              computer, and free plans have daily limits. Its models show up below next to the local ones.
+            </p>
+            <div class="ports">
+              {#each voice.providers as p (p.id)}
+                <div class="port model provider" class:checked={!!p.key}>
+                  <span class="mtext">
+                    <span class="pname">{p.name}</span>
+                    <span class="mnote">{p.note}</span>
+                  </span>
+                  <span class="mside">
+                    {#if p.key === "env"}
+                      <span class="pmeta" title="Its environment variable wins over a saved key">Key from {p.key_env}</span>
+                    {:else if p.key === "saved"}
+                      <span class="pmeta">Key saved</span>
+                      <button class="btn small" disabled={savingKey === p.id} onclick={() => saveKey(p.id, null)}>Forget</button>
+                    {/if}
+                  </span>
+                  {#if p.key !== "env"}
+                    <div class="tform keyform">
+                      <input
+                        class="ttext"
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder={p.key ? "Replace the API key" : `API key, from ${p.keys_url}`}
+                        aria-label={`${p.name} API key`}
+                        bind:value={keyDrafts[p.id]}
+                      />
+                      <button class="btn small primary" disabled={!keyDrafts[p.id]?.trim() || savingKey === p.id} onclick={() => saveKey(p.id, keyDrafts[p.id])}
+                        >{savingKey === p.id ? "Checking…" : "Save"}</button
+                      >
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+            {#if keyError}
+              <p class="hint error">{keyError}</p>
+            {/if}
+          </section>
+
           <section>
             <h3>Speech model</h3>
             {#if !voice.server}
@@ -1143,13 +1216,17 @@
                     </span>
                   </label>
                   <span class="mside">
-                    <span class="pmeta">{mb(m.bytes)}</span>
-                    {#if downloading}
-                      <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
-                    {:else if m.installed}
-                      <button class="btn small" disabled={voice.settings.model === m.id && voice.settings.enabled} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
+                    {#if m.provider}
+                      {@render cloudSide(voice, m)}
                     {:else}
-                      <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
+                      <span class="pmeta">{mb(m.bytes)}</span>
+                      {#if downloading}
+                        <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
+                      {:else if m.installed}
+                        <button class="btn small" disabled={voice.settings.model === m.id && voice.settings.enabled} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
+                      {:else}
+                        <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
+                      {/if}
                     {/if}
                   </span>
                   {#if downloading}
@@ -1181,7 +1258,7 @@
                 {@const downloading = voice.download?.[0] === m.id}
                 {@const chosen = voice.settings.llm_model === m.id}
                 <div class="port model" class:checked={chosen}>
-                  <label class="mpick" title={"License: " + m.license}>
+                  <label class="mpick" title={m.license ? "License: " + m.license : undefined}>
                     <input type="radio" name="llm" checked={chosen} onchange={() => setVoice({ llm_model: m.id })} />
                     <span class="radio"></span>
                     <span class="mtext">
@@ -1190,13 +1267,17 @@
                     </span>
                   </label>
                   <span class="mside">
-                    <span class="pmeta">{mb(m.bytes)}</span>
-                    {#if downloading}
-                      <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
-                    {:else if m.installed}
-                      <button class="btn small" disabled={chosen && voice.settings.enabled && voice.settings.llm} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
+                    {#if m.provider}
+                      {@render cloudSide(voice, m)}
                     {:else}
-                      <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
+                      <span class="pmeta">{mb(m.bytes)}</span>
+                      {#if downloading}
+                        <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
+                      {:else if m.installed}
+                        <button class="btn small" disabled={chosen && voice.settings.enabled && voice.settings.llm} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
+                      {:else}
+                        <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
+                      {/if}
                     {/if}
                   </span>
                   {#if downloading}
@@ -1248,7 +1329,7 @@
                   {@const downloading = voice.download?.[0] === m.id}
                   {@const chosen = voice.settings.voices[lang] === m.id}
                   <div class="port model" class:checked={chosen}>
-                    <label class="mpick" title={m.license}>
+                    <label class="mpick" title={m.license || undefined}>
                       <input
                         type="radio"
                         name={"voice-" + lang}
@@ -1262,17 +1343,21 @@
                       </span>
                     </label>
                     <span class="mside">
-                      <span class="pmeta" title={m.engine === "kokoro" ? "One download for every Kokoro voice" : undefined}>{mb(m.bytes)}{m.engine === "kokoro" ? ", shared" : ""}</span>
-                      {#if downloading}
-                        <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
-                      {:else if m.installed}
-                        <button
-                          class="btn small"
-                          title={m.engine === "kokoro" ? "Delete the files: every Kokoro voice shares them" : "Delete the files"}
-                          onclick={() => removeModel(m.id)}>Delete</button
-                        >
+                      {#if m.provider}
+                        {@render cloudSide(voice, m)}
                       {:else}
-                        <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
+                        <span class="pmeta" title={m.engine === "kokoro" ? "One download for every Kokoro voice" : undefined}>{mb(m.bytes)}{m.engine === "kokoro" ? ", shared" : ""}</span>
+                        {#if downloading}
+                          <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(voice.download?.[1] ?? 0)}% · Stop</button>
+                        {:else if m.installed}
+                          <button
+                            class="btn small"
+                            title={m.engine === "kokoro" ? "Delete the files: every Kokoro voice shares them" : "Delete the files"}
+                            onclick={() => removeModel(m.id)}>Delete</button
+                          >
+                        {:else}
+                          <button class="btn small primary" disabled={!!voice.download} onclick={() => download(m.id)}>Download</button>
+                        {/if}
                       {/if}
                     </span>
                     {#if downloading}
@@ -1704,6 +1789,17 @@
   .tform .ttext {
     flex: 1;
     min-width: 120px;
+  }
+  .keyform {
+    grid-column: 1 / -1;
+    margin-top: 8px;
+  }
+  /* Not the hidden radio of `.port input`. */
+  .port .keyform .ttext {
+    position: static;
+    opacity: 1;
+    pointer-events: auto;
+    font-family: var(--mono);
   }
   .tunit {
     font: 500 11.5px/1 var(--sans);

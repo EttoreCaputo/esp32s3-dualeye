@@ -117,9 +117,10 @@ impl Agent {
 
     /// Have the server read the system prompt and the tools, which every
     /// request starts with, so the first command doesn't wait for that
-    /// (about 1,400 tokens: seconds on a CPU). Once per agent.
+    /// (about 1,400 tokens: seconds on a CPU). Once per agent; not for a
+    /// cloud model, where it would only spend the free tokens.
     pub fn prime(&self, toolbox: &dyn Toolbox) -> Result<(), LlmError> {
-        if self.primed.load(Ordering::Relaxed) {
+        if self.primed.load(Ordering::Relaxed) || !self.llm.config().is_local() {
             return Ok(());
         }
         let tools = toolbox.tools();

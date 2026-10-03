@@ -55,11 +55,12 @@ use dualeye_core::claude::hooks::{self, HooksStatus};
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
 use dualeye_core::hardware::{self, Hardware, Recommendation};
-use dualeye_core::llm::{self, Llm, LlmConfig};
+use dualeye_core::cloud::{self, CloudRef, KeySource, Provider};
+use dualeye_core::llm::{self, Llm, LlmConfig, LocalLlm};
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::music::{self, Music};
 use dualeye_core::pointer;
-use dualeye_core::stt::{self, Stt, SttConfig, SttLanguage, Transcript};
+use dualeye_core::stt::{self, Stt, SttConfig, SttEngine, SttLanguage, Transcript};
 use dualeye_core::tts::{self, Engine, Tts, TtsConfig};
 use dualeye_core::timers::{self, Pomodoro, ShowOn, TimerInfo, Timers};
 use dualeye_core::voice::{self, Spoken, VoiceConfig};
@@ -100,7 +101,7 @@ struct Settings {
 struct VoiceSettings {
     /// Transcribe what the board hears. Off until the person turns it on.
     enabled: bool,
-    /// A `models::MODELS` id.
+    /// A `models::MODELS` id, or a cloud model's (`groq:whisper-large-v3`).
     model: String,
     language: SttLanguage,
     /// Keep each utterance as a WAV file (`voice/` in DualEye's data folder).
@@ -109,12 +110,12 @@ struct VoiceSettings {
     speak: bool,
     /// After a spoken answer, listen a few seconds more without the wake word.
     follow_up: bool,
-    /// Voice by language (`it`, `en`): `models::MODELS` ids.
+    /// Voice by language (`it`, `en`): `models::MODELS` ids, or cloud ones.
     voices: BTreeMap<String, String>,
     /// Understand commands with a local language model; without it, a few
     /// fixed phrases.
     llm: bool,
-    /// A `models::MODELS` id of kind `llm`.
+    /// A `models::MODELS` id of kind `llm`, or a cloud model's.
     llm_model: String,
 }
 
@@ -323,7 +324,7 @@ fn apply_voice(state: &AppState) {
     };
     let stt = sidecar(
         settings.enabled.then(|| stt_config(&settings)),
-        current_stt.filter(|s| settings.enabled && stt_config(&settings).is_ok_and(|c| s.config().model == c.model && s.config().language == c.language)),
+        current_stt.filter(|s| settings.enabled && stt_config(&settings).is_ok_and(|c| s.config() == &c)),
         &state.stt_state,
         |config| Arc::new(Stt::new(config)),
         |stt: &Arc<Stt>| stt.warm_up().map_err(|e| e.to_string()),
@@ -383,13 +384,13 @@ fn tts_config(settings: &VoiceSettings) -> Result<TtsConfig, String> {
     let voices: BTreeMap<String, String> = settings
         .voices
         .iter()
-        .filter(|(_, id)| Model::by_id(id).is_some_and(|m| m.kind == Kind::Voice && m.is_installed()))
+        .filter(|(_, id)| Model::by_id(id).is_some_and(|m| m.kind == Kind::Voice && m.is_installed()) || CloudRef::by_id(id).is_some_and(|r| r.model.kind == Kind::Voice))
         .map(|(l, id)| (l.clone(), id.clone()))
         .collect();
     if voices.is_empty() {
         return Err("no voice downloaded yet".into());
     }
-    let config = TtsConfig { pythons: tts::installed_engines(), voices };
+    let config = TtsConfig::new(tts::installed_engines(), voices)?;
     if let Some(e) = config.engines().find(|e| !config.pythons.contains_key(e)) {
         return Err(format!("{} isn't installed yet", e.name()));
     }
@@ -397,26 +398,32 @@ fn tts_config(settings: &VoiceSettings) -> Result<TtsConfig, String> {
 }
 
 fn llm_config(settings: &VoiceSettings) -> Result<LlmConfig, String> {
+    if cloud::is_cloud_id(&settings.llm_model) {
+        return cloud::Client::new(&settings.llm_model, Kind::Llm).map(LlmConfig::Cloud);
+    }
     let server = llm::find_server().ok_or("llama-server not found: reinstall the app, or install llama.cpp (brew install llama.cpp on macOS)")?;
     let model = Model::by_id(&settings.llm_model).filter(|m| m.kind == Kind::Llm).ok_or_else(|| format!("unknown language model {}", settings.llm_model))?;
     if !model.is_installed() {
         return Err(format!("the {} model isn't downloaded yet", model.id));
     }
-    Ok(LlmConfig { server, model: model.path().ok_or("no data folder for the models")?, gpu_layers: None })
+    Ok(LlmConfig::Local(LocalLlm { server, model: model.path().ok_or("no data folder for the models")?, gpu_layers: None }))
 }
 
 fn stt_config(settings: &VoiceSettings) -> Result<SttConfig, String> {
+    if cloud::is_cloud_id(&settings.model) {
+        return Ok(SttConfig { engine: SttEngine::Cloud(cloud::Client::new(&settings.model, Kind::Whisper)?), language: settings.language });
+    }
     let server = stt::find_server().ok_or("whisper-server not found: reinstall the app, or install whisper.cpp (brew install whisper-cpp on macOS)")?;
     let model = Model::by_id(&settings.model).ok_or_else(|| format!("unknown model {}", settings.model))?;
     if !model.is_installed() {
         return Err(format!("the {} model isn't downloaded yet", model.id));
     }
-    Ok(SttConfig { server, model: model.path().ok_or("no data folder for the models")?, language: settings.language })
+    Ok(SttConfig { engine: SttEngine::Local { server, model: model.path().ok_or("no data folder for the models")? }, language: settings.language })
 }
 
 #[derive(Serialize)]
 struct ModelInfo {
-    id: &'static str,
+    id: String,
     kind: Kind,
     language: Option<&'static str>,
     /// What speaks a voice.
@@ -424,7 +431,21 @@ struct ModelInfo {
     bytes: u64,
     note: &'static str,
     license: &'static str,
+    /// Downloaded; for a cloud model, its provider has a key.
     installed: bool,
+    /// The [`cloud::Provider`] that runs it, for a cloud model.
+    provider: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct ProviderInfo {
+    id: &'static str,
+    name: &'static str,
+    note: &'static str,
+    keys_url: &'static str,
+    key_env: &'static str,
+    /// Where its key comes from, if it has one.
+    key: Option<KeySource>,
 }
 
 #[derive(Serialize)]
@@ -449,6 +470,8 @@ struct VoiceInfo {
     llm: &'static str,
     llm_error: Option<String>,
     download: Option<(String, f32)>,
+    /// The online services that can run the models instead.
+    providers: Vec<ProviderInfo>,
     hardware: Hardware,
     recommendation: Recommendation,
 }
@@ -464,7 +487,8 @@ fn voice_info_of(state: &AppState) -> VoiceInfo {
         server: stt::find_server().map(|p| p.display().to_string()),
         models: models::MODELS
             .iter()
-            .map(|m| ModelInfo { id: m.id, kind: m.kind, language: m.language, engine: m.engine(), bytes: m.bytes(), note: m.note, license: m.license, installed: m.is_installed() })
+            .map(|m| ModelInfo { id: m.id.into(), kind: m.kind, language: m.language, engine: m.engine(), bytes: m.bytes(), note: m.note, license: m.license, installed: m.is_installed(), provider: None })
+            .chain(cloud_models())
             .collect(),
         stt,
         stt_error,
@@ -478,9 +502,44 @@ fn voice_info_of(state: &AppState) -> VoiceInfo {
         llm,
         llm_error,
         download: state.download.lock().unwrap().clone(),
+        providers: cloud::PROVIDERS
+            .iter()
+            .map(|p| ProviderInfo { id: p.id, name: p.name, note: p.note, keys_url: p.keys_url, key_env: p.key_env, key: p.key_source().map(|(_, s)| s) })
+            .collect(),
         hardware,
         recommendation,
     }
+}
+
+/// The cloud models, after the local ones of each kind.
+fn cloud_models() -> Vec<ModelInfo> {
+    [Kind::Whisper, Kind::Llm, Kind::Voice]
+        .into_iter()
+        .flat_map(CloudRef::of_kind)
+        .map(|r| {
+            let installed = r.provider.api_key().is_some();
+            ModelInfo { id: r.id(), kind: r.model.kind, language: r.model.language, engine: None, bytes: 0, note: r.model.note, license: "", installed, provider: Some(r.provider.id) }
+        })
+        .collect()
+}
+
+/// Save a provider's API key (`None` or empty forgets it), check it, and
+/// start what was waiting for it.
+#[tauri::command]
+async fn set_api_key(app: AppHandle, provider: String, key: Option<String>) -> Result<VoiceInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let p = Provider::by_id(&provider).ok_or_else(|| format!("unknown provider {provider}"))?;
+        cloud::set_api_key(p, key.as_deref()).map_err(|e| e.to_string())?;
+        // Listing its models is free: it only proves the key works.
+        if let Some(m) = p.models.first().filter(|_| key.as_deref().is_some_and(|k| !k.trim().is_empty())) {
+            cloud::Client::new(&format!("{}:{}", p.id, m.id), m.kind)?.check().map_err(|e| e.to_string())?;
+        }
+        apply_voice(&state);
+        Ok(voice_info_of(&state))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -531,7 +590,7 @@ fn delete_model(state: State<AppState>, id: String) -> Result<VoiceInfo, String>
     {
         // Stop the server that has it open first.
         let mut voice = state.voice.lock().unwrap();
-        if voice.stt.as_ref().is_some_and(|s| Some(s.config().model.clone()) == model.path()) {
+        if voice.stt.as_ref().is_some_and(|s| s.config().engine.model_path() == model.path().as_deref()) {
             voice.stt = None;
         }
         // Removing a Kokoro voice removes the files all of them share.
@@ -539,7 +598,7 @@ fn delete_model(state: State<AppState>, id: String) -> Result<VoiceInfo, String>
         if voice.tts.as_ref().is_some_and(|t| t.config().voices.values().any(|v| gone.contains(&v.as_str()))) {
             voice.tts = None;
         }
-        if let Some(agent) = voice.agent.take_if(|a| Some(a.llm().config().model.clone()) == model.path()) {
+        if let Some(agent) = voice.agent.take_if(|a| a.llm().config().model_path() == model.path().as_deref()) {
             agent.llm().shutdown();
         }
     }
@@ -1216,7 +1275,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

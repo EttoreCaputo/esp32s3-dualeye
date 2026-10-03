@@ -1,5 +1,5 @@
-//! A local language model with a [llama.cpp](https://github.com/ggml-org/llama.cpp)
-//! `llama-server` sidecar on `127.0.0.1`.
+//! The language model: a local one with a [llama.cpp](https://github.com/ggml-org/llama.cpp)
+//! `llama-server` sidecar on `127.0.0.1`, or a provider's ([`crate::cloud`]).
 //!
 //! [`Llm`] starts the server in the background with the model loaded,
 //! restarts it if it dies and stops it when dropped ([`crate::sidecar`]).
@@ -7,6 +7,7 @@
 //! template's own tool calling (`--jinja`) and thinking turned off: a voice
 //! command wants an answer, not a train of thought. The server keeps the
 //! prompt's common prefix (system prompt and tools) cached between requests.
+//! A cloud model gets the same requests, less what only llama.cpp reads.
 
 use std::fmt;
 use std::io;
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::cloud::{self, CloudError};
 use crate::sidecar::{self, Process};
 use crate::stt::models_dir;
 
@@ -30,7 +32,37 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const CONTEXT: u32 = 8192;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LlmConfig {
+pub enum LlmConfig {
+    Local(LocalLlm),
+    /// A provider's model, with its key.
+    Cloud(cloud::Client),
+}
+
+impl LlmConfig {
+    /// It runs on this computer, and caches the prompt's prefix.
+    pub fn is_local(&self) -> bool {
+        matches!(self, LlmConfig::Local(_))
+    }
+
+    /// The local model's file.
+    pub fn model_path(&self) -> Option<&std::path::Path> {
+        match self {
+            LlmConfig::Local(local) => Some(&local.model),
+            LlmConfig::Cloud(_) => None,
+        }
+    }
+
+    /// What it is, for a log: the model's path, or the cloud model's id.
+    pub fn label(&self) -> String {
+        match self {
+            LlmConfig::Local(local) => local.model.display().to_string(),
+            LlmConfig::Cloud(client) => client.model.id(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalLlm {
     /// The `llama-server` binary.
     pub server: PathBuf,
     /// A GGUF model with a chat template that does tool calls.
@@ -91,6 +123,7 @@ pub enum LlmError {
     Io(io::Error),
     /// The server answered something unexpected.
     Invalid(String),
+    Cloud(CloudError),
 }
 
 impl fmt::Display for LlmError {
@@ -98,6 +131,7 @@ impl fmt::Display for LlmError {
         match self {
             LlmError::Server(why) | LlmError::Invalid(why) => write!(f, "llama-server: {why}"),
             LlmError::Io(e) => write!(f, "llama-server: {e}"),
+            LlmError::Cloud(e) => e.fmt(f),
         }
     }
 }
@@ -137,14 +171,21 @@ impl Llm {
         self.server.lock().unwrap().take();
     }
 
-    /// Start the server now (loading the model takes seconds).
+    /// Start the server now (loading the model takes seconds); for a cloud
+    /// model, check its key.
     pub fn warm_up(&self) -> Result<(), LlmError> {
-        self.addr().map(|_| ())
+        match &self.config {
+            LlmConfig::Local(_) => self.addr().map(|_| ()),
+            LlmConfig::Cloud(client) => client.check().map_err(LlmError::Cloud),
+        }
     }
 
     /// One `/v1/chat/completions` request (`messages`, `tools` and the
     /// sampling settings in `request`): the first choice's message.
     pub fn chat(&self, request: &Value) -> Result<Value, LlmError> {
+        if let LlmConfig::Cloud(client) = &self.config {
+            return client.chat(request).map_err(LlmError::Cloud);
+        }
         let body = serde_json::to_vec(request).map_err(|e| LlmError::Invalid(e.to_string()))?;
         // A server that died since the last request gets one restart.
         for attempt in 0..2 {
@@ -174,14 +215,15 @@ impl Llm {
             }
             *server = None;
         }
-        let s = start(&self.config)?;
+        let LlmConfig::Local(config) = &self.config else { return Err(LlmError::Server("a cloud model has no server".into())) };
+        let s = start(config)?;
         let addr = s.addr;
         *server = Some(s);
         Ok(addr)
     }
 }
 
-fn start(config: &LlmConfig) -> Result<Process, LlmError> {
+fn start(config: &LocalLlm) -> Result<Process, LlmError> {
     if !config.model.is_file() {
         return Err(LlmError::Server(format!("no model at {}", config.model.display())));
     }
