@@ -443,6 +443,12 @@ fn session(
                     *target.lock().unwrap() =
                         Some(AlertTarget { link: Arc::downgrade(&link), speaker: speaker.clone(), voice_state: voice_state.clone() });
                     report(BoardFirmware::Version { version: hello.firmware, idf: hello.idf, protocol: hello.protocol });
+                    // The voice asks the board for its tools while it streams the
+                    // audio, too busy to answer in time, and falls back on the
+                    // list kept on disk: keep it this firmware's.
+                    if let Ok(tools) = link.list_tools(TOOL_TIMEOUT) {
+                        crate::link::save_tools_cache(&tools);
+                    }
                     if config.adopt_board_settings {
                         // Otherwise `pushed` stays empty and ours are pushed below.
                         adopt_settings(&link, config, &mut pushed, on_event)?;

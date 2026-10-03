@@ -46,7 +46,7 @@ Receivers ignore channels they don't know.
 | Method | Params | Result |
 |--------|--------|--------|
 | `hello` | `{"protocol":2,"client":"dualeye-cli/0.1.0"}` | The board's [identity](#handshake) |
-| `tools/list` | none | `{"tools":[Tool, …]}` |
+| `tools/list` | none, or `{"cursor":"4"}` | `{"tools":[Tool, …]}`, plus `"nextCursor":"4"` when more tools follow (firmware 1.3.1): a frame holds only so many, so ask again with that `cursor` until there is no `nextCursor`. Earlier firmware sends them all at once, and stopped answering once they no longer fit in a frame |
 | `tools/call` | `{"name":"set_face","arguments":{…}}` | `CallToolResult` |
 | `voice/state` | `{"state":"thinking"}`: `idle` · `listening` · `thinking` · `speaking` · `error` | `{}`; what the voice overlay shows. For the host's voice pipeline (M4 on), so not a tool. `error` (firmware 1.0) is a red ring with a short two-note sound, for 1.5 s: the host failed, or heard no words. A state other than `idle` goes back to `idle` by itself after 30 s (`listening`: 13 s, `error`: 1.5 s). `-32602` without voice |
 | `voice/listen` | none, or `{"follow_up":true}` | `{}`; stream an utterance as if the wake word had been heard (push-to-talk, `trigger` `host`). With `follow_up` (firmware 1.0; the host asks right after a spoken answer) the `trigger` is `follow_up`, it gives up after 4 s without speech, and speech in its first 0.8 s (the echo of the answer) doesn't count. `-32602` without voice or muted |
@@ -62,7 +62,7 @@ Receivers ignore channels they don't know.
 | `eyes/gaze` | `{"x":-0.42,"y":0.1}` | Sent as a notification (no `id`, no answer), up to 20 times a second while the host's mouse pointer moves (firmware 1.3): where it is, -1 (left, top) to 1 (right, bottom) of all the host's screens. The `eyes` face looks there for 6 s after the last one, then about on its own; once the host has sent any, a minute without one (nor a conversation) and the eyes doze off, until the next |
 | `debug/audio` | `{"cmd":"tone 440 500"}` | `{}`; the M0 audio self-test, its output comes as `log` lines (see `main/audio_selftest.h`) |
 
-`Tool` and `CallToolResult` have the shapes of the [MCP](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) `tools/list` and `tools/call` results (`name`, `description`, `inputSchema`; `content`, `structuredContent`, `isError`), so the host's MCP server (M2) can pass them through unchanged. A tool that runs but fails (bad argument, out of range) returns `isError: true` with the reason as text. Protocol errors use the standard JSON-RPC codes: `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params (including an unknown tool).
+`Tool` and `CallToolResult` have the shapes of the [MCP](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) `tools/list` and `tools/call` results (`name`, `description`, `inputSchema`; `content`, `structuredContent`, `isError`), so the host's MCP server (M2) can pass them through unchanged. A tool that runs but fails (bad argument, out of range) returns `isError: true` with the reason as text. Protocol errors use the standard JSON-RPC codes: `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params (including an unknown tool), `-32603` a reply too long for a frame (firmware 1.3.1; earlier ones sent nothing).
 
 Notifications from the board:
 

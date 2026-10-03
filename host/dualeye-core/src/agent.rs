@@ -31,11 +31,12 @@ const MAX_TOKENS: u32 = 256;
 
 /// The system prompt: who the model plays (`{personality}`, from
 /// [`personality_prompt`]), the tools it has (`{tools}`, from the tools
-/// themselves) and how to behave. Every request starts with it, so it is
+/// themselves), the watch faces (`{faces}`, from [`faces_section`]) and how
+/// to behave. Every request starts with it, so it is
 /// cached: keep it the same from one request to the next.
 const SYSTEM_PROMPT: &str = "\
-You are DualEye, a small companion that lives on the user's desk: a board with two round screens, \
-left and right, a microphone and a speaker, connected to the user's computer. The user talks to you \
+You are DualEye, a small companion that lives on the user's desk: a board with two round displays, \
+the left one and the right one, a microphone and a speaker, connected to the user's computer. The user talks to you \
 by voice. Their words reach you through speech recognition, so they may contain small mistakes: \
 go by what they mean.
 
@@ -44,7 +45,7 @@ Your personality shapes how you talk, never what you do.
 
 Your tools:
 {tools}
-
+{faces}
 How to behave:
 - When the user asks for something one of your tools does, call it, then confirm briefly. \
 Never say something is done unless the tool call worked: a result starting with \"error\" means it failed.
@@ -82,6 +83,37 @@ pub fn personality_prompt(id: &str, custom: &str) -> String {
 /// Characters of a custom personality kept for the prompt.
 pub const MAX_PERSONALITY: usize = 300;
 
+/// The watch faces `set_face` offers, each with what it shows, as the
+/// board describes them in the tool's schema (`face`'s enum, and its
+/// description as "name: what it shows; ..."): a section of the prompt, so
+/// "the music on one display" finds its face. Empty without `set_face`.
+fn faces_section(tools: &[Value]) -> String {
+    let Some(face) = tools
+        .iter()
+        .find(|t| t["function"]["name"] == "set_face")
+        .map(|t| &t["function"]["parameters"]["properties"]["face"])
+    else {
+        return String::new();
+    };
+    let described = face["description"].as_str().unwrap_or_default();
+    let what = |name: &str| described.split("; ").find_map(|d| d.trim().strip_prefix(name)?.strip_prefix(": ").map(str::to_string));
+    let list: Vec<String> = face["enum"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|name| what(name).map_or_else(|| format!("- {name}"), |w| format!("- {name}: {w}")))
+        .collect();
+    if list.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nThe watch faces you can show, with set_face, on the left display, the right one or both \
+(each display shows one face at a time, and any face goes on either display):\n{}\n",
+        list.join("\n")
+    )
+}
+
 /// [`SYSTEM_PROMPT`] with a personality and the tools (OpenAI-style functions).
 fn system_prompt(personality: &str, tools: &[Value]) -> String {
     let list: Vec<String> = tools
@@ -91,7 +123,10 @@ fn system_prompt(personality: &str, tools: &[Value]) -> String {
             format!("- {}: {}", f["name"].as_str().unwrap_or_default(), f["description"].as_str().unwrap_or_default())
         })
         .collect();
-    SYSTEM_PROMPT.replace("{personality}", personality).replace("{tools}", &list.join("\n"))
+    SYSTEM_PROMPT
+        .replace("{personality}", personality)
+        .replace("{tools}", &list.join("\n"))
+        .replace("{faces}", &faces_section(tools))
 }
 
 /// Where the agent's tools come from, and what runs them.
@@ -445,6 +480,22 @@ mod tests {
         assert!(personality_prompt("custom", "  ").contains("cute"));
         let long = "a".repeat(MAX_PERSONALITY + 50);
         assert!(personality_prompt("custom", &long).ends_with(&"a".repeat(MAX_PERSONALITY)));
+    }
+
+    #[test]
+    fn faces_go_in_the_prompt() {
+        let set_face = Tool {
+            name: "set_face".into(),
+            description: "Switch the watch face".into(),
+            input_schema: json!({"type": "object", "properties": {"face": {"type": "string", "enum": ["classic", "music", "eyes"],
+                "description": "classic: temperature, clock, power, load ring and fan; music: what's playing on the computer, with its cover"}}}),
+        };
+        let prompt = system_prompt(&personality_prompt("", ""), &[function(&set_face)]);
+        assert!(prompt.contains("- classic: temperature, clock, power, load ring and fan\n"));
+        assert!(prompt.contains("- music: what's playing on the computer, with its cover\n"));
+        assert!(prompt.contains("- eyes\n") && !prompt.contains("{faces}"));
+        let prompt = system_prompt(&personality_prompt("", ""), &[time_tool()]);
+        assert!(!prompt.contains("watch faces") && !prompt.contains("{faces}"));
     }
 
     #[test]

@@ -455,21 +455,16 @@ impl Toolbox for BoardToolbox<'_> {
         if let Some(tools) = &*tools {
             return tools.clone();
         }
-        let cache = crate::link::tools_cache_file();
         match self.link.list_tools(TOOL_TIMEOUT) {
             Ok(board) => {
-                if let Some(path) = &cache
-                    && let Ok(json) = serde_json::to_vec_pretty(&board)
-                {
-                    let _ = fs::write(path, json);
-                }
+                crate::link::save_tools_cache(&board);
                 tools.insert(voice_tools(board)).clone()
             }
             // The board didn't answer in time (busy with the audio): its
             // tools as last seen, asked for again next time. Without any the
             // model would only have get_time, and call it over and over.
             Err(_) => {
-                let cached = cache.and_then(|p| fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Vec<Tool>>(&b).ok());
+                let cached = crate::link::tools_cache_file().and_then(|p| fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Vec<Tool>>(&b).ok());
                 voice_tools(cached.unwrap_or_default())
             }
         }

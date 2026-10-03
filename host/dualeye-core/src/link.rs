@@ -227,13 +227,27 @@ impl Link {
         self.hello(each)
     }
 
+    /// All the board's tools: a frame holds only so many (4 KB), so the
+    /// board hands them out in pages (firmware 1.3.1), each `timeout` long.
     pub fn list_tools(&self, timeout: Duration) -> Result<Vec<Tool>, CallError> {
         #[derive(Deserialize)]
         struct List {
             tools: Vec<Tool>,
+            #[serde(rename = "nextCursor")]
+            next_cursor: Option<String>,
         }
-        let reply = self.call("tools/list", json!({}), timeout)?;
-        serde_json::from_value::<List>(reply).map(|l| l.tools).map_err(|e| CallError::Invalid(e.to_string()))
+        let mut tools = Vec::new();
+        let mut params = json!({});
+        for _ in 0..MAX_TOOL_PAGES {
+            let reply = self.call("tools/list", params, timeout)?;
+            let page = serde_json::from_value::<List>(reply).map_err(|e| CallError::Invalid(e.to_string()))?;
+            tools.extend(page.tools);
+            match page.next_cursor {
+                Some(cursor) => params = json!({"cursor": cursor}),
+                None => return Ok(tools),
+            }
+        }
+        Err(CallError::Invalid("too many pages of tools".into()))
     }
 
     pub fn call_tool(&self, name: &str, arguments: Value, timeout: Duration) -> Result<ToolResult, CallError> {
@@ -251,9 +265,21 @@ impl Drop for Link {
     }
 }
 
+/// Pages of `tools/list` before giving up on a board that never ends them.
+const MAX_TOOL_PAGES: usize = 16;
+
 /// Where the board's last tool list is kept, for when it doesn't answer.
 pub(crate) fn tools_cache_file() -> Option<std::path::PathBuf> {
     crate::claude::data_dir().map(|d| d.join("board-tools.json"))
+}
+
+/// Keep `tools` as the board's last tool list ([`tools_cache_file`]).
+pub(crate) fn save_tools_cache(tools: &[Tool]) {
+    if let Some(path) = tools_cache_file()
+        && let Ok(json) = serde_json::to_vec_pretty(tools)
+    {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 fn read_loop(mut rx: Box<dyn SerialPort>, shared: &Shared, on_event: &dyn Fn(LinkEvent)) {

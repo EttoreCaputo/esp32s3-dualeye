@@ -1,6 +1,7 @@
 #include "board_tools.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "board_settings.h"
@@ -463,15 +464,34 @@ static const tool_t TOOLS[] = {
 
 #define TOOL_COUNT (sizeof(TOOLS) / sizeof(TOOLS[0]))
 
-cJSON *board_tools_list(void)
+cJSON *board_tools_list(const cJSON *params, size_t budget)
 {
+    // The cursor is the index of the first tool of the page, as a string.
+    size_t first = 0;
+    const cJSON *cursor = cJSON_GetObjectItemCaseSensitive(params, "cursor");
+    if (cJSON_IsString(cursor)) {
+        first = (size_t) strtoul(cursor->valuestring, NULL, 10);
+    }
     cJSON *result = cJSON_CreateObject();
     cJSON *list = cJSON_AddArrayToObject(result, "tools");
-    for (size_t i = 0; i < TOOL_COUNT; i++) {
+    size_t used = 0;
+    for (size_t i = first; i < TOOL_COUNT; i++) {
         cJSON *t = cJSON_CreateObject();
         cJSON_AddStringToObject(t, "name", TOOLS[i].name);
         cJSON_AddStringToObject(t, "description", TOOLS[i].description);
         cJSON_AddItemToObject(t, "inputSchema", cJSON_Parse(TOOLS[i].schema));
+        char *text = cJSON_PrintUnformatted(t);
+        size_t size = text != NULL ? strlen(text) + 1 : budget;
+        cJSON_free(text);
+        // A page holds one tool at least, so a long one still goes.
+        if (i > first && used + size > budget) {
+            cJSON_Delete(t);
+            char next[12];
+            snprintf(next, sizeof(next), "%u", (unsigned) i);
+            cJSON_AddStringToObject(result, "nextCursor", next);
+            break;
+        }
+        used += size;
         cJSON_AddItemToArray(list, t);
     }
     return result;

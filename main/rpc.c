@@ -22,6 +22,7 @@
 #define RPC_INVALID_REQUEST -32600
 #define RPC_METHOD_NOT_FOUND -32601
 #define RPC_INVALID_PARAMS -32602
+#define RPC_INTERNAL_ERROR -32603
 
 static const char *TAG = "rpc";
 
@@ -30,11 +31,13 @@ static void *psram_malloc(size_t size)
     return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
+static cJSON *envelope(const cJSON *id);
+
 static void send_message(cJSON *msg)
 {
     char *text = cJSON_PrintUnformatted(msg);
-    cJSON_Delete(msg);
     if (text == NULL) {
+        cJSON_Delete(msg);
         ESP_LOGE(TAG, "out of memory for a reply");
         return;
     }
@@ -44,6 +47,16 @@ static void send_message(cJSON *msg)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "reply not sent (%u bytes): %s", (unsigned) len, esp_err_to_name(err));
     }
+    // A reply too long for a frame: say so, rather than leave the host waiting.
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(msg, "id");
+    if (err == ESP_ERR_INVALID_SIZE && id != NULL && !cJSON_IsNull(id)) {
+        cJSON *reply = envelope(id);
+        cJSON *e = cJSON_AddObjectToObject(reply, "error");
+        cJSON_AddNumberToObject(e, "code", RPC_INTERNAL_ERROR);
+        cJSON_AddStringToObject(e, "message", "reply too long for a frame");
+        send_message(reply);
+    }
+    cJSON_Delete(msg);
 }
 
 static cJSON *envelope(const cJSON *id)
@@ -150,7 +163,8 @@ void rpc_handle(uint8_t *payload, size_t len)
     if (strcmp(name, "hello") == 0) {
         result = identity();
     } else if (strcmp(name, "tools/list") == 0) {
-        result = board_tools_list();
+        // Room for the envelope and nextCursor around the tools.
+        result = board_tools_list(params, LINK_MAX_PAYLOAD - 128);
     } else if (strcmp(name, "tools/call") == 0) {
         const cJSON *tool = cJSON_GetObjectItemCaseSensitive(params, "name");
         const cJSON *args = cJSON_GetObjectItemCaseSensitive(params, "arguments");

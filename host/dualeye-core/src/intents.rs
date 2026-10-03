@@ -663,7 +663,7 @@ pub fn asks_music(text: &str) -> bool {
 /// suonando": media_control, or the answer from what plays.
 fn music_plan(w: &[String], it: bool, ctx: &Context) -> Option<Plan> {
     // A face: "metti la faccia musica".
-    if has(w, &["faccia", "face", "quadrante"]) {
+    if has(w, &["faccia", "face", "watchface*", "quadrante"]) {
         return None;
     }
     let about = has(w, MUSIC_WORDS);
@@ -900,6 +900,7 @@ mod tests {
         // The timer's pause stays the timer's; a face stays a face.
         assert_eq!(calls("Metti in pausa il timer", "it"), [tool("control_timer", json!({"action": "pause"}))]);
         assert_eq!(calls("Metti la faccia musica a destra", "it"), [tool("set_face", json!({"face": "music", "screen": "right"}))]);
+        assert_eq!(calls("Metti la watchface della musica a destra", "it"), [tool("set_face", json!({"face": "music", "screen": "right"}))]);
         assert_eq!(calls("Show the eyes on both screens", "en"), [tool("set_face", json!({"face": "eyes", "screen": "both"}))]);
         // "Pausa" alone is the music's only while it plays.
         assert!(!understand("Pausa", "it", &Context::default()).understood);

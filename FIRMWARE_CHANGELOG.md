@@ -7,6 +7,10 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.3.1
+
+- **The voice knows every face.** The board's list of what it can do had grown too long to reach the computer, so the voice only knew the first faces: "Alexa, metti la musica sul display destro" now finds the music face, and the eyes, timer, network, disk and battery ones too.
+
 ## 1.3.0
 
 - **Music.** A new face shows what's playing on your computer: its cover over the whole screen, the position on a thin ring round the edge, the title and the artist. Paused, the cover dims and a pause sign shows; a track without a cover gets a record instead. "Alexa, pausa", "next song", "cosa sta suonando?" work too.
