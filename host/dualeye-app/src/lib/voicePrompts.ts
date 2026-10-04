@@ -16,7 +16,7 @@ export type VoicePrompt = {
 
 export const VOICE_PROMPTS: Partial<Record<Personality, VoicePrompt>> = {
   cute: {
-    name: "Micio",
+    name: "Mochi",
     description:
       "Native Italian, standard neutral Italian pronunciation. Young adult female, early 20s, a small, light voice with a naturally high pitch. " +
       "Studio quality. Persona: affectionate desk companion cat. Emotion: warm, cheerful, tender. " +
@@ -56,7 +56,7 @@ export const VOICE_PROMPTS: Partial<Record<Personality, VoicePrompt>> = {
       "D'accordo, ho cambiato il quadrante come volevi. Non ringraziarmi, davvero: mi basta essere apprezzato in silenzio.",
   },
   butler: {
-    name: "Maggiordomo",
+    name: "Ambrogio",
     description:
       "Native Italian, standard neutral Italian pronunciation. Mature male, 50s, a low-mid pitch, rich and resonant. " +
       "Studio quality. Persona: refined household butler. Emotion: composed, courteous, discreet. " +
@@ -66,7 +66,7 @@ export const VOICE_PROMPTS: Partial<Record<Personality, VoicePrompt>> = {
       "Ho predisposto un promemoria per le diciotto e trenta, come da sua richiesta. Desidera che abbassi il volume della musica?",
   },
   minimal: {
-    name: "Essenziale",
+    name: "Punto",
     description:
       "Native Italian, standard neutral Italian pronunciation. Adult female, 30s, a mid pitch, clear and neutral. " +
       "Broadcast quality. Persona: precise onboard assistant. Emotion: calm, confident, efficient. " +

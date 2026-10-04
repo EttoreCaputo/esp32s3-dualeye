@@ -166,12 +166,12 @@
   let customLength = $state<number | null>(null);
 
   const PERSONALITIES: [Personality, string, string][] = [
-    ["cute", "Cute", "Warm, cheerful, a little playful"],
-    ["playful", "Playful", "Jokes, puns, gentle teasing"],
-    ["calm", "Calm", "Soft and reassuring"],
-    ["sassy", "Sassy", "A cat with dry humour"],
-    ["butler", "Butler", "Formal, at your service"],
-    ["minimal", "Minimal", "Just the facts, no chat"],
+    ["cute", "Cute", "Mochi: a sweet and cheerful kitten"],
+    ["playful", "Playful", "Birba: jokes, puns, gentle teasing"],
+    ["calm", "Calm", "Fusa: soft and reassuring"],
+    ["sassy", "Sassy", "Sornione: a cat with dry humour"],
+    ["butler", "Butler", "Ambrogio: formal, at your service"],
+    ["minimal", "Minimal", "Punto: a creature of few words"],
     ["custom", "Your own", "Describe it yourself"],
   ];
   /** `agent::MAX_PERSONALITY`. */
