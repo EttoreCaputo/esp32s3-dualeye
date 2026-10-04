@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -175,20 +176,34 @@ pub struct Stt {
     config: SttConfig,
     /// A local [`SttEngine`] for when a cloud model hits its limits.
     fallback: Option<SttEngine>,
+    /// Keep the local server running, a cloud model's fallback's too.
+    warm: AtomicBool,
     server: Mutex<Option<Process>>,
 }
 
 impl Stt {
     pub fn new(config: SttConfig) -> Self {
-        Self { config, fallback: None, server: Mutex::new(None) }
+        Self { config, fallback: None, warm: AtomicBool::new(false), server: Mutex::new(None) }
     }
 
     /// With `fallback` transcribing when a cloud model hits its limits (see
-    /// [`local_fallback`]). Its server only starts when it's needed.
+    /// [`local_fallback`]). Its server only starts when it's needed, unless
+    /// [`Stt::kept_warm`].
     pub fn with_fallback(mut self, fallback: Option<SttEngine>) -> Self {
         let cloud = matches!(self.config.engine, SttEngine::Cloud(_));
         self.fallback = fallback.filter(|f| cloud && matches!(f, SttEngine::Local { .. }));
         self
+    }
+
+    /// Keep the local server loaded: started by [`Stt::warm_up`] even as a
+    /// cloud model's fallback, and again by [`Stt::rewarm`] if it died.
+    pub fn kept_warm(mut self, on: bool) -> Self {
+        self.warm = AtomicBool::new(on);
+        self
+    }
+
+    pub fn is_kept_warm(&self) -> bool {
+        self.warm.load(Ordering::Relaxed)
     }
 
     pub fn config(&self) -> &SttConfig {
@@ -196,18 +211,31 @@ impl Stt {
     }
 
     /// Stop the server now, even while others still hold this [`Stt`] (an
-    /// utterance being transcribed); the next request would start it again.
+    /// utterance being transcribed); the next request would start it again
+    /// (but not [`keep_warm`](crate::keep_warm)).
     pub fn shutdown(&self) {
+        self.warm.store(false, Ordering::Relaxed);
         self.server.lock().unwrap().take();
     }
 
     /// Start the server now (it takes a few seconds to load the model); for
-    /// a cloud model, check its key.
+    /// a cloud model, check its key, and start its fallback's when
+    /// [`Stt::kept_warm`].
     pub fn warm_up(&self) -> Result<(), SttError> {
         match &self.config.engine {
             SttEngine::Local { .. } => self.addr().map(|_| ()),
-            SttEngine::Cloud(client) => client.check().map_err(SttError::Cloud),
+            SttEngine::Cloud(client) => {
+                // A fallback that won't start is no reason to give up a cloud model that works.
+                let _ = self.rewarm();
+                client.check().map_err(SttError::Cloud)
+            }
         }
+    }
+
+    /// When [`Stt::kept_warm`], start the local server if it isn't running.
+    pub fn rewarm(&self) -> Result<(), SttError> {
+        let local = matches!(self.config.engine, SttEngine::Local { .. }) || self.fallback.is_some();
+        if self.is_kept_warm() && local { self.addr().map(|_| ()) } else { Ok(()) }
     }
 
     /// Transcribe 16 kHz mono samples.

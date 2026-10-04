@@ -15,6 +15,7 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,23 @@ pub(crate) fn find_program(name: &str, env: &str) -> Option<PathBuf> {
         .into_iter()
         .chain(std::env::split_paths(&path).chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from)).map(|dir| dir.join(&file)))
         .find(|p| p.is_file())
+}
+
+/// How often [`keep_warm`] looks at the servers.
+const WARM_CHECK: Duration = Duration::from_secs(30);
+
+/// While `sidecar` is held somewhere, call `rewarm` on it every
+/// [`WARM_CHECK`] on a thread of its own: a server that died is started
+/// again before someone speaks, not when they do.
+pub fn keep_warm<T: Send + Sync + 'static>(sidecar: &Arc<T>, rewarm: impl Fn(&T) + Send + 'static) {
+    let weak: Weak<T> = Arc::downgrade(sidecar);
+    let _ = thread::Builder::new().name("dualeye-keep-warm".into()).spawn(move || {
+        loop {
+            thread::sleep(WARM_CHECK);
+            let Some(sidecar) = weak.upgrade() else { return };
+            rewarm(&sidecar);
+        }
+    });
 }
 
 pub(crate) struct Process {

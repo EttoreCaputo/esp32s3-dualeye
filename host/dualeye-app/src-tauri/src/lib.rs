@@ -67,7 +67,7 @@ use dualeye_core::timers::{self, Pomodoro, ShowOn, TimerInfo, Timers};
 use dualeye_core::voice::{self, Spoken, VoiceConfig};
 use dualeye_core::{
     Agent, Board, BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
-    mcp, media, serial,
+    keep_warm, mcp, media, serial,
 };
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -113,6 +113,9 @@ struct VoiceSettings {
     follow_up: bool,
     /// Pause the music playing on this computer while the board listens.
     pause_music: bool,
+    /// Keep the downloaded models loaded, those standing in for cloud ones
+    /// too, and start again any that stops: the first answer doesn't wait.
+    keep_warm: bool,
     /// Voice by language (`it`, `en`): `models::MODELS` ids, or cloud ones.
     voices: BTreeMap<String, String>,
     /// Understand commands with a local language model; without it, a few
@@ -156,6 +159,7 @@ impl Default for VoiceSettings {
             speak: true,
             follow_up: true,
             pause_music: true,
+            keep_warm: true,
             voices,
             llm: rec.llm.is_some(),
             llm_model: rec.llm.unwrap_or(models::DEFAULT_LLM).into(),
@@ -334,22 +338,28 @@ fn apply_voice(state: &AppState) {
     };
     let stt = sidecar(
         settings.enabled.then(|| stt_config(&settings)),
-        current_stt.filter(|s| settings.enabled && stt_config(&settings).is_ok_and(|c| s.config() == &c)),
+        current_stt.filter(|s| settings.enabled && s.is_kept_warm() == settings.keep_warm && stt_config(&settings).is_ok_and(|c| s.config() == &c)),
         &state.stt_state,
         // A cloud model's limits are answered by a downloaded one.
-        |config| Arc::new(Stt::new(config).with_fallback(stt::local_fallback())),
+        |config| warm(Stt::new(config).with_fallback(stt::local_fallback()).kept_warm(settings.keep_warm), Stt::rewarm),
         |stt: &Arc<Stt>| stt.warm_up().map_err(|e| e.to_string()),
     );
     let wanted_tts = (settings.enabled && settings.speak).then(|| tts_config(&settings));
-    let keep_tts = current_tts.filter(|t| matches!(&wanted_tts, Some(Ok(c)) if t.config() == c));
-    let tts = sidecar(wanted_tts, keep_tts, &state.tts_state, |config| Arc::new(Tts::new(config)), |tts: &Arc<Tts>| tts.warm_up().map_err(|e| e.to_string()));
+    let keep_tts = current_tts.filter(|t| t.is_kept_warm() == settings.keep_warm && matches!(&wanted_tts, Some(Ok(c)) if t.config() == c));
+    let tts = sidecar(
+        wanted_tts,
+        keep_tts,
+        &state.tts_state,
+        |config| warm(Tts::new(config).kept_warm(settings.keep_warm), Tts::rewarm),
+        |tts: &Arc<Tts>| tts.warm_up().map_err(|e| e.to_string()),
+    );
     let wanted_llm = (settings.enabled && settings.llm).then(|| llm_config(&settings));
-    let keep_agent = current_agent.filter(|a| matches!(&wanted_llm, Some(Ok(c)) if a.llm().config() == c));
+    let keep_agent = current_agent.filter(|a| a.llm().is_kept_warm() == settings.keep_warm && matches!(&wanted_llm, Some(Ok(c)) if a.llm().config() == c));
     let agent = sidecar(
         wanted_llm,
         keep_agent,
         &state.llm_state,
-        |config| Arc::new(Agent::new(Arc::new(Llm::new(config).with_fallback(llm::local_fallback())))),
+        |config| Arc::new(Agent::new(warm(Llm::new(config).with_fallback(llm::local_fallback()).kept_warm(settings.keep_warm), Llm::rewarm))),
         |agent: &Arc<Agent>| agent.llm().warm_up().map_err(|e| e.to_string()),
     );
     if let Some(agent) = &agent {
@@ -357,6 +367,14 @@ fn apply_voice(state: &AppState) {
     }
     let dump_dir = settings.keep_recordings.then(voice::default_dump_dir).flatten();
     *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt, tts, agent, follow_up: settings.follow_up, pause_music: settings.pause_music };
+}
+
+/// `sidecar` shared, with its servers started again whenever they stop
+/// while it's [kept warm](Stt::kept_warm).
+fn warm<T: Send + Sync + 'static, E: 'static>(sidecar: T, rewarm: fn(&T) -> Result<(), E>) -> Arc<T> {
+    let sidecar = Arc::new(sidecar);
+    keep_warm(&sidecar, move |s| drop(rewarm(s)));
+    sidecar
 }
 
 /// One sidecar for [`apply_voice`]: off (`wanted` is `None`), not possible

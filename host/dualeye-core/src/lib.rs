@@ -55,6 +55,7 @@ pub use link::{CallError, Hello, Link, LinkEvent, Tool, ToolResult};
 pub use llm::{Llm, LlmConfig};
 pub use sensors::{Collector, Reading};
 pub use serial::PortInfo;
+pub use sidecar::keep_warm;
 pub use stt::{Stt, SttConfig, SttLanguage, Transcript};
 pub use music::{BoardMusic, Music, NowPlaying};
 pub use timers::{BoardTimer, ShowOn, TimerInfo, Timers};

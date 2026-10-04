@@ -902,6 +902,11 @@
               <span class="track"><span class="knob"></span></span>
               <span class="slabel">Pause the music while listening</span>
             </label>
+            <label class="switch" title="Downloaded models stay loaded, also those standing in for cloud ones when they hit their limits: more memory, no wait">
+              <input type="checkbox" checked={v.settings.keep_warm} onchange={(e) => setVoice({ keep_warm: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Keep local models loaded, ready to answer</span>
+            </label>
             <label class="switch" title={wakeSound === null ? "Needs the board connected, with firmware 1.3.3 or newer" : ""}>
               <input type="checkbox" checked={wakeSound ?? true} disabled={wakeSound === null} onchange={(e) => setWakeSound(e.currentTarget.checked)} />
               <span class="track"><span class="knob"></span></span>

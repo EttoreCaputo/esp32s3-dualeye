@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -162,6 +163,8 @@ pub struct Llm {
     config: LlmConfig,
     /// What answers when a cloud model hits its limits.
     fallback: Option<LocalLlm>,
+    /// Keep the local server running, a cloud model's fallback's too.
+    warm: AtomicBool,
     server: Mutex<Option<Process>>,
 }
 
@@ -173,14 +176,26 @@ impl fmt::Debug for Llm {
 
 impl Llm {
     pub fn new(config: LlmConfig) -> Self {
-        Self { config, fallback: None, server: Mutex::new(None) }
+        Self { config, fallback: None, warm: AtomicBool::new(false), server: Mutex::new(None) }
     }
 
     /// With `fallback` answering when a cloud model hits its limits (see
-    /// [`local_fallback`]). Its server only starts when it's needed.
+    /// [`local_fallback`]). Its server only starts when it's needed, unless
+    /// [`Llm::kept_warm`].
     pub fn with_fallback(mut self, fallback: Option<LocalLlm>) -> Self {
         self.fallback = fallback.filter(|_| !self.config.is_local());
         self
+    }
+
+    /// Keep the local server loaded: started by [`Llm::warm_up`] even as a
+    /// cloud model's fallback, and again by [`Llm::rewarm`] if it died.
+    pub fn kept_warm(mut self, on: bool) -> Self {
+        self.warm = AtomicBool::new(on);
+        self
+    }
+
+    pub fn is_kept_warm(&self) -> bool {
+        self.warm.load(Ordering::Relaxed)
     }
 
     pub fn config(&self) -> &LlmConfig {
@@ -188,18 +203,29 @@ impl Llm {
     }
 
     /// Stop the server now, even while others still hold this [`Llm`]; the
-    /// next request would start it again.
+    /// next request would start it again
+    /// (but not [`keep_warm`](crate::keep_warm)).
     pub fn shutdown(&self) {
+        self.warm.store(false, Ordering::Relaxed);
         self.server.lock().unwrap().take();
     }
 
     /// Start the server now (loading the model takes seconds); for a cloud
-    /// model, check its key.
+    /// model, check its key, and start its fallback's when [`Llm::kept_warm`].
     pub fn warm_up(&self) -> Result<(), LlmError> {
         match &self.config {
             LlmConfig::Local(_) => self.addr().map(|_| ()),
-            LlmConfig::Cloud(client) => client.check().map_err(LlmError::Cloud),
+            LlmConfig::Cloud(client) => {
+                // A fallback that won't start is no reason to give up a cloud model that works.
+                let _ = self.rewarm();
+                client.check().map_err(LlmError::Cloud)
+            }
         }
+    }
+
+    /// When [`Llm::kept_warm`], start the local server if it isn't running.
+    pub fn rewarm(&self) -> Result<(), LlmError> {
+        if self.is_kept_warm() && (self.config.is_local() || self.fallback.is_some()) { self.addr().map(|_| ()) } else { Ok(()) }
     }
 
     /// One `/v1/chat/completions` request (`messages`, `tools` and the

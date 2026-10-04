@@ -137,6 +137,10 @@ struct Args {
     /// listens
     #[arg(long)]
     no_pause_music: bool,
+    /// Don't keep the downloaded models loaded: those standing in for cloud
+    /// ones start when they're needed, one that stops when it's next asked
+    #[arg(long)]
+    no_keep_warm: bool,
     #[command(flatten)]
     llm: LlmArgs,
 }
@@ -390,7 +394,7 @@ fn main() -> ExitCode {
 
     let stt = match args.stt.as_deref().map(|m| stt_config(m, args.stt_language)) {
         None => None,
-        Some(Ok(config)) => Some(Arc::new(Stt::new(config).with_fallback(stt::local_fallback()))),
+        Some(Ok(config)) => Some(warm(Stt::new(config).with_fallback(stt::local_fallback()).kept_warm(!args.no_keep_warm), Stt::rewarm)),
         Some(Err(why)) => {
             eprintln!("{why}");
             return ExitCode::FAILURE;
@@ -398,13 +402,13 @@ fn main() -> ExitCode {
     };
     let tts = match args.tts.then(|| tts_config(&args.tts_voice)) {
         None => None,
-        Some(Ok(config)) => Some(Arc::new(Tts::new(config))),
+        Some(Ok(config)) => Some(warm(Tts::new(config).kept_warm(!args.no_keep_warm), Tts::rewarm)),
         Some(Err(why)) => {
             eprintln!("{why}");
             return ExitCode::FAILURE;
         }
     };
-    let agent = match args.llm.llm.is_some().then(|| agent(&args.llm, true)) {
+    let agent = match args.llm.llm.is_some().then(|| agent(&args.llm, true, !args.no_keep_warm)) {
         None => None,
         Some(Ok(agent)) => Some(agent),
         Some(Err(why)) => {
@@ -564,14 +568,23 @@ fn llm_config(args: &LlmArgs) -> Result<LlmConfig, String> {
 
 /// The voice agent; with `fallback`, a cloud model's limits are answered by
 /// a downloaded one (not while evaluating it).
-fn agent(args: &LlmArgs, fallback: bool) -> Result<Arc<Agent>, String> {
-    let llm = Llm::new(llm_config(args)?).with_fallback(fallback.then(llm::local_fallback).flatten());
-    let agent = Agent::new(Arc::new(llm));
+/// With `keep_warm`, its local servers start again whenever they stop ([`Llm::kept_warm`]).
+fn agent(args: &LlmArgs, fallback: bool, keep_warm: bool) -> Result<Arc<Agent>, String> {
+    let llm = Llm::new(llm_config(args)?).with_fallback(fallback.then(llm::local_fallback).flatten()).kept_warm(keep_warm);
+    let agent = Agent::new(warm(llm, Llm::rewarm));
     if let Some(p) = &args.personality {
         let preset = ["cute", "playful", "calm", "sassy", "butler", "minimal"].contains(&p.as_str());
         agent.set_personality(&agent::personality_prompt(if preset { p } else { "custom" }, p));
     }
     Ok(Arc::new(agent))
+}
+
+/// `sidecar` shared, with its servers started again whenever they stop
+/// while it's [kept warm](Stt::kept_warm).
+fn warm<T: Send + Sync + 'static, E: 'static>(sidecar: T, rewarm: fn(&T) -> Result<(), E>) -> Arc<T> {
+    let sidecar = Arc::new(sidecar);
+    dualeye_core::keep_warm(&sidecar, move |s| drop(rewarm(s)));
+    sidecar
 }
 
 /// The board's tools for `dualeye ask`, through a running bridge or the port.
@@ -741,7 +754,7 @@ fn timer(language: Option<&str>, args: &[String]) -> ExitCode {
 }
 
 fn ask(text: &str, language: Option<&str>, port: Option<String>, args: &LlmArgs) -> ExitCode {
-    let agent = match agent(args, true) {
+    let agent = match agent(args, true, false) {
         Ok(a) => a,
         Err(why) => {
             eprintln!("{why}");
@@ -788,7 +801,7 @@ fn eval(args: &LlmArgs, rules: bool, set: &str, language: Option<&str>, verbose:
     let agent = if rules {
         None
     } else {
-        match agent(args, false) {
+        match agent(args, false, false) {
             Ok(a) => Some(a),
             Err(why) => {
                 eprintln!("{why}");

@@ -23,6 +23,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -234,6 +235,9 @@ pub struct Tts {
     /// The cloud voices that failed and are left to their fallbacks: why,
     /// and until when.
     failed: Mutex<BTreeMap<String, (String, Instant)>>,
+    /// Keep the servers running with every downloaded voice loaded, cloud
+    /// voices' fallbacks too.
+    warm: AtomicBool,
 }
 
 impl fmt::Debug for Tts {
@@ -244,7 +248,18 @@ impl fmt::Debug for Tts {
 
 impl Tts {
     pub fn new(config: TtsConfig) -> Self {
-        Self { config, servers: Mutex::new(BTreeMap::new()), failed: Mutex::new(BTreeMap::new()) }
+        Self { config, servers: Mutex::new(BTreeMap::new()), failed: Mutex::new(BTreeMap::new()), warm: AtomicBool::new(false) }
+    }
+
+    /// Keep the downloaded voices loaded: the fallbacks of cloud voices
+    /// too by [`Tts::warm_up`], and again by [`Tts::rewarm`] if their server died.
+    pub fn kept_warm(self, on: bool) -> Self {
+        self.warm.store(on, Ordering::Relaxed);
+        self
+    }
+
+    pub fn is_kept_warm(&self) -> bool {
+        self.warm.load(Ordering::Relaxed)
     }
 
     pub fn config(&self) -> &TtsConfig {
@@ -252,8 +267,10 @@ impl Tts {
     }
 
     /// Stop the servers now, even while others still hold this [`Tts`] (a
-    /// reply being spoken); the next request would start them again.
+    /// reply being spoken); the next request would start them again (but
+    /// not [`keep_warm`](crate::keep_warm)).
     pub fn shutdown(&self) {
+        self.warm.store(false, Ordering::Relaxed);
         self.servers.lock().unwrap().clear();
     }
 
@@ -274,10 +291,32 @@ impl Tts {
                         let fallback = self.config.fallbacks.get(language).ok_or_else(|| TtsError::cloud(e.clone()))?;
                         self.cloud_failed(voice, &e);
                         drop(self.request("Ok.", fallback)?);
+                    } else if let Some(fallback) = self.config.fallbacks.get(language).filter(|_| self.is_kept_warm()) {
+                        // Ready for when the cloud voice fails; if it can't be, the cloud voice still speaks.
+                        let _ = self.request("Ok.", fallback);
                     }
                 }
                 None => drop(self.request("Ok.", voice)?),
             }
+        }
+        Ok(())
+    }
+
+    /// When [`Tts::kept_warm`], start a server that isn't running and load
+    /// its voices again.
+    pub fn rewarm(&self) -> Result<(), TtsError> {
+        if !self.is_kept_warm() {
+            return Ok(());
+        }
+        let local: Vec<&String> = self.config.voices.values().filter(|v| !self.config.clients.contains_key(*v)).chain(self.config.fallbacks.values()).collect();
+        let engine = |v: &str| Model::by_id(v).and_then(Model::engine);
+        let stopped: Vec<Engine> = {
+            let mut servers = self.servers.lock().unwrap();
+            local.iter().filter_map(|v| engine(v)).filter(|e| !servers.get_mut(e).is_some_and(|s| s.is_running())).collect()
+        };
+        // The first request starts the server, each one loads its voice.
+        for voice in local.into_iter().filter(|v| engine(v).is_some_and(|e| stopped.contains(&e))) {
+            drop(self.request("Ok.", voice)?);
         }
         Ok(())
     }

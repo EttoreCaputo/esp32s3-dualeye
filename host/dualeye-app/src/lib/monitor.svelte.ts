@@ -166,6 +166,8 @@ export type VoiceSettings = {
   follow_up: boolean;
   /** Pause the music playing on this computer while the board listens. */
   pause_music: boolean;
+  /** Keep the downloaded models loaded, those standing in for cloud ones too. */
+  keep_warm: boolean;
   /** Voice by language: `it`, `en`. */
   voices: Record<string, string>;
   /** Understand with a local language model (else fixed phrases). */
@@ -864,6 +866,7 @@ const previewVoice: VoiceInfo = {
     speak: true,
     follow_up: true,
     pause_music: true,
+    keep_warm: true,
     voices: { it: "it_IT-paola-medium", en: "en_GB-alba-medium" },
     llm: true,
     llm_model: "qwen3.5-4b",
