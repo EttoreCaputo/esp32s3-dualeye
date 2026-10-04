@@ -35,6 +35,10 @@ void voice_start(bool muted, const char *wake_word);
 /** True once the wake word runs (models found, tasks started). */
 bool voice_available(void);
 
+/** Chime as the board starts listening after the wake word (on by default). */
+void voice_set_wake_sound(bool on);
+bool voice_wake_sound(void);
+
 /** Stop or restart listening for the wake word. Muted, the mic isn't read. */
 void voice_set_muted(bool muted);
 bool voice_muted(void);

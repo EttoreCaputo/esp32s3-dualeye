@@ -7,6 +7,11 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.3.3
+
+- **A sound when it hears you.** Saying "Alexa" now plays two short rising notes as the board starts listening, not just the eyes opening. Turn it off in the app's Voice tab.
+- **Shorter, gentler timer alarm.** A timer that's up rings for 10 seconds instead of a minute, with a shorter chime and more silence between, so "Alexa" is heard over it and stops it.
+
 ## 1.3.2
 
 - **Talking with music on.** The board tells your voice from music and noise much better, so it stops listening when you've finished instead of running on to the 12-second limit, and it waits a little longer when you pause mid-sentence. The app also pauses the music playing on your computer while you talk to it, and plays it again after.

@@ -33,6 +33,8 @@ typedef struct {
     bool eyes;
     /* The eyes play a short scene now and then while nobody is talking. */
     bool idle_eyes;
+    /* A short chime as the board starts listening after the wake word. */
+    bool wake_sound;
 } board_settings_t;
 
 /** Open NVS and load the saved settings (defaults where none). */
@@ -52,6 +54,7 @@ esp_err_t board_settings_set_wake_word(const char *id);
 esp_err_t board_settings_set_volume(uint8_t percent);
 esp_err_t board_settings_set_eyes(bool on);
 esp_err_t board_settings_set_idle_eyes(bool on);
+esp_err_t board_settings_set_wake_sound(bool on);
 
 #ifdef __cplusplus
 }

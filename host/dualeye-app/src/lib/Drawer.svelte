@@ -205,6 +205,7 @@
   let volume = $state<number | null>(null);
   let eyes = $state<boolean | null>(null);
   let idleEyes = $state<boolean | null>(null);
+  let wakeSound = $state<boolean | null>(null);
   $effect(() => {
     if (!open || tab !== "voice" || monitor.link !== "connected") return;
     let alive = true;
@@ -215,17 +216,29 @@
         volume = b.volume;
         eyes = b.eyes;
         idleEyes = b.idle_eyes;
+        wakeSound = b.wake_sound;
       })
       .catch(() => {
         if (!alive) return;
         volume = null;
         eyes = null;
         idleEyes = null;
+        wakeSound = null;
       });
     return () => {
       alive = false;
     };
   });
+
+  async function setWakeSound(on: boolean) {
+    wakeSound = on;
+    try {
+      await monitor.setBoardWakeSound(on);
+    } catch (e) {
+      wakeSound = !on;
+      voiceError = String(e);
+    }
+  }
 
   async function setIdleEyes(on: boolean) {
     idleEyes = on;
@@ -726,6 +739,11 @@
               <input type="checkbox" checked={v.settings.pause_music} onchange={(e) => setVoice({ pause_music: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
               <span class="slabel">Pause the music while listening</span>
+            </label>
+            <label class="switch" title={wakeSound === null ? "Needs the board connected, with firmware 1.3.3 or newer" : ""}>
+              <input type="checkbox" checked={wakeSound ?? true} disabled={wakeSound === null} onchange={(e) => setWakeSound(e.currentTarget.checked)} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Play a sound when the wake word is heard</span>
             </label>
             <label class="switch">
               <input type="checkbox" checked={v.settings.llm} onchange={(e) => setVoice({ llm: e.currentTarget.checked })} />

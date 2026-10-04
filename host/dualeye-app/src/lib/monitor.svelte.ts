@@ -252,7 +252,7 @@ type Status = {
 
 export type Link = "searching" | "connected" | "offline";
 /** The voice settings the board keeps; null where it doesn't say. */
-export type BoardVoice = { volume: number | null; eyes: boolean | null; idle_eyes: boolean | null };
+export type BoardVoice = { volume: number | null; eyes: boolean | null; idle_eyes: boolean | null; wake_sound: boolean | null };
 /** Mirrors `metrics_ui_state_t` plus the moments the firmware is not running the UI. */
 export type BoardState = "off" | "boot" | "waiting" | "live" | "stale";
 export type Sample = { t: number; cpuT?: number; cpuL?: number; gpuT?: number; gpuL?: number };
@@ -740,7 +740,7 @@ class Monitor {
 
   /** The board's speaker volume and eyes; null where the board doesn't say. */
   async boardVoice(): Promise<BoardVoice> {
-    if (this.preview) return { volume: previewVolume, eyes: previewEyes, idle_eyes: previewIdleEyes };
+    if (this.preview) return { volume: previewVolume, eyes: previewEyes, idle_eyes: previewIdleEyes, wake_sound: previewWakeSound };
     const b = await invoke<BoardVoice>("board_voice");
     this.eyes = b.eyes ?? false;
     return b;
@@ -771,6 +771,15 @@ class Monitor {
       return;
     }
     await invoke("set_board_idle_eyes", { on });
+  }
+
+  /** A chime on the board when it hears the wake word (firmware 1.3.3). */
+  async setBoardWakeSound(on: boolean) {
+    if (this.preview) {
+      previewWakeSound = on;
+      return;
+    }
+    await invoke("set_board_wake_sound", { on });
   }
 
   async testVoice(language: string) {
@@ -825,6 +834,7 @@ let previewAlerts: ClaudeAlertsInfo = {
 let previewVolume = 60;
 let previewEyes = true;
 let previewIdleEyes = true;
+let previewWakeSound = true;
 
 function previewCloud(kind: ModelInfo["kind"], language: string | null, models: [string, string][]): ModelInfo[] {
   return models.map(([id, note]) => ({ id: `groq:${id}`, kind, language, engine: null, bytes: 0, note, license: "", installed: false, provider: "groq" }));

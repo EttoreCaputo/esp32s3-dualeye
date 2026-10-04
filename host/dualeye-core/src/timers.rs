@@ -9,7 +9,7 @@
 //! down, takes over the screen [`ShowOn`] picks while it runs and rings when
 //! the host says it's up. The host then says why out loud ([`Fired::spoken`]).
 //!
-//! A timer rings for a minute, or until someone says the wake word or
+//! A timer rings for ten seconds, or until someone says the wake word or
 //! dismisses it ([`Timers::dismiss`]). A pomodoro is work and break timers
 //! in turn: when one ends the next starts at once and the old one rings for
 //! a few seconds.
@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use crate::link::Tool;
 
 /// A timer or reminder rings this long unless it's dismissed.
-pub const RING_MS: i64 = 60_000;
+pub const RING_MS: i64 = 10_000;
 /// A pomodoro's phase change rings this long.
 const PHASE_RING_MS: i64 = 6_000;
 /// A reminder missed while the app was closed still comes this late.
@@ -796,7 +796,7 @@ mod tests {
         let view = timers.board_view_at(T0 + 601_000).unwrap();
         assert_eq!((view.state.as_str(), view.left_s, view.label.as_deref()), ("ring", 0.0, Some("PASTA")));
         assert_eq!(view.screen.as_deref(), Some("right"));
-        // Not again; gone after a minute of ringing.
+        // Not again; gone after ten seconds of ringing.
         assert!(timers.tick_at(T0 + 602_000).is_empty());
         timers.tick_at(T0 + 600_200 + RING_MS);
         assert!(timers.board_view_at(T0 + 700_000).is_none());

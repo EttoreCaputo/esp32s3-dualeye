@@ -179,19 +179,31 @@ static bool tool_show_text(const cJSON *args, char *text, cJSON **structured)
 static bool tool_set_mic(const cJSON *args, char *text, cJSON **structured)
 {
     const cJSON *muted = cJSON_GetObjectItemCaseSensitive(args, "muted");
-    if (!cJSON_IsBool(muted)) {
-        snprintf(text, TEXT_MAX, "muted must be true or false");
+    const cJSON *sound = cJSON_GetObjectItemCaseSensitive(args, "wake_sound");
+    if ((muted != NULL && !cJSON_IsBool(muted)) || (sound != NULL && !cJSON_IsBool(sound)) ||
+        (muted == NULL && sound == NULL)) {
+        snprintf(text, TEXT_MAX, "give muted and/or wake_sound, true or false");
         return false;
     }
     if (!voice_available()) {
         snprintf(text, TEXT_MAX, "voice is not available on this board");
         return false;
     }
-    bool on = cJSON_IsTrue(muted);
-    board_settings_set_mic_muted(on);
-    voice_set_muted(on);
-    snprintf(text, TEXT_MAX, on ? "microphone muted: not listening for \"%s\"" : "listening for \"%s\"",
-             voice_wake_word());
+    int n = 0;
+    if (muted != NULL) {
+        bool on = cJSON_IsTrue(muted);
+        board_settings_set_mic_muted(on);
+        voice_set_muted(on);
+        n += snprintf(text, TEXT_MAX, on ? "microphone muted: not listening for \"%s\"" : "listening for \"%s\"",
+                      voice_wake_word());
+    }
+    if (sound != NULL) {
+        bool on = cJSON_IsTrue(sound);
+        board_settings_set_wake_sound(on);
+        voice_set_wake_sound(on);
+        snprintf(text + n, TEXT_MAX - n, "%s%s", n ? "; " : "",
+                 on ? "a chime when the wake word is heard" : "no chime on the wake word");
+    }
     return true;
 }
 
@@ -333,6 +345,7 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
     cJSON_AddBoolToObject(voice, "available", voice_available());
     cJSON_AddBoolToObject(voice, "eyes", settings.eyes);
     cJSON_AddBoolToObject(voice, "idle_eyes", settings.idle_eyes);
+    cJSON_AddBoolToObject(voice, "wake_sound", settings.wake_sound);
     if (voice_available()) {
         cJSON_AddStringToObject(voice, "wake_word", voice_wake_word());
         cJSON_AddStringToObject(voice, "wake_word_id", voice_wake_word_id());
@@ -414,8 +427,11 @@ static const tool_t TOOLS[] = {
     },
     {
         .name = "set_mic",
-        .description = "Mute or unmute the microphone. Muted, the board doesn't listen for its wake word.",
-        .schema = "{\"type\":\"object\",\"properties\":{\"muted\":{\"type\":\"boolean\"}},\"required\":[\"muted\"]}",
+        .description = "Mute or unmute the microphone (muted, the board doesn't listen for its wake word); "
+                       "and whether a short chime plays when it hears the wake word (wake_sound, on by default). "
+                       "The board remembers both.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"muted\":{\"type\":\"boolean\"},"
+                  "\"wake_sound\":{\"type\":\"boolean\"}},\"minProperties\":1}",
         .fn = tool_set_mic,
     },
     {

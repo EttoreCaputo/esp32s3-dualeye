@@ -108,6 +108,7 @@ typedef struct {
 } stream_t;
 
 static stream_t s_stream;
+static volatile bool s_wake_sound = true;
 
 static const char *const STATE_NAMES[VOICE_STATE_COUNT] = {
     [VOICE_IDLE] = "idle",
@@ -233,6 +234,16 @@ static void update_run(void)
     } else {
         xEventGroupClearBits(s_run, RUN_BIT);
     }
+}
+
+void voice_set_wake_sound(bool on)
+{
+    s_wake_sound = on;
+}
+
+bool voice_wake_sound(void)
+{
+    return s_wake_sound;
 }
 
 void voice_set_muted(bool muted)
@@ -418,6 +429,11 @@ static void on_wake(const afe_fetch_result_t *res)
     cJSON_AddStringToObject(params, "model", s_model);
     cJSON_AddNumberToObject(params, "volume_db", (int) res->data_volume);
     rpc_notify("wake", params);
+    if (s_wake_sound) {
+        // Echo cancellation keeps it out of the utterance, and it ends within
+        // WAKE_TAIL_MS anyway.
+        playback_earcon(PLAYBACK_EARCON_WAKE);
+    }
     stream_start("wake", WAKE_TAIL_MS, NO_SPEECH_MS);
 }
 
