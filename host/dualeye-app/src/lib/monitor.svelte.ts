@@ -200,7 +200,7 @@ export type ProviderInfo = {
   key: "env" | "saved" | null;
 };
 export type SttStatus = "off" | "starting" | "ready" | "error";
-export type TtsEngine = "piper" | "kokoro";
+export type TtsEngine = "piper";
 export type VoiceInfo = {
   settings: VoiceSettings;
   server: string | null;
@@ -211,9 +211,6 @@ export type VoiceInfo = {
   piper: string | null;
   /** While Piper installs: its latest output line. */
   piper_install: string | null;
-  /** Kokoro's, likewise. */
-  kokoro: string | null;
-  kokoro_install: string | null;
   tts: SttStatus;
   tts_error: string | null;
   /** llama-server, if found. */
@@ -688,7 +685,7 @@ class Monitor {
       const missing = voices.find((m) => !previewVoice[m.engine ?? "piper"]);
       previewVoice.tts = !settings.enabled || !settings.speak ? "off" : voices.length && !missing ? "ready" : "error";
       previewVoice.tts_error =
-        previewVoice.tts !== "error" ? null : missing ? `${missing.engine === "kokoro" ? "Kokoro" : "Piper"} isn't installed yet` : "no voice downloaded yet";
+        previewVoice.tts !== "error" ? null : missing ? "Piper isn't installed yet" : "no voice downloaded yet";
       const llmReady = previewVoice.models.find((m) => m.id === settings.llm_model)?.installed;
       previewVoice.llm = !settings.enabled || !settings.llm ? "off" : llmReady ? "ready" : "error";
       previewVoice.llm_error = previewVoice.llm === "error" ? `the ${settings.llm_model} model isn't downloaded yet` : null;
@@ -710,9 +707,7 @@ class Monitor {
 
   async downloadModel(id: string) {
     if (this.preview) {
-      // Kokoro's voices share their files.
-      const engine = previewVoice.models.find((m) => m.id === id)?.engine;
-      for (const m of previewVoice.models) if (m.id === id || (engine === "kokoro" && m.engine === "kokoro")) m.installed = true;
+      for (const m of previewVoice.models) if (m.id === id) m.installed = true;
       return;
     }
     await invoke("download_model", { id });
@@ -724,8 +719,7 @@ class Monitor {
 
   async deleteModel(id: string): Promise<VoiceInfo> {
     if (this.preview) {
-      const engine = previewVoice.models.find((m) => m.id === id)?.engine;
-      for (const m of previewVoice.models) if (m.id === id || (engine === "kokoro" && m.engine === "kokoro")) m.installed = false;
+      for (const m of previewVoice.models) if (m.id === id) m.installed = false;
       return this.voiceInfo();
     }
     return invoke<VoiceInfo>("delete_model", { id });
@@ -734,7 +728,7 @@ class Monitor {
   /** Install a text-to-speech engine into its own virtualenv. */
   async installEngine(engine: TtsEngine) {
     if (this.preview) {
-      previewVoice[`${engine}_install`] = engine === "kokoro" ? "Installing kokoro-onnx" : "Installing piper-tts";
+      previewVoice[`${engine}_install`] = "Installing piper-tts";
       await new Promise((r) => setTimeout(r, 2500));
       previewVoice[`${engine}_install`] = null;
       previewVoice[engine] = `~/Library/Application Support/dualeye/${engine}/venv/bin/python`;
@@ -847,7 +841,7 @@ const previewVoice: VoiceInfo = {
     pause_music: true,
     voices: { it: "it_IT-paola-medium", en: "en_GB-alba-medium" },
     llm: true,
-    llm_model: "qwen3-4b-2507",
+    llm_model: "qwen3.5-4b",
     personality: "cute",
     personality_custom: "",
   },
@@ -860,12 +854,8 @@ const previewVoice: VoiceInfo = {
     { id: "it_IT-riccardo-x_low", kind: "voice", language: "it", engine: "piper", bytes: 28_134_952, note: "Italian, man's voice, smaller and flatter", license: "Dataset M-AILABS (BSD-style); trained from scratch", installed: false, provider: null },
     { id: "en_GB-alba-medium", kind: "voice", language: "en", engine: "piper", bytes: 63_206_182, note: "British English, woman's voice", license: "Dataset CC BY 4.0 (Edinburgh DataShare 10283/3270); fine-tuned from lessac", installed: false, provider: null },
     { id: "en_US-ljspeech-medium", kind: "voice", language: "en", engine: "piper", bytes: 63_536_351, note: "American English, woman's voice", license: "Dataset public domain (LJ Speech)", installed: false, provider: null },
-    { id: "kokoro-if_sara", kind: "voice", language: "it", engine: "kokoro", bytes: 353_746_785, note: "Italian, woman's voice, Kokoro: warmer and livelier, slower to speak", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false, provider: null },
-    { id: "kokoro-im_nicola", kind: "voice", language: "it", engine: "kokoro", bytes: 353_746_785, note: "Italian, man's voice, Kokoro", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false, provider: null },
-    { id: "kokoro-af_heart", kind: "voice", language: "en", engine: "kokoro", bytes: 353_746_785, note: "American English, woman's voice, Kokoro: its best", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false, provider: null },
-    { id: "kokoro-bf_emma", kind: "voice", language: "en", engine: "kokoro", bytes: 353_746_785, note: "British English, woman's voice, Kokoro", license: "Apache-2.0 (hexgrad/Kokoro-82M)", installed: false, provider: null },
-    { id: "qwen3-4b-2507", kind: "llm", language: null, engine: null, bytes: 2_497_281_120, note: "Most accurate: all 53 test commands right, about 0.9 s each on an M1 Pro", license: "Apache-2.0", installed: true, provider: null },
     { id: "qwen3.5-2b", kind: "llm", language: null, engine: null, bytes: 1_280_835_840, note: "Lighter and faster (0.65 s); more mistakes, often answers in English", license: "Apache-2.0", installed: false, provider: null },
+    { id: "qwen3.5-4b", kind: "llm", language: null, engine: null, bytes: 2_740_937_888, note: "Most accurate: 52 of 53 test commands right, about 1.4 s each on an M1 Pro; sometimes answers in the wrong language", license: "Apache-2.0", installed: true, provider: null },
     ...previewCloud("whisper", null, [
       ["whisper-large-v3-turbo", "Whisper large v3 turbo on Groq: fast and accurate, 2,000 a day free"],
       ["whisper-large-v3", "Whisper large v3 on Groq: a little more accurate, slower"],
@@ -883,8 +873,6 @@ const previewVoice: VoiceInfo = {
   stt_error: null,
   piper: null,
   piper_install: null,
-  kokoro: null,
-  kokoro_install: null,
   tts: "off",
   tts_error: null,
   llm_server: "/opt/homebrew/bin/llama-server",
@@ -895,7 +883,7 @@ const previewVoice: VoiceInfo = {
     { id: "groq", name: "Groq", note: "Free with daily limits; what you say is sent to Groq", keys_url: "https://console.groq.com/keys", key_env: "GROQ_API_KEY", key: null },
   ],
   hardware: { cpu: "Apple M1 Pro", cores: 8, memory_mb: 16_384, gpu: { kind: "apple" } },
-  recommendation: { whisper: "small", llm: "qwen3-4b-2507", speed: "fast", why: "Apple silicon with enough memory runs the recommended models on its GPU." },
+  recommendation: { whisper: "small", llm: "qwen3.5-4b", speed: "fast", why: "Apple silicon with enough memory runs the recommended models on its GPU." },
 };
 
 function startPreviewFeed(emit: (e: BridgeEvent) => void, faces: () => Faces, rotation: () => Rotations) {

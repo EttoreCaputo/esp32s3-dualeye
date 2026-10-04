@@ -1,6 +1,8 @@
 //! Speech-to-text with a [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 //! `whisper-server` sidecar on `127.0.0.1`, or a provider's Whisper
-//! ([`crate::cloud`]), which answers the same way.
+//! ([`crate::cloud`]), which answers the same way; when it hits its
+//! provider's limits, a local model ([`Stt::with_fallback`]) transcribes
+//! instead.
 //!
 //! [`Stt`] starts the server in the background with the model loaded, so the
 //! first utterance doesn't wait for it, restarts it if it dies, and stops it
@@ -111,6 +113,17 @@ pub fn models_dir() -> Option<PathBuf> {
     crate::claude::data_dir().map(|d| d.join("models"))
 }
 
+/// The local model to transcribe in a cloud model's place when it hits its
+/// limits: the default one if it's downloaded, else any that is; `None`
+/// without `whisper-server` or a model.
+pub fn local_fallback() -> Option<SttEngine> {
+    use crate::models::{Kind, Model};
+    let server = find_server()?;
+    let installed = || Model::of_kind(Kind::Whisper).filter(|m| m.is_installed());
+    let model = installed().find(|m| m.id == crate::models::DEFAULT_MODEL).or_else(|| installed().next())?;
+    Some(SttEngine::Local { server, model: model.path()? })
+}
+
 /// `whisper-server`: `DUALEYE_WHISPER_SERVER`, the one the app ships, or
 /// one on the PATH (see [`crate::sidecar::find_program`]).
 pub fn find_server() -> Option<PathBuf> {
@@ -160,12 +173,22 @@ impl From<io::Error> for SttError {
 /// The sidecar. Shared between connections: it outlives a board reconnect.
 pub struct Stt {
     config: SttConfig,
+    /// A local [`SttEngine`] for when a cloud model hits its limits.
+    fallback: Option<SttEngine>,
     server: Mutex<Option<Process>>,
 }
 
 impl Stt {
     pub fn new(config: SttConfig) -> Self {
-        Self { config, server: Mutex::new(None) }
+        Self { config, fallback: None, server: Mutex::new(None) }
+    }
+
+    /// With `fallback` transcribing when a cloud model hits its limits (see
+    /// [`local_fallback`]). Its server only starts when it's needed.
+    pub fn with_fallback(mut self, fallback: Option<SttEngine>) -> Self {
+        let cloud = matches!(self.config.engine, SttEngine::Cloud(_));
+        self.fallback = fallback.filter(|f| cloud && matches!(f, SttEngine::Local { .. }));
+        self
     }
 
     pub fn config(&self) -> &SttConfig {
@@ -207,8 +230,10 @@ impl Stt {
     fn request(&self, wav: &[u8], lang: &str) -> Result<Value, SttError> {
         let prompt = vocabulary_prompt(lang);
         if let SttEngine::Cloud(client) = &self.config.engine {
-            let lang = (lang != "auto").then_some(lang);
-            return client.transcribe(wav, lang, &prompt).map_err(SttError::Cloud);
+            match client.transcribe(wav, (lang != "auto").then_some(lang), &prompt) {
+                Err(e) if e.is_limit() && self.fallback.is_some() => {}
+                reply => return reply.map_err(SttError::Cloud),
+            }
         }
         let fields = [("language", lang), ("response_format", "verbose_json"), ("temperature", "0"), ("prompt", &prompt)];
         let (content_type, body) = multipart(wav, &fields)?;
@@ -235,7 +260,9 @@ impl Stt {
             }
             *server = None;
         }
-        let SttEngine::Local { server: program, model } = &self.config.engine else { return Err(SttError::Server("a cloud model has no server".into())) };
+        // A cloud model's fallback, while it's limited.
+        let engine = if let SttEngine::Cloud(_) = &self.config.engine { self.fallback.as_ref() } else { Some(&self.config.engine) };
+        let Some(SttEngine::Local { server: program, model }) = engine else { return Err(SttError::Server("a cloud model has no server".into())) };
         let s = start(program, model)?;
         let addr = s.addr;
         *server = Some(s);

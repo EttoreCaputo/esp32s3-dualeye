@@ -16,6 +16,12 @@
 //! API keys come from the provider's environment variable (`GROQ_API_KEY`)
 //! or `keys.json` in DualEye's data folder ([`set_api_key`]), readable only
 //! by its owner.
+//!
+//! A model that hits its provider's limits (429: too many requests a
+//! minute, or the day's are used up) isn't asked again until it said to
+//! retry, a minute when it didn't: its requests fail at once with
+//! [`CloudError::RateLimited`], which [`crate::Stt`], [`crate::Llm`] and
+//! [`crate::Tts`] answer with a local model when there's one.
 
 mod openai;
 
@@ -24,7 +30,8 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -266,6 +273,19 @@ impl fmt::Display for CloudError {
 
 impl std::error::Error for CloudError {}
 
+impl CloudError {
+    /// The provider's limits were hit: a local model should answer instead.
+    pub fn is_limit(&self) -> bool {
+        matches!(self, CloudError::RateLimited { .. })
+    }
+}
+
+/// How long a model that hit its limits without saying when to retry is left alone.
+const COOLDOWN: Duration = Duration::from_secs(60);
+
+/// The models that hit their limits, by `provider:model` id, and until when.
+static LIMITED: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
+
 /// A transcription: the text, its language as the provider names it
 /// (`italian`, `english`) and `segments` with `avg_logprob`, like
 /// whisper-server's `verbose_json`.
@@ -304,23 +324,51 @@ impl Client {
     /// the first choice's message. Settings only llama.cpp knows are left
     /// out, and the model's [`CloudModel::params`] added.
     pub fn chat(&self, request: &Value) -> Result<Value, CloudError> {
-        match self.model.provider.api {
+        self.limited(|| match self.model.provider.api {
             Api::OpenAi => openai::chat(self, request),
-        }
+        })
     }
 
     /// Transcribe a WAV, in `language` (`it`, `en`) or whichever it hears (`None`).
     pub fn transcribe(&self, wav: &[u8], language: Option<&str>, prompt: &str) -> Result<TranscriptionReply, CloudError> {
-        match self.model.provider.api {
+        self.limited(|| match self.model.provider.api {
             Api::OpenAi => openai::transcribe(self, wav, language, prompt),
-        }
+        })
     }
 
     /// Speak `text` with the voice: a WAV.
     pub fn speak(&self, text: &str) -> Result<Vec<u8>, CloudError> {
-        match self.model.provider.api {
+        self.limited(|| match self.model.provider.api {
             Api::OpenAi => openai::speak(self, text),
+        })
+    }
+
+    /// Whether the model is left alone after hitting its limits.
+    pub fn is_limited(&self) -> bool {
+        self.limited_for().is_some()
+    }
+
+    fn limited_for(&self) -> Option<Duration> {
+        let mut limited = LIMITED.lock().unwrap();
+        let id = self.model.id();
+        let left = limited.get(&id).and_then(|until| until.checked_duration_since(Instant::now()));
+        if left.is_none() {
+            limited.remove(&id);
         }
+        left
+    }
+
+    /// `request`, unless the model hit its limits and it's not yet time to
+    /// retry; a limit it hits now is remembered.
+    fn limited<T>(&self, request: impl FnOnce() -> Result<T, CloudError>) -> Result<T, CloudError> {
+        if let Some(left) = self.limited_for() {
+            return Err(CloudError::RateLimited { provider: self.model.provider.name, retry_after: Some(left) });
+        }
+        let reply = request();
+        if let Err(CloudError::RateLimited { retry_after, .. }) = &reply {
+            LIMITED.lock().unwrap().insert(self.model.id(), Instant::now() + retry_after.unwrap_or(COOLDOWN));
+        }
+        reply
     }
 }
 
@@ -380,6 +428,20 @@ mod tests {
         }
         // Local ids never look like cloud ones.
         assert!(crate::models::MODELS.iter().all(|m| !is_cloud_id(m.id)));
+    }
+
+    #[test]
+    fn a_limit_is_remembered() {
+        let client = Client { model: CloudRef::by_id("groq:whisper-large-v3").unwrap(), key: "k".into() };
+        let limit = || CloudError::RateLimited { provider: "Groq", retry_after: Some(Duration::from_secs(30)) };
+        assert!(!client.is_limited());
+        assert_eq!(client.limited(|| Err::<(), _>(limit())), Err(limit()));
+        assert!(client.is_limited());
+        // Not asked again while it's limited.
+        let reply = client.limited(|| -> Result<(), CloudError> { panic!("asked") });
+        assert!(reply.is_err_and(|e| e.is_limit()));
+        LIMITED.lock().unwrap().clear();
+        assert_eq!(client.limited(|| Ok(1)), Ok(1));
     }
 
     #[test]

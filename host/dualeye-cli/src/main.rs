@@ -16,10 +16,8 @@
 //!   dualeye models download small # a Whisper model, for `dualeye --stt`
 //!   dualeye piper install         # Piper, for `dualeye --tts` (needs Python 3)
 //!   dualeye models download it_IT-paola-medium   # a voice for it
-//!   dualeye kokoro install        # Kokoro, for its voices (needs Python 3.10 to 3.13)
-//!   dualeye models download kokoro-if_sara       # a Kokoro voice
 //!   dualeye --stt --tts           # voice commands with spoken replies
-//!   dualeye models download qwen3-4b-2507        # a language model, for `dualeye --llm`
+//!   dualeye models download qwen3.5-4b           # a language model, for `dualeye --llm`
 //!   dualeye --stt --tts --llm     # ...understood by a local language model (llama-server)
 //!   dualeye cloud key groq        # save a Groq API key (read from stdin), for cloud models
 //!   dualeye --stt groq:whisper-large-v3-turbo --llm groq:openai/gpt-oss-20b   # ...run by Groq instead
@@ -122,8 +120,7 @@ struct Args {
     #[arg(long, default_value = "auto")]
     stt_language: SttLanguage,
     /// Answer voice commands out loud through the board's speaker, with
-    /// Piper (`dualeye piper install`) or Kokoro (`dualeye kokoro install`)
-    /// and the downloaded voices
+    /// Piper (`dualeye piper install`) and the downloaded voices
     #[arg(long)]
     tts: bool,
     /// A voice from `dualeye models` for its language, instead of the
@@ -208,12 +205,6 @@ enum Command {
     },
     /// Show whether Piper (text-to-speech, for `--tts`) is installed, or install it
     Piper {
-        #[command(subcommand)]
-        action: Option<EngineAction>,
-    },
-    /// Show whether Kokoro (text-to-speech for the `kokoro-` voices) is
-    /// installed, or install it
-    Kokoro {
         #[command(subcommand)]
         action: Option<EngineAction>,
     },
@@ -334,7 +325,6 @@ fn main() -> ExitCode {
         Some(Command::Models { action }) => return models_command(action),
         Some(Command::Cloud { action }) => return cloud_command(action),
         Some(Command::Piper { action }) => return engine_command(tts::Engine::Piper, action),
-        Some(Command::Kokoro { action }) => return engine_command(tts::Engine::Kokoro, action),
         Some(Command::Ask { text, language, port, llm }) => return ask(&text, language.as_deref(), port, &llm),
         Some(Command::Eval { llm, rules, set, language, verbose, json }) => return eval(&llm, rules, &set, language.as_deref(), verbose, json),
         Some(Command::Image { file, screen, clear, port }) => return image(port, file.as_deref(), &screen, clear),
@@ -399,7 +389,7 @@ fn main() -> ExitCode {
 
     let stt = match args.stt.as_deref().map(|m| stt_config(m, args.stt_language)) {
         None => None,
-        Some(Ok(config)) => Some(Arc::new(Stt::new(config))),
+        Some(Ok(config)) => Some(Arc::new(Stt::new(config).with_fallback(stt::local_fallback()))),
         Some(Err(why)) => {
             eprintln!("{why}");
             return ExitCode::FAILURE;
@@ -413,7 +403,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let agent = match args.llm.llm.is_some().then(|| agent(&args.llm)) {
+    let agent = match args.llm.llm.is_some().then(|| agent(&args.llm, true)) {
         None => None,
         Some(Ok(agent)) => Some(agent),
         Some(Err(why)) => {
@@ -552,7 +542,7 @@ fn main() -> ExitCode {
     if fatal.load(Ordering::Relaxed) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
-/// `--llm qwen3-4b-2507` (a model from `dualeye models`) or `--llm path/to/model.gguf`.
+/// `--llm qwen3.5-4b` (a model from `dualeye models`) or `--llm path/to/model.gguf`.
 fn llm_config(args: &LlmArgs) -> Result<LlmConfig, String> {
     let model = args.llm.as_deref().unwrap_or(models::DEFAULT_LLM);
     if cloud::is_cloud_id(model) {
@@ -571,8 +561,11 @@ fn llm_config(args: &LlmArgs) -> Result<LlmConfig, String> {
     Ok(LlmConfig::Local(LocalLlm { server, model: path, gpu_layers: args.llm_gpu_layers }))
 }
 
-fn agent(args: &LlmArgs) -> Result<Arc<Agent>, String> {
-    let agent = Agent::new(Arc::new(Llm::new(llm_config(args)?)));
+/// The voice agent; with `fallback`, a cloud model's limits are answered by
+/// a downloaded one (not while evaluating it).
+fn agent(args: &LlmArgs, fallback: bool) -> Result<Arc<Agent>, String> {
+    let llm = Llm::new(llm_config(args)?).with_fallback(fallback.then(llm::local_fallback).flatten());
+    let agent = Agent::new(Arc::new(llm));
     if let Some(p) = &args.personality {
         let preset = ["cute", "playful", "calm", "sassy", "butler", "minimal"].contains(&p.as_str());
         agent.set_personality(&agent::personality_prompt(if preset { p } else { "custom" }, p));
@@ -747,7 +740,7 @@ fn timer(language: Option<&str>, args: &[String]) -> ExitCode {
 }
 
 fn ask(text: &str, language: Option<&str>, port: Option<String>, args: &LlmArgs) -> ExitCode {
-    let agent = match agent(args) {
+    let agent = match agent(args, true) {
         Ok(a) => a,
         Err(why) => {
             eprintln!("{why}");
@@ -794,7 +787,7 @@ fn eval(args: &LlmArgs, rules: bool, set: &str, language: Option<&str>, verbose:
     let agent = if rules {
         None
     } else {
-        match agent(args) {
+        match agent(args, false) {
             Ok(a) => Some(a),
             Err(why) => {
                 eprintln!("{why}");
@@ -981,8 +974,7 @@ fn engine_command(engine: tts::Engine, action: Option<EngineAction>) -> ExitCode
         },
         Some(EngineAction::Install { python }) => {
             let Some(python) = python.or_else(|| tts::system_python(engine)) else {
-                let versions = if engine == tts::Engine::Kokoro { "3.10 to 3.13" } else { "3.9 or later" };
-                eprintln!("no Python {versions} on the PATH: install one, or pass --python");
+                eprintln!("no Python 3.9 or later on the PATH: install one, or pass --python");
                 return ExitCode::FAILURE;
             };
             eprintln!("installing {} with {}", engine.requirement(), python.display());
@@ -1009,7 +1001,7 @@ fn models_command(action: Option<ModelsAction>) -> ExitCode {
             let hw = Hardware::detect();
             let rec = hardware::recommend(&hw);
             println!("This computer: {}\n  {}\n", hw.summary(), rec.why);
-            let kinds = [(Kind::Whisper, "Speech-to-text (Whisper, --stt)"), (Kind::Voice, "Voices (Piper or Kokoro, --tts)"), (Kind::Llm, "Language models (llama.cpp, --llm)")];
+            let kinds = [(Kind::Whisper, "Speech-to-text (Whisper, --stt)"), (Kind::Voice, "Voices (Piper, --tts)"), (Kind::Llm, "Language models (llama.cpp, --llm)")];
             for (kind, title) in kinds {
                 println!("{title}");
                 for m in Model::of_kind(kind) {

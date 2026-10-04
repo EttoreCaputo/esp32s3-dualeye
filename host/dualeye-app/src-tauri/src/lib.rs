@@ -20,10 +20,9 @@
 //! model the app downloads (`dualeye_core::models`), understood by a small
 //! language model in a llama.cpp `llama-server` sidecar that calls the
 //! board's tools (`dualeye_core::agent`; without one, a few fixed phrases,
-//! `dualeye_core::intents`) and answered out loud by a Piper or Kokoro
-//! sidecar through the board's speaker. The app installs either itself, into
-//! a virtualenv made with esptool's Python (Kokoro's always with the pinned
-//! one: it wants 3.10 to 3.13). Turning voice on, or picking
+//! `dualeye_core::intents`) and answered out loud by a Piper sidecar
+//! through the board's speaker. The app installs Piper itself, into a
+//! virtualenv made with esptool's Python. Turning voice on, or picking
 //! another model, language or voice, swaps the bridge's shared voice config:
 //! no reconnect.
 //!
@@ -336,7 +335,8 @@ fn apply_voice(state: &AppState) {
         settings.enabled.then(|| stt_config(&settings)),
         current_stt.filter(|s| settings.enabled && stt_config(&settings).is_ok_and(|c| s.config() == &c)),
         &state.stt_state,
-        |config| Arc::new(Stt::new(config)),
+        // A cloud model's limits are answered by a downloaded one.
+        |config| Arc::new(Stt::new(config).with_fallback(stt::local_fallback())),
         |stt: &Arc<Stt>| stt.warm_up().map_err(|e| e.to_string()),
     );
     let wanted_tts = (settings.enabled && settings.speak).then(|| tts_config(&settings));
@@ -348,7 +348,7 @@ fn apply_voice(state: &AppState) {
         wanted_llm,
         keep_agent,
         &state.llm_state,
-        |config| Arc::new(Agent::new(Arc::new(Llm::new(config)))),
+        |config| Arc::new(Agent::new(Arc::new(Llm::new(config).with_fallback(llm::local_fallback())))),
         |agent: &Arc<Agent>| agent.llm().warm_up().map_err(|e| e.to_string()),
     );
     if let Some(agent) = &agent {
@@ -397,8 +397,10 @@ fn tts_config(settings: &VoiceSettings) -> Result<TtsConfig, String> {
     let voices: BTreeMap<String, String> = settings
         .voices
         .iter()
+        // A voice that's no longer offered (Kokoro's): the language's default.
+        .map(|(l, id)| (l, if Model::by_id(id).is_some() || CloudRef::by_id(id).is_some() { id.as_str() } else { models::default_voice(l).unwrap_or(id) }))
         .filter(|(_, id)| Model::by_id(id).is_some_and(|m| m.kind == Kind::Voice && m.is_installed()) || CloudRef::by_id(id).is_some_and(|r| r.model.kind == Kind::Voice))
-        .map(|(l, id)| (l.clone(), id.clone()))
+        .map(|(l, id)| (l.clone(), id.to_string()))
         .collect();
     if voices.is_empty() {
         return Err("no voice downloaded yet".into());
@@ -415,7 +417,8 @@ fn llm_config(settings: &VoiceSettings) -> Result<LlmConfig, String> {
         return cloud::Client::new(&settings.llm_model, Kind::Llm).map(LlmConfig::Cloud);
     }
     let server = llm::find_server().ok_or("llama-server not found: reinstall the app, or install llama.cpp (brew install llama.cpp on macOS)")?;
-    let model = Model::by_id(&settings.llm_model).filter(|m| m.kind == Kind::Llm).ok_or_else(|| format!("unknown language model {}", settings.llm_model))?;
+    // A model that's no longer offered (qwen3-4b-2507): the default.
+    let model = Model::by_id(&settings.llm_model).or_else(|| Model::by_id(models::DEFAULT_LLM)).filter(|m| m.kind == Kind::Llm).ok_or_else(|| format!("unknown language model {}", settings.llm_model))?;
     if !model.is_installed() {
         return Err(format!("the {} model isn't downloaded yet", model.id));
     }
@@ -473,9 +476,6 @@ struct VoiceInfo {
     piper: Option<String>,
     /// While Piper installs: the latest line of its output.
     piper_install: Option<String>,
-    /// Kokoro's, likewise.
-    kokoro: Option<String>,
-    kokoro_install: Option<String>,
     tts: &'static str,
     tts_error: Option<String>,
     /// The llama-server binary, if found.
@@ -507,8 +507,6 @@ fn voice_info_of(state: &AppState) -> VoiceInfo {
         stt_error,
         piper: Engine::Piper.python().map(|p| p.display().to_string()),
         piper_install: installing.get(&Engine::Piper).cloned(),
-        kokoro: Engine::Kokoro.python().map(|p| p.display().to_string()),
-        kokoro_install: installing.get(&Engine::Kokoro).cloned(),
         tts,
         tts_error,
         llm_server: llm::find_server().map(|p| p.display().to_string()),
@@ -606,9 +604,7 @@ fn delete_model(state: State<AppState>, id: String) -> Result<VoiceInfo, String>
         if voice.stt.as_ref().is_some_and(|s| s.config().engine.model_path() == model.path().as_deref()) {
             voice.stt = None;
         }
-        // Removing a Kokoro voice removes the files all of them share.
-        let gone: Vec<&str> = std::iter::once(model).chain(model.sharing_files()).map(|m| m.id).collect();
-        if voice.tts.as_ref().is_some_and(|t| t.config().voices.values().any(|v| gone.contains(&v.as_str()))) {
+        if voice.tts.as_ref().is_some_and(|t| t.config().voices.values().any(|v| v == model.id)) {
             voice.tts = None;
         }
         if let Some(agent) = voice.agent.take_if(|a| a.llm().config().model_path() == model.path().as_deref()) {
@@ -621,8 +617,7 @@ fn delete_model(state: State<AppState>, id: String) -> Result<VoiceInfo, String>
 }
 
 /// Set a text-to-speech engine up: a virtualenv made with esptool's Python
-/// (downloaded first if the machine has none; for Kokoro, always the pinned
-/// one), then `pip install` it.
+/// (downloaded first if the machine has none), then `pip install` it.
 #[tauri::command]
 async fn install_engine(app: AppHandle, engine: Engine) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -642,11 +637,7 @@ async fn install_engine(app: AppHandle, engine: Engine) -> Result<(), String> {
                 progress(percent.map_or(message.clone(), |p| format!("{message} {p:.0}%")));
             }
         };
-        let python = match engine {
-            Engine::Piper => setup::python(&state.esptool_dir, on_event),
-            Engine::Kokoro => setup::pinned_python(&state.esptool_dir, on_event),
-        };
-        let result = python.and_then(|python| tts::install(engine, &python, progress));
+        let result = setup::python(&state.esptool_dir, on_event).and_then(|python| tts::install(engine, &python, progress));
         state.installing.lock().unwrap().remove(&engine);
         result.map_err(|e| e.to_string())?;
         apply_voice(&state);
@@ -1137,8 +1128,8 @@ fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
             if let BridgeEvent::VoiceError { message } = &event {
-                // Which sidecar failed: Piper's, Kokoro's and llama.cpp's errors say so.
-                let status = if message.starts_with("piper") || message.starts_with("kokoro") {
+                // Which sidecar failed: Piper's and llama.cpp's errors say so.
+                let status = if message.starts_with("piper") {
                     &state.tts_state
                 } else if message.starts_with("llama-server") {
                     &state.llm_state

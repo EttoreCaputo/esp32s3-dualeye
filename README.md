@@ -125,7 +125,7 @@ In the app, open Settings → **Voice**:
 
 1. Turn on **Voice assistant**.
 2. Under **Models** the app says which models suit this computer; **Use …** picks them and downloads what's missing (about 3 GB for the default pair, once). Each model has its own list: **Hearing** (speech to text), **Understanding** (the language model) and a **Voice** for each language, with a **Download** or **Install** button when something is still missing.
-3. For each voice, install the program that speaks it (once) and download it. **Piper** is light and quick (about 100 MB); **Kokoro** sounds warmer and livelier, but takes about a second for each sentence instead of a fifth, and its voices share one 354 MB model. You can pick one engine for Italian and the other for English.
+3. For each voice, install the program that speaks it (once) and download it. **Piper** is light and quick (about 100 MB).
 4. Say "Alexa", wait for the cyan eyes, and talk.
 
 ### Talking to it
@@ -156,13 +156,13 @@ The app picks the models from the hardware it finds:
 
 | Computer | Speech model | Language model | Answers |
 |----------|--------------|----------------|---------|
-| Apple silicon, 16 GB or more | `small` | `qwen3-4b-2507` | Fast |
+| Apple silicon, 16 GB or more | `small` | `qwen3.5-4b` | Fast |
 | Apple silicon, 8 GB | `small` | `qwen3.5-2b` | Fast |
-| NVIDIA card with 5 GB or more (CUDA build of llama.cpp, see [below](#voice-internals)) | `small` | `qwen3-4b-2507` | Fast |
+| NVIDIA card with 5 GB or more (CUDA build of llama.cpp, see [below](#voice-internals)) | `small` | `qwen3.5-4b` | Fast |
 | No usable GPU, 8 GB and 4 cores or more | `base` | `qwen3.5-2b` | A few seconds |
 | Less | `base` | none (fixed phrases) | |
 
-The language model stays loaded while voice is on: about 3 GB of memory for `qwen3-4b-2507`, 1.5 GB for `qwen3.5-2b`.
+The language model stays loaded while voice is on: about 3 GB of memory for `qwen3.5-4b`, 1.5 GB for `qwen3.5-2b`.
 
 ### Cloud models
 
@@ -184,7 +184,7 @@ Unless you pick a [cloud model](#cloud-models), nothing you say leaves your comp
 - **Audio** goes over USB to the app, is kept in memory until it is transcribed, then dropped. It is written to disk only if you turn on **Keep recordings** (for debugging).
 - **Transcripts and answers** are shown in the Voice tab (the last 50) and forgotten when the app quits.
 - **Speech recognition, the language model and the voice** run as local programs reachable from this computer only (`127.0.0.1`). A cloud model gets what it works on instead: the recording for speech, the transcript, the board's state and the conversation's last few exchanges for the language model, the answer for the voice.
-- **The network** is used only to reach the cloud models you pick and to download what you ask for: models from Hugging Face and Kokoro's from GitHub (checked against a SHA-256), Piper and Kokoro from PyPI, and Python the first time the app flashes the board.
+- **The network** is used only to reach the cloud models you pick and to download what you ask for: models from Hugging Face (checked against a SHA-256), Piper from PyPI, and Python the first time the app flashes the board.
 
 ### Troubleshooting
 
@@ -194,7 +194,7 @@ Unless you pick a [cloud model](#cloud-models), nothing you say leaves your comp
 | The eyes appear, then turn red | No words were heard (too far, too quiet), or a helper failed: the Voice tab shows the error under the status |
 | "Speech-to-text: Not working" | The Whisper model isn't downloaded, or whisper-server couldn't start: see `whisper-server.log` in the [data folder](#where-the-app-keeps-its-files)'s `models/` |
 | "Language model: Not working" | The model isn't downloaded, or doesn't fit in memory: pick the recommended one, or a smaller one. `llama-server.log` is next to the models. Meanwhile the fixed phrases answer |
-| "Text-to-speech: Not working" | The engine of a chosen voice (Piper or Kokoro) isn't installed, or no voice is downloaded for a language. Reinstall it from the Voice tab; its log is `server.log` in `piper/` or `kokoro/` in the [data folder](#where-the-app-keeps-its-files) |
+| "Text-to-speech: Not working" | Piper isn't installed, or no voice is downloaded for a language. Reinstall it from the Voice tab; its log is `server.log` in `piper/` in the [data folder](#where-the-app-keeps-its-files) |
 | Answers are slow | The Voice tab shows the time of each step. Use the recommended models; on a computer without a GPU, `base` and `qwen3.5-2b` |
 | The board wakes up by itself | Try "Hi ESP" instead |
 | The wrong words come out | Set the language instead of Auto |
@@ -274,10 +274,8 @@ dualeye --stt                                    # print each transcript
 dualeye piper install                            # Piper, in a virtualenv in DualEye's data folder (needs Python 3.9+)
 dualeye models download it_IT-paola-medium       # Italian voice, 64 MB
 dualeye models download en_GB-alba-medium        # English voice, 63 MB
-dualeye kokoro install                           # or Kokoro, likewise (needs Python 3.10 to 3.13)
-dualeye models download kokoro-if_sara           # its Italian voice: the model all Kokoro voices share, 354 MB
 dualeye --stt --tts                              # spoken answers, fixed phrases
-dualeye models download qwen3-4b-2507            # the language model, 2.5 GB
+dualeye models download qwen3.5-4b               # the language model, 2.7 GB
 dualeye --stt --tts --llm                        # ...understood by the language model
 dualeye cloud key groq                           # save a Groq API key (pasted on stdin)
 dualeye --stt groq:whisper-large-v3-turbo --tts --llm groq:openai/gpt-oss-20b   # ...or let Groq run the models
@@ -439,7 +437,7 @@ esptool --chip esp32s3 --port /dev/ttyACM0 write-flash 0x0 build/merged-binary.b
 
 ### Voice internals
 
-The board runs Espressif's [ESP-SR](https://github.com/espressif/esp-sr) on core 1 (echo cancellation and voice activity on the mic and the speaker loopback, then WakeNet), with the UI on core 0; its models sit in the `model` partition ([partitions.csv](partitions.csv)). After the wake word it streams what it hears over USB until you stop talking; [whisper.cpp](https://github.com/ggml-org/whisper.cpp) transcribes it, a small language model in llama.cpp's `llama-server` calls the board's tools (the ones MCP offers, plus the computer's sensors and the time) and writes a one-sentence answer, and [Piper](https://github.com/OHF-Voice/piper1-gpl) or [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) speaks it a sentence at a time.
+The board runs Espressif's [ESP-SR](https://github.com/espressif/esp-sr) on core 1 (echo cancellation and voice activity on the mic and the speaker loopback, then WakeNet), with the UI on core 0; its models sit in the `model` partition ([partitions.csv](partitions.csv)). After the wake word it streams what it hears over USB until you stop talking; [whisper.cpp](https://github.com/ggml-org/whisper.cpp) transcribes it, a small language model in llama.cpp's `llama-server` calls the board's tools (the ones MCP offers, plus the computer's sensors and the time) and writes a one-sentence answer, and [Piper](https://github.com/OHF-Voice/piper1-gpl) speaks it a sentence at a time.
 
 The whisper-server and llama-server the app ships use Metal on Apple silicon and the processor elsewhere. To use an NVIDIA card, install CUDA builds of llama.cpp (and whisper.cpp) and point the app at them with `DUALEYE_LLAMA_SERVER` (and `DUALEYE_WHISPER_SERVER`). If the board wakes itself while it talks, build the firmware without barge-in (`CONFIG_DUALEYE_VOICE_BARGE_IN`).
 
@@ -449,12 +447,11 @@ Cloud models live in [`cloud`](host/dualeye-core/src/cloud/mod.rs): each service
 
 | Model | Right (of 53) | Other phrasings (of 27) | Time to action, median |
 |---|---|---|---|
-| `qwen3-4b-2507` | 53 | 25 | 0.9 s |
 | `qwen3.5-4b` | 52 | 27 | 1.4 s |
 | `qwen3.5-2b` | 49 | 24 | 0.65 s |
 | fixed phrases | 39 | 20 | — |
 
-The two Qwen3.5 models often answer an Italian question in English. Qwen3 1.7B (45) and Gemma 4 E2B (39) were tried and left out. Several Piper voices are fine-tuned from Piper's *lessac* voice, whose dataset comes with its own license: the Voice tab shows each voice's on hover, and [docs/licenses.md](docs/licenses.md) lists every component and model.
+The two Qwen3.5 models often answer an Italian question in English. Qwen3 1.7B (45), Qwen3 4B 2507 (53, 25, 0.9 s) and Gemma 4 E2B (39) were tried and left out. Several Piper voices are fine-tuned from Piper's *lessac* voice, whose dataset comes with its own license: the Voice tab shows each voice's on hover, and [docs/licenses.md](docs/licenses.md) lists every component and model.
 
 ### MCP internals
 

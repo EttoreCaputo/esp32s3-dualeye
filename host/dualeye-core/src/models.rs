@@ -1,9 +1,8 @@
 //! The models the host runs, downloaded on demand into
 //! [`crate::stt::models_dir`]: multilingual Whisper models (ggml, from
 //! `ggerganov/whisper.cpp` on Hugging Face) for speech-to-text, Piper
-//! voices (ONNX plus its JSON config, from `rhasspy/piper-voices`) and
-//! Kokoro voices (one model and one file of voices that they all share, from
-//! `thewh1teagle/kokoro-onnx`'s releases) for speaking, and small language models (GGUF, quantized by Unsloth) for the
+//! voices (ONNX plus its JSON config, from `rhasspy/piper-voices`) for
+//! speaking, and small language models (GGUF, quantized by Unsloth) for the
 //! voice agent ([`crate::llm`]). Each file is pinned by size and SHA-256.
 //!
 //! A download goes to `<file>.part` and is renamed once its checksum
@@ -33,7 +32,6 @@ pub enum Kind {
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     Piper,
-    Kokoro,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -62,14 +60,6 @@ pub struct Model {
 
 const WHISPER_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
 const PIPER_URL: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main/";
-const KOKORO_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/";
-/// Every Kokoro voice is these two files: a voice's id is `kokoro-` and its
-/// name in the second.
-const KOKORO_FILES: &[ModelFile] = &[
-    file("kokoro-v1.0.onnx", 325_532_387, "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5"),
-    file("voices-v1.0.bin", 28_214_398, "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d"),
-];
-const KOKORO_LICENSE: &str = "Apache-2.0 (hexgrad/Kokoro-82M)";
 
 const fn file(name: &'static str, bytes: u64, sha256: &'static str) -> ModelFile {
     ModelFile { name, bytes, sha256 }
@@ -153,42 +143,6 @@ pub const MODELS: &[Model] = &[
         repo: None,
     },
     Model {
-        id: "kokoro-if_sara",
-        kind: Kind::Voice,
-        language: Some("it"),
-        files: KOKORO_FILES,
-        note: "Italian, woman's voice, Kokoro: warmer and livelier, slower to speak",
-        license: KOKORO_LICENSE,
-        repo: None,
-    },
-    Model {
-        id: "kokoro-im_nicola",
-        kind: Kind::Voice,
-        language: Some("it"),
-        files: KOKORO_FILES,
-        note: "Italian, man's voice, Kokoro",
-        license: KOKORO_LICENSE,
-        repo: None,
-    },
-    Model {
-        id: "kokoro-af_heart",
-        kind: Kind::Voice,
-        language: Some("en"),
-        files: KOKORO_FILES,
-        note: "American English, woman's voice, Kokoro: its best",
-        license: KOKORO_LICENSE,
-        repo: None,
-    },
-    Model {
-        id: "kokoro-bf_emma",
-        kind: Kind::Voice,
-        language: Some("en"),
-        files: KOKORO_FILES,
-        note: "British English, woman's voice, Kokoro",
-        license: KOKORO_LICENSE,
-        repo: None,
-    },
-    Model {
         id: "qwen3.5-2b",
         kind: Kind::Llm,
         language: None,
@@ -198,20 +152,11 @@ pub const MODELS: &[Model] = &[
         repo: Some("unsloth/Qwen3.5-2B-GGUF"),
     },
     Model {
-        id: "qwen3-4b-2507",
-        kind: Kind::Llm,
-        language: None,
-        files: &[file("Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2_497_281_120, "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597")],
-        note: "Most accurate: all 53 test commands right, about 0.9 s each on an M1 Pro",
-        license: "Apache-2.0",
-        repo: Some("unsloth/Qwen3-4B-Instruct-2507-GGUF"),
-    },
-    Model {
         id: "qwen3.5-4b",
         kind: Kind::Llm,
         language: None,
         files: &[file("Qwen3.5-4B-Q4_K_M.gguf", 2_740_937_888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4")],
-        note: "About as accurate, slower (1.4 s); sometimes answers in the wrong language",
+        note: "Most accurate: 52 of 53 test commands right, about 1.4 s each on an M1 Pro; sometimes answers in the wrong language",
         license: "Apache-2.0",
         repo: Some("unsloth/Qwen3.5-4B-GGUF"),
     },
@@ -219,7 +164,7 @@ pub const MODELS: &[Model] = &[
 
 pub const DEFAULT_MODEL: &str = "small";
 /// The language model the voice agent uses unless another is picked.
-pub const DEFAULT_LLM: &str = "qwen3-4b-2507";
+pub const DEFAULT_LLM: &str = "qwen3.5-4b";
 
 /// The voice a language speaks with unless another is picked.
 pub fn default_voice(language: &str) -> Option<&'static str> {
@@ -241,18 +186,7 @@ impl Model {
 
     /// What speaks it, for a voice.
     pub fn engine(&self) -> Option<Engine> {
-        (self.kind == Kind::Voice).then(|| if self.id.starts_with("kokoro-") { Engine::Kokoro } else { Engine::Piper })
-    }
-
-    /// Its name for its engine: a Kokoro voice's in the voices file.
-    pub fn voice_name(&self) -> &'static str {
-        self.id.strip_prefix("kokoro-").unwrap_or(self.id)
-    }
-
-    /// Other models with files of its own (Kokoro's voices share theirs):
-    /// removing it removes those too.
-    pub fn sharing_files(&self) -> impl Iterator<Item = &'static Model> {
-        MODELS.iter().filter(move |m| m.id != self.id && m.files.iter().any(|f| self.files.contains(f)))
+        (self.kind == Kind::Voice).then_some(Engine::Piper)
     }
 
     /// All its files.
@@ -263,7 +197,6 @@ impl Model {
     pub fn url(&self, file: &ModelFile) -> String {
         let base = match self.kind {
             Kind::Whisper => WHISPER_URL.to_string(),
-            Kind::Voice if self.engine() == Some(Engine::Kokoro) => KOKORO_URL.to_string(),
             // it_IT-paola-medium → it/it_IT/paola/medium/
             Kind::Voice => {
                 let mut parts = self.id.splitn(3, '-');
@@ -357,7 +290,6 @@ mod tests {
             }
             match m.kind {
                 Kind::Whisper => assert!(m.files[0].name.starts_with("ggml-") && m.language.is_none()),
-                Kind::Voice if m.engine() == Some(Engine::Kokoro) => assert_eq!(m.files, KOKORO_FILES),
                 Kind::Voice => assert_eq!(m.files.iter().map(|f| f.name.to_string()).collect::<Vec<_>>(), [format!("{}.onnx", m.id), format!("{}.onnx.json", m.id)]),
                 Kind::Llm => assert!(m.files[0].name.ends_with(".gguf") && m.repo.is_some() && m.language.is_none()),
             }
@@ -368,10 +300,5 @@ mod tests {
     fn voice_urls_follow_the_repository_layout() {
         let m = Model::by_id("it_IT-riccardo-x_low").unwrap();
         assert_eq!(m.url(&m.files[1]), "https://huggingface.co/rhasspy/piper-voices/resolve/main/it/it_IT/riccardo/x_low/it_IT-riccardo-x_low.onnx.json");
-        let k = Model::by_id("kokoro-if_sara").unwrap();
-        assert_eq!((k.engine(), k.voice_name()), (Some(Engine::Kokoro), "if_sara"));
-        assert_eq!(k.url(&k.files[1]), "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin");
-        assert!(k.sharing_files().any(|m| m.id == "kokoro-im_nicola"));
-        assert_eq!(m.sharing_files().count(), 0);
     }
 }

@@ -175,7 +175,7 @@
   /** `agent::MAX_PERSONALITY`. */
   const MAX_PERSONALITY = 300;
   const KIND_NAMES: Record<ModelInfo["kind"], string> = { whisper: "Hearing", llm: "Understanding", voice: "Voice" };
-  const ENGINE_NAMES: Record<TtsEngine, string> = { piper: "Piper", kokoro: "Kokoro" };
+  const ENGINE_NAMES: Record<TtsEngine, string> = { piper: "Piper" };
   const STATUS = { off: "Off", starting: "Loading…", ready: "Ready", error: "Not working" };
 
   /** A model as its list shows it: size and whether it's here, or whether its service has a key. */
@@ -268,7 +268,6 @@
   }
   const ENGINES: [TtsEngine, string, string][] = [
     ["piper", "Piper", "Light and quick (GPL-3.0, about 100 MB from PyPI)"],
-    ["kokoro", "Kokoro", "Warmer, livelier voices, a little slower to answer (MIT, about 150 MB from PyPI)"],
   ];
 
   let testing = $state<string | null>(null);
@@ -842,7 +841,7 @@
                       <span class="mnote">{KIND_NAMES[m.kind]} · {mb(m.bytes)}{used ? " · in use" : ""}</span>
                     </span>
                     <span class="mside">
-                      <button class="btn small" disabled={used && v.settings.enabled} title={m.engine === "kokoro" ? "Every Kokoro voice shares these files" : "Delete the file"} onclick={() => removeModel(m.id)}>Delete</button>
+                      <button class="btn small" disabled={used && v.settings.enabled} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
                     </span>
                   </div>
                 {/each}

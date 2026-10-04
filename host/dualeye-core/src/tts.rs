@@ -1,20 +1,18 @@
-//! Text-to-speech with sidecars on `127.0.0.1`: a
-//! [Piper](https://github.com/OHF-Voice/piper1-gpl) `http_server`, and a
-//! small server of ours around [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx)
-//! (`kokoro_server.py`) for Kokoro's voices.
+//! Text-to-speech with a sidecar on `127.0.0.1`: a
+//! [Piper](https://github.com/OHF-Voice/piper1-gpl) `http_server`.
 //!
-//! Each engine is a Python package (`piper-tts`, GPL-3.0; `kokoro-onnx`,
-//! MIT), run as a separate process and installed into a virtualenv of its
-//! own in DualEye's data folder with [`install`]. [`Tts`] starts the servers
+//! Each engine is a Python package (`piper-tts`, GPL-3.0), run as a
+//! separate process and installed into a virtualenv of its own in
+//! DualEye's data folder with [`install`]. [`Tts`] starts the servers
 //! its voices need in the background, restarts one that dies and stops them
 //! when dropped ([`crate::sidecar`]). One server speaks every voice of its
 //! engine: each request names the one for its language. Voices come from
-//! [`crate::models`]; Piper's 22 kHz and Kokoro's 24 kHz are resampled to
-//! the board's 16 kHz.
+//! [`crate::models`]; Piper's 22 kHz is resampled to the board's 16 kHz.
 //!
 //! A voice can also be a provider's ([`crate::cloud`], `groq:hannah`): no
 //! server here, just a request per sentence (split further where the
-//! provider takes less text at once).
+//! provider takes less text at once). When it hits the provider's limits, a
+//! downloaded voice of its language speaks instead, if there's one.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -37,23 +35,17 @@ use crate::voice::SAMPLE_RATE;
 
 /// What [`install`] puts in Piper's virtualenv.
 pub const PIPER_REQUIREMENT: &str = "piper-tts[http]==1.8.0";
-/// And in Kokoro's: it wants Python 3.10 to 3.13.
-pub const KOKORO_REQUIREMENT: &str = "kokoro-onnx==0.6.1";
-/// Kokoro's server, written next to its virtualenv each time it starts.
-const KOKORO_SERVER: &str = include_str!("kokoro_server.py");
-const KOKORO_SERVER_FILE: &str = "dualeye_kokoro.py";
 /// Written into the virtualenv once the engine is installed in it.
 const READY_MARKER: &str = ".dualeye-ready";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Engine {
-    pub const ALL: [Engine; 2] = [Engine::Piper, Engine::Kokoro];
+    pub const ALL: [Engine; 1] = [Engine::Piper];
 
     pub fn name(self) -> &'static str {
         match self {
             Engine::Piper => "Piper",
-            Engine::Kokoro => "Kokoro",
         }
     }
 
@@ -61,14 +53,12 @@ impl Engine {
     pub fn key(self) -> &'static str {
         match self {
             Engine::Piper => "piper",
-            Engine::Kokoro => "kokoro",
         }
     }
 
     pub fn requirement(self) -> &'static str {
         match self {
             Engine::Piper => PIPER_REQUIREMENT,
-            Engine::Kokoro => KOKORO_REQUIREMENT,
         }
     }
 
@@ -76,17 +66,16 @@ impl Engine {
     fn pythons(self) -> std::ops::RangeInclusive<u32> {
         match self {
             Engine::Piper => 9..=99,
-            Engine::Kokoro => 10..=13,
         }
     }
 
-    /// Where its virtualenv lives: `piper/` or `kokoro/` in DualEye's data folder.
+    /// Where its virtualenv lives: `piper/` in DualEye's data folder.
     pub fn dir(self) -> Option<PathBuf> {
         crate::claude::data_dir().map(|d| d.join(self.key()))
     }
 
-    /// The virtualenv's interpreter: `DUALEYE_PIPER_PYTHON` (or
-    /// `DUALEYE_KOKORO_PYTHON`), or the one [`install`] set up.
+    /// The virtualenv's interpreter: `DUALEYE_PIPER_PYTHON`, or the one
+    /// [`install`] set up.
     pub fn python(self) -> Option<PathBuf> {
         if let Some(p) = std::env::var_os(format!("DUALEYE_{}_PYTHON", self.key().to_uppercase())).map(PathBuf::from) {
             return p.is_file().then_some(p);
@@ -102,8 +91,7 @@ pub fn find_python() -> Option<PathBuf> {
 }
 
 /// Create `engine`'s virtualenv with `python` and install its
-/// [`Engine::requirement`] into it (about 60 MB for Piper, 150 MB for
-/// Kokoro, from PyPI), passing on pip's output line by line. Returns the
+/// [`Engine::requirement`] into it (about 60 MB for Piper, from PyPI), passing on pip's output line by line. Returns the
 /// virtualenv's interpreter.
 pub fn install(engine: Engine, python: &Path, mut on_line: impl FnMut(String)) -> io::Result<PathBuf> {
     let dir = engine.dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no data folder"))?;
@@ -159,6 +147,9 @@ pub struct TtsConfig {
     pub voices: BTreeMap<String, String>,
     /// The cloud voices among `voices`, by id, with their provider's key.
     pub clients: BTreeMap<String, cloud::Client>,
+    /// For each cloud voice that has one, by id: the downloaded voice of its
+    /// language that speaks when it hits its limits.
+    pub fallbacks: BTreeMap<String, String>,
 }
 
 impl TtsConfig {
@@ -170,7 +161,7 @@ impl TtsConfig {
             .filter_map(|lang| models::default_voice(lang).map(|v| (lang.to_string(), v.to_string())))
             .filter(|(_, v)| Model::by_id(v).is_some_and(Model::is_installed))
             .collect();
-        Self { pythons: installed_engines(), voices, clients: BTreeMap::new() }
+        Self { pythons: installed_engines(), voices, clients: BTreeMap::new(), fallbacks: BTreeMap::new() }
     }
 
     /// `voices`, local or cloud, with the engines in `pythons`. Fails on a
@@ -180,8 +171,9 @@ impl TtsConfig {
             .values()
             .filter(|v| cloud::is_cloud_id(v))
             .map(|v| cloud::Client::new(v, Kind::Voice).map(|c| (v.clone(), c)))
-            .collect::<Result<_, _>>()?;
-        Ok(Self { pythons, voices, clients })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let fallbacks = clients.iter().filter_map(|(id, c)| Some((id.clone(), local_voice(&pythons, c.model.model.language?)?.to_string()))).collect();
+        Ok(Self { pythons, voices, clients, fallbacks })
     }
 
     /// The engines its voices need.
@@ -190,12 +182,20 @@ impl TtsConfig {
     }
 }
 
+/// A downloaded voice of `language` that an engine in `pythons` speaks: the
+/// default one if it can, else any.
+fn local_voice(pythons: &BTreeMap<Engine, PathBuf>, language: &str) -> Option<&'static str> {
+    let usable = |m: &&Model| m.language == Some(language) && m.is_installed() && m.engine().is_some_and(|e| pythons.contains_key(&e));
+    let voices = || Model::of_kind(Kind::Voice).filter(usable);
+    voices().find(|m| Some(m.id) == models::default_voice(language)).or_else(|| voices().next()).map(|m| m.id)
+}
+
 /// The interpreter of every engine that's installed.
 pub fn installed_engines() -> BTreeMap<Engine, PathBuf> {
     Engine::ALL.into_iter().filter_map(|e| e.python().map(|p| (e, p))).collect()
 }
 
-/// Says which engine failed: `piper: ...` or `kokoro: ...`.
+/// Says which engine failed: `piper: ...`.
 #[derive(Debug)]
 pub struct TtsError(String);
 
@@ -268,15 +268,12 @@ impl Tts {
         if !text.chars().any(char::is_alphanumeric) {
             return Ok(Vec::new());
         }
-        let voice = self.voice_for(language).ok_or_else(|| TtsError::new(Engine::Piper, "no voice downloaded"))?.to_string();
+        let mut voice = self.voice_for(language).ok_or_else(|| TtsError::new(Engine::Piper, "no voice downloaded"))?.to_string();
         if let Some(client) = self.config.clients.get(&voice) {
-            let mut out = Vec::new();
-            for piece in cloud::chunks(text, client.model.model.max_chars) {
-                let wav = client.speak(&piece).map_err(TtsError::cloud)?;
-                let (rate, samples) = parse_wav(&wav).ok_or_else(|| TtsError(format!("{}: not a 16-bit mono WAV", client.model.provider.name)))?;
-                out.extend(resample(&samples, rate, SAMPLE_RATE));
+            match self.speak_cloud(client, text) {
+                Err(e) if e.is_limit() && self.config.fallbacks.contains_key(&voice) => voice = self.config.fallbacks[&voice].clone(),
+                spoken => return spoken.map_err(TtsError::cloud),
             }
-            return Ok(out);
         }
         let wav = self.request(text, &voice)?;
         let engine = Model::by_id(&voice).and_then(Model::engine).unwrap_or(Engine::Piper);
@@ -284,11 +281,22 @@ impl Tts {
         Ok(resample(&samples, rate, SAMPLE_RATE))
     }
 
+    /// `text` spoken by a cloud voice, a piece at a time.
+    fn speak_cloud(&self, client: &cloud::Client, text: &str) -> Result<Vec<i16>, CloudError> {
+        let mut out = Vec::new();
+        for piece in cloud::chunks(text, client.model.model.max_chars) {
+            let wav = client.speak(&piece)?;
+            let (rate, samples) = parse_wav(&wav).ok_or_else(|| CloudError::Invalid { provider: client.model.provider.name, why: "not a 16-bit mono WAV".into() })?;
+            out.extend(resample(&samples, rate, SAMPLE_RATE));
+        }
+        Ok(out)
+    }
+
     fn request(&self, text: &str, voice: &str) -> Result<Vec<u8>, TtsError> {
         let model = Model::by_id(voice).filter(|m| m.kind == Kind::Voice);
         let engine = model.and_then(Model::engine).unwrap_or(Engine::Piper);
         let model = model.ok_or_else(|| TtsError::new(engine, format!("{voice} isn't a voice")))?;
-        let body = json!({"text": text, "voice": model.voice_name()}).to_string();
+        let body = json!({"text": text, "voice": model.id}).to_string();
         // A server that died since the last request gets one restart.
         for attempt in 0..2 {
             let addr = self.addr(engine)?;
@@ -331,12 +339,6 @@ impl Tts {
             Engine::Piper => {
                 cmd.args(["-m", "piper.http_server", "-m", first.id]).arg("--data-dir").arg(&dir);
                 "piper.http_server"
-            }
-            Engine::Kokoro => {
-                let script = home.join(KOKORO_SERVER_FILE);
-                fs::create_dir_all(&home).and_then(|()| fs::write(&script, KOKORO_SERVER)).map_err(|e| e.to_string())?;
-                cmd.arg(&script).arg("--model").arg(dir.join(first.files[0].name)).arg("--voices").arg(dir.join(first.files[1].name));
-                KOKORO_SERVER_FILE
             }
         };
         Process::start(cmd, marker, Some(home.join("server.pid")), Some(home.join("server.log")), STARTUP_TIMEOUT)

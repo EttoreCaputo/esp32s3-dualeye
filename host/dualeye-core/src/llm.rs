@@ -7,7 +7,9 @@
 //! template's own tool calling (`--jinja`) and thinking turned off: a voice
 //! command wants an answer, not a train of thought. The server keeps the
 //! prompt's common prefix (system prompt and tools) cached between requests.
-//! A cloud model gets the same requests, less what only llama.cpp reads.
+//! A cloud model gets the same requests, less what only llama.cpp reads;
+//! when it hits its provider's limits, a local one ([`Llm::with_fallback`])
+//! answers them instead.
 
 use std::fmt;
 use std::io;
@@ -21,6 +23,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::cloud::{self, CloudError};
+use crate::models::{Kind, Model};
 use crate::sidecar::{self, Process};
 use crate::stt::models_dir;
 
@@ -70,6 +73,16 @@ pub struct LocalLlm {
     /// Layers to put on the GPU: `None` lets llama.cpp decide (all of them on
     /// Apple silicon and a big enough NVIDIA card), `Some(0)` runs on the CPU.
     pub gpu_layers: Option<u32>,
+}
+
+/// The local model to answer in a cloud model's place when it hits its
+/// limits: the default one if it's downloaded, else any that is; `None`
+/// without `llama-server` or a model.
+pub fn local_fallback() -> Option<LocalLlm> {
+    let server = find_server()?;
+    let installed = || Model::of_kind(Kind::Llm).filter(|m| m.is_installed());
+    let model = installed().find(|m| m.id == crate::models::DEFAULT_LLM).or_else(|| installed().next())?;
+    Some(LocalLlm { server, model: model.path()?, gpu_layers: None })
 }
 
 /// `llama-server`: `DUALEYE_LLAMA_SERVER`, the one the app ships, or one on
@@ -147,6 +160,8 @@ impl From<io::Error> for LlmError {
 /// The sidecar. Shared between connections: it outlives a board reconnect.
 pub struct Llm {
     config: LlmConfig,
+    /// What answers when a cloud model hits its limits.
+    fallback: Option<LocalLlm>,
     server: Mutex<Option<Process>>,
 }
 
@@ -158,7 +173,14 @@ impl fmt::Debug for Llm {
 
 impl Llm {
     pub fn new(config: LlmConfig) -> Self {
-        Self { config, server: Mutex::new(None) }
+        Self { config, fallback: None, server: Mutex::new(None) }
+    }
+
+    /// With `fallback` answering when a cloud model hits its limits (see
+    /// [`local_fallback`]). Its server only starts when it's needed.
+    pub fn with_fallback(mut self, fallback: Option<LocalLlm>) -> Self {
+        self.fallback = fallback.filter(|_| !self.config.is_local());
+        self
     }
 
     pub fn config(&self) -> &LlmConfig {
@@ -184,7 +206,10 @@ impl Llm {
     /// sampling settings in `request`): the first choice's message.
     pub fn chat(&self, request: &Value) -> Result<Value, LlmError> {
         if let LlmConfig::Cloud(client) = &self.config {
-            return client.chat(request).map_err(LlmError::Cloud);
+            match client.chat(request) {
+                Err(e) if e.is_limit() && self.fallback.is_some() => {}
+                reply => return reply.map_err(LlmError::Cloud),
+            }
         }
         let body = serde_json::to_vec(request).map_err(|e| LlmError::Invalid(e.to_string()))?;
         // A server that died since the last request gets one restart.
@@ -215,7 +240,10 @@ impl Llm {
             }
             *server = None;
         }
-        let LlmConfig::Local(config) = &self.config else { return Err(LlmError::Server("a cloud model has no server".into())) };
+        let config = match &self.config {
+            LlmConfig::Local(config) => config,
+            LlmConfig::Cloud(_) => self.fallback.as_ref().ok_or_else(|| LlmError::Server("a cloud model has no server".into()))?,
+        };
         let s = start(config)?;
         let addr = s.addr;
         *server = Some(s);
