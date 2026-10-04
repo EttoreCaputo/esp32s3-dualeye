@@ -111,6 +111,8 @@ struct VoiceSettings {
     speak: bool,
     /// After a spoken answer, listen a few seconds more without the wake word.
     follow_up: bool,
+    /// Pause the music playing on this computer while the board listens.
+    pause_music: bool,
     /// Voice by language (`it`, `en`): `models::MODELS` ids, or cloud ones.
     voices: BTreeMap<String, String>,
     /// Understand commands with a local language model; without it, a few
@@ -153,6 +155,7 @@ impl Default for VoiceSettings {
             keep_recordings: false,
             speak: true,
             follow_up: true,
+            pause_music: true,
             voices,
             llm: rec.llm.is_some(),
             llm_model: rec.llm.unwrap_or(models::DEFAULT_LLM).into(),
@@ -352,7 +355,7 @@ fn apply_voice(state: &AppState) {
         agent.set_personality(&agent::personality_prompt(&settings.personality, &settings.personality_custom));
     }
     let dump_dir = settings.keep_recordings.then(voice::default_dump_dir).flatten();
-    *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt, tts, agent, follow_up: settings.follow_up };
+    *state.voice.lock().unwrap() = VoiceConfig { dump_dir, stt, tts, agent, follow_up: settings.follow_up, pause_music: settings.pause_music };
 }
 
 /// One sidecar for [`apply_voice`]: off (`wanted` is `None`), not possible

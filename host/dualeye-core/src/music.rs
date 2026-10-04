@@ -9,6 +9,11 @@
 //! the cover ready for the board: cropped to the middle square, 240 × 240
 //! RGB565, sent with `music/art` (see [`upload_cover`]) and named in the
 //! snapshot's `music.art` ([`BoardMusic`]).
+//!
+//! While the voice listens, the music is paused ([`Music::pause_for_voice`])
+//! so the board hears the person rather than the song, and plays again once
+//! the conversation is over ([`Music::resume_after_voice`]), unless the
+//! person said what to do with it meanwhile.
 
 use std::fmt;
 use std::io::Cursor;
@@ -222,6 +227,9 @@ pub struct Music {
     state: Mutex<State>,
     wake: Condvar,
     started: OnceLock<()>,
+    /// What the voice paused, to play again after it; held while pausing or
+    /// resuming, so the two never cross.
+    voice_paused: Mutex<Option<NowPlaying>>,
 }
 
 #[derive(Default)]
@@ -277,20 +285,59 @@ impl Music {
         Some(self.now()?.board_view(art))
     }
 
-    /// Look now, on this thread: for a question about what's playing.
+    /// Look now, on this thread: for a question about what's playing. What
+    /// the voice paused still plays, as far as the person is concerned.
     pub fn refresh(&self) -> Option<NowPlaying> {
-        let now = now_playing();
+        let mut now = now_playing();
         self.state.lock().unwrap().now = now.clone();
+        if let (Some(n), Some(was)) = (now.as_mut(), self.voice_paused.lock().unwrap().as_ref())
+            && n.same_track(was)
+        {
+            n.playing = true;
+        }
         now
     }
 
-    /// Play, pause or skip, then look again soon.
+    /// Play, pause or skip, then look again soon. Playing or pausing is the
+    /// person's word on it: the voice won't play it again after.
     pub fn control(&self, action: Control) -> Result<String, String> {
+        if !matches!(action, Control::Next | Control::Previous) {
+            self.voice_paused.lock().unwrap().take();
+        }
         let current = self.now().or_else(now_playing);
         let player = control(action, current.as_ref())?;
+        self.poke();
+        Ok(player)
+    }
+
+    /// Pause what's playing while the voice listens; the player's name, or
+    /// `None` when nothing played (or it's paused already).
+    pub fn pause_for_voice(&self) -> Result<Option<String>, String> {
+        let mut paused = self.voice_paused.lock().unwrap();
+        if paused.is_some() {
+            return Ok(None);
+        }
+        let Some(now) = now_playing().filter(|n| n.playing) else { return Ok(None) };
+        let player = control(Control::Pause, Some(&now))?;
+        *paused = Some(now);
+        self.poke();
+        Ok(Some(player))
+    }
+
+    /// Play again what [`Music::pause_for_voice`] paused; the player's name,
+    /// or `None` when there's nothing to play again.
+    pub fn resume_after_voice(&self) -> Result<Option<String>, String> {
+        let mut paused = self.voice_paused.lock().unwrap();
+        let Some(was) = paused.take() else { return Ok(None) };
+        let player = control(Control::Play, Some(&was))?;
+        self.poke();
+        Ok(Some(player))
+    }
+
+    /// Look again at once.
+    fn poke(&self) {
         self.state.lock().unwrap().poke = true;
         self.wake.notify_all();
-        Ok(player)
     }
 
     fn run(&self) {

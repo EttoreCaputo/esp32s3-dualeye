@@ -724,6 +724,11 @@
               <span class="slabel">Keep listening after an answer, without the wake word</span>
             </label>
             <label class="switch">
+              <input type="checkbox" checked={v.settings.pause_music} onchange={(e) => setVoice({ pause_music: e.currentTarget.checked })} />
+              <span class="track"><span class="knob"></span></span>
+              <span class="slabel">Pause the music while listening</span>
+            </label>
+            <label class="switch">
               <input type="checkbox" checked={v.settings.llm} onchange={(e) => setVoice({ llm: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
               <span class="slabel">Understand with a language model</span>

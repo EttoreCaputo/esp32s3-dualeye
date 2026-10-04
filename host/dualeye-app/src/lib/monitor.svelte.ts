@@ -164,6 +164,8 @@ export type VoiceSettings = {
   speak: boolean;
   /** After a spoken answer, listen a few seconds more without the wake word. */
   follow_up: boolean;
+  /** Pause the music playing on this computer while the board listens. */
+  pause_music: boolean;
   /** Voice by language: `it`, `en`. */
   voices: Record<string, string>;
   /** Understand with a local language model (else fixed phrases). */
@@ -842,6 +844,7 @@ const previewVoice: VoiceInfo = {
     keep_recordings: false,
     speak: true,
     follow_up: true,
+    pause_music: true,
     voices: { it: "it_IT-paola-medium", en: "en_GB-alba-medium" },
     llm: true,
     llm_model: "qwen3-4b-2507",

@@ -135,6 +135,10 @@ struct Args {
     /// the wake word
     #[arg(long, requires = "tts")]
     no_follow_up: bool,
+    /// Don't pause the music playing on this computer while the board
+    /// listens
+    #[arg(long)]
+    no_pause_music: bool,
     #[command(flatten)]
     llm: LlmArgs,
 }
@@ -444,6 +448,7 @@ fn main() -> ExitCode {
             tts,
             agent,
             follow_up: !args.no_follow_up,
+            pause_music: !args.no_pause_music,
         })),
         // The alerts need the hooks in Claude Code's settings (the app's Display tab adds them).
         claude_alerts: Arc::default(),

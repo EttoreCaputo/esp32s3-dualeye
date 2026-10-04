@@ -12,7 +12,9 @@
 //! Whisper heard no words, the board shows `error` (a red ring and a short
 //! sound). After a spoken answer the board listens again for a few seconds
 //! without the wake word ([`VoiceConfig::follow_up`]); the wake word said
-//! over the answer stops it (barge-in, on the board).
+//! over the answer stops it (barge-in, on the board). Music playing on this
+//! computer is paused from the wake word to the end of the conversation
+//! ([`VoiceConfig::pause_music`]).
 //!
 //! Speech goes to the board on `audio_down`, paced in real time a little
 //! ahead of the speaker, a sentence at a time: the first plays while the
@@ -203,6 +205,9 @@ pub struct VoiceConfig {
     /// After a spoken answer, listen for a few seconds more without the
     /// wake word.
     pub follow_up: bool,
+    /// Pause the music playing on this computer while the board listens,
+    /// and play it again after.
+    pub pause_music: bool,
 }
 
 /// Whisper's output for silence or noise rather than words.
@@ -245,9 +250,9 @@ pub(crate) struct Session {
 
 /// What the link's reader hands the pipeline.
 pub enum Hearing {
-    /// The board started streaming: the language model can read its prompt
-    /// meanwhile.
-    Started,
+    /// The board started streaming (`wake`, `host` or `follow_up`): the
+    /// language model can read its prompt meanwhile.
+    Started { trigger: String },
     Utterance(Utterance),
 }
 
@@ -259,7 +264,12 @@ pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSi
         let config = config.lock().unwrap().clone();
         let utterance = match heard {
             Hearing::Utterance(u) => u,
-            Hearing::Started => {
+            Hearing::Started { trigger } => {
+                // A follow-up is the same conversation: the music is paused
+                // already, or the person played it.
+                if config.pause_music && trigger != "follow_up" {
+                    pause_music(session, sink);
+                }
                 if let (Some(agent), Some(link)) = (&config.agent, session.link.upgrade())
                     && let Err(e) = agent.prime(&BoardToolbox { link: &link, session, language: "en" })
                 {
@@ -282,9 +292,10 @@ pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSi
             utterance: utterance.clone(),
         });
         if !utterance.speech {
+            resume_music(session, sink);
             continue;
         }
-        let Some(link) = session.link.upgrade() else { return };
+        let Some(link) = session.link.upgrade() else { break };
         // The board shows thinking meanwhile.
         let follow_up = utterance.trigger == "follow_up";
         let transcript = match &config.stt {
@@ -309,15 +320,46 @@ pub(crate) fn run(config: &Mutex<VoiceConfig>, session: &Session, sink: &EventSi
             Ok(t) => respond(&link, session, &config, sink, utterance.id, &t.text, &t.language),
             Err(state) => Next::State(state),
         };
-        match next {
-            Next::State(state) => set_state(&link, state),
-            Next::Spoken if config.follow_up => {
-                if let Err(e) = link.call("voice/listen", json!({"follow_up": true}), STATE_TIMEOUT) {
-                    sink(BridgeEvent::BoardLog { line: format!("host: no follow-up: {e}") });
-                }
+        let over = match next {
+            Next::State(state) => {
+                set_state(&link, state);
+                true
             }
-            Next::Spoken | Next::Interrupted => {}
+            Next::Spoken if config.follow_up => match link.call("voice/listen", json!({"follow_up": true}), STATE_TIMEOUT) {
+                Ok(_) => false,
+                Err(e) => {
+                    sink(BridgeEvent::BoardLog { line: format!("host: no follow-up: {e}") });
+                    true
+                }
+            },
+            Next::Spoken => true,
+            Next::Interrupted => false,
+        };
+        if over {
+            resume_music(session, sink);
         }
+    }
+    // The board is gone mid-conversation.
+    resume_music(session, sink);
+}
+
+/// Pause the music on a thread of its own: asking the player takes a moment,
+/// and the language model's prompt shouldn't wait for it.
+fn pause_music(session: &Session, sink: &EventSink) {
+    let (music, sink) = (session.music.clone(), sink.clone());
+    let _ = thread::Builder::new().name("dualeye-voice-music".into()).spawn(move || match music.pause_for_voice() {
+        Ok(Some(player)) => sink(BridgeEvent::BoardLog { line: format!("host: {player} paused while listening") }),
+        Ok(None) => {}
+        Err(e) => sink(BridgeEvent::BoardLog { line: format!("host: could not pause the music: {e}") }),
+    });
+}
+
+/// Play again what [`pause_music`] paused, once the conversation is over.
+fn resume_music(session: &Session, sink: &EventSink) {
+    match session.music.resume_after_voice() {
+        Ok(Some(player)) => sink(BridgeEvent::BoardLog { line: format!("host: {player} playing again") }),
+        Ok(None) => {}
+        Err(e) => sink(BridgeEvent::BoardLog { line: format!("host: could not play the music again: {e}") }),
     }
 }
 
@@ -680,7 +722,8 @@ impl Receiving {
 
     pub fn start(&mut self, params: &Value) {
         self.capture.start(params);
-        let _ = self.pipeline.send(Hearing::Started);
+        let trigger = params["trigger"].as_str().unwrap_or("wake").to_string();
+        let _ = self.pipeline.send(Hearing::Started { trigger });
     }
 
     pub fn audio(&mut self, payload: &[u8]) {

@@ -7,6 +7,10 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.3.2
+
+- **Talking with music on.** The board tells your voice from music and noise much better, so it stops listening when you've finished instead of running on to the 12-second limit, and it waits a little longer when you pause mid-sentence. The app also pauses the music playing on your computer while you talk to it, and plays it again after.
+
 ## 1.3.1
 
 - **The voice knows every face.** The board's list of what it can do had grown too long to reach the computer, so the voice only knew the first faces: "Alexa, metti la musica sul display destro" now finds the music face, and the eyes, timer, network, disk and battery ones too.

@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_vadn_models.h"
 #include "esp_wn_models.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -31,7 +32,12 @@ static const char *TAG = "voice";
  * VAD_HANGOVER_MS + END_SILENCE_MS of silence once speech started,
  * NO_SPEECH_MS without any, or MAX_UTTERANCE_MS in all. */
 #define VAD_HANGOVER_MS 500
-#define END_SILENCE_MS 250
+/* 750 ms in all cut people off when they stopped to think. */
+#define END_SILENCE_MS 400
+/* VADNet's speech must last this long, and be this loud on average: a
+ * clatter or a quiet radio isn't someone talking to the board. */
+#define VAD_MIN_SPEECH_MS 192
+#define VAD_ENERGY_DB -55.0f
 /* The VAD still reports the wake word itself for its hangover: speech that
  * doesn't outlast it isn't the command. */
 #define WAKE_TAIL_MS (VAD_HANGOVER_MS + 200)
@@ -518,6 +524,13 @@ static esp_afe_sr_data_t *create_afe(const char *model)
     char *second = cfg->wakenet_model_name_2;
     cfg->wakenet_model_name = (char *) model;
     cfg->wakenet_model_name_2 = NULL;
+    // VADNet rather than WebRTC's VAD, which took music and noise for speech:
+    // the utterance then only ended at MAX_UTTERANCE_MS. Without it in the
+    // partition, WebRTC's still.
+    char *vad = cfg->vad_model_name;
+    cfg->vad_model_name = esp_srmodel_filter(s_models, ESP_VADN_PREFIX, NULL);
+    cfg->vad_min_speech_ms = VAD_MIN_SPEECH_MS;
+    cfg->vad_energy_threshold = VAD_ENERGY_DB;
     // Silence ends an utterance sooner than the default 1000 ms.
     cfg->vad_min_noise_ms = VAD_HANGOVER_MS;
     // Internal RAM is short (M0: 36 KB largest block); PSRAM has 8 MB.
@@ -528,6 +541,8 @@ static esp_afe_sr_data_t *create_afe(const char *model)
     esp_afe_sr_data_t *data = s_afe != NULL ? s_afe->create_from_config(cfg) : NULL;
     cfg->wakenet_model_name = first;
     cfg->wakenet_model_name_2 = second;
+    ESP_LOGI(TAG, "VAD: %s", cfg->vad_model_name != NULL ? cfg->vad_model_name : "WebRTC");
+    cfg->vad_model_name = vad;
     afe_config_free(cfg);
     return data;
 }
