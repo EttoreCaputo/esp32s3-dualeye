@@ -199,6 +199,8 @@ export type ProviderInfo = {
   /** Where its API key comes from: its environment variable, or saved by the app. */
   key: "env" | "saved" | null;
 };
+/** A voice the ElevenLabs account can speak with. */
+export type AccountVoice = { voice_id: string; name: string; category: string; description: string | null };
 export type SttStatus = "off" | "starting" | "ready" | "error";
 export type TtsEngine = "piper";
 export type VoiceInfo = {
@@ -213,6 +215,8 @@ export type VoiceInfo = {
   piper_install: string | null;
   tts: SttStatus;
   tts_error: string | null;
+  /** Why the downloaded voice answers instead of the cloud one, while it does. */
+  tts_fallback: string | null;
   /** llama-server, if found. */
   llm_server: string | null;
   llm: SttStatus;
@@ -694,6 +698,12 @@ class Monitor {
     return invoke<VoiceInfo>("set_voice", { settings });
   }
 
+  /** The voices the ElevenLabs account can speak with: its own, newest first, then ElevenLabs'. */
+  async elevenlabsVoices(): Promise<AccountVoice[]> {
+    if (this.preview) return [...previewAccountVoices];
+    return invoke<AccountVoice[]>("elevenlabs_voices");
+  }
+
   /** Save a provider's API key (null forgets it); fails if the provider refuses it. */
   async setApiKey(provider: string, key: string | null): Promise<VoiceInfo> {
     if (this.preview) {
@@ -840,6 +850,11 @@ function previewCloud(kind: ModelInfo["kind"], language: string | null, models: 
   return models.map(([id, note]) => ({ id: `groq:${id}`, kind, language, engine: null, bytes: 0, note, license: "", installed: false, provider: "groq" }));
 }
 
+const previewAccountVoices: AccountVoice[] = [
+  { voice_id: "pv-birba", name: "Birba", category: "generated", description: "Mischievous cartoon cat sidekick" },
+  { voice_id: "pv-rachel", name: "Rachel", category: "premade", description: null },
+];
+
 const previewVoice: VoiceInfo = {
   settings: {
     enabled: false,
@@ -885,12 +900,21 @@ const previewVoice: VoiceInfo = {
   piper_install: null,
   tts: "off",
   tts_error: null,
+  tts_fallback: null,
   llm_server: "/opt/homebrew/bin/llama-server",
   llm: "off",
   llm_error: null,
   download: null,
   providers: [
     { id: "groq", name: "Groq", note: "Free with daily limits; what you say is sent to Groq", keys_url: "https://console.groq.com/keys", key_env: "GROQ_API_KEY", key: null },
+    {
+      id: "elevenlabs",
+      name: "ElevenLabs",
+      note: "The voices of your account; free plan: 10,000 credits a month. The answers are sent to ElevenLabs",
+      keys_url: "https://elevenlabs.io/app/developers/api-keys",
+      key_env: "ELEVENLABS_API_KEY",
+      key: null,
+    },
   ],
   hardware: { cpu: "Apple M1 Pro", cores: 8, memory_mb: 16_384, gpu: { kind: "apple" } },
   recommendation: { whisper: "small", llm: "qwen3.5-4b", speed: "fast", why: "Apple silicon with enough memory runs the recommended models on its GPU." },

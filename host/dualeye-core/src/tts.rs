@@ -9,10 +9,12 @@
 //! engine: each request names the one for its language. Voices come from
 //! [`crate::models`]; Piper's 22 kHz is resampled to the board's 16 kHz.
 //!
-//! A voice can also be a provider's ([`crate::cloud`], `groq:hannah`): no
-//! server here, just a request per sentence (split further where the
-//! provider takes less text at once). When it hits the provider's limits, a
-//! downloaded voice of its language speaks instead, if there's one.
+//! A voice can also be a provider's ([`crate::cloud`], `groq:hannah`,
+//! `elevenlabs:voice/<voice_id>`): no server here, just a request per sentence (split
+//! further where the provider takes less text at once). When it fails for
+//! any reason (its limits, the month's credits, the network, the key), a
+//! downloaded voice of the language speaks instead, if there's one, and the
+//! cloud voice is left alone for a minute ([`CLOUD_RETRY`]).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -21,7 +23,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 
@@ -39,6 +41,9 @@ pub const PIPER_REQUIREMENT: &str = "piper-tts[http]==1.8.0";
 const READY_MARKER: &str = ".dualeye-ready";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a cloud voice that failed is left to its fallback before it's
+/// asked again (one over its limits says how long itself).
+pub const CLOUD_RETRY: Duration = Duration::from_secs(60);
 
 impl Engine {
     pub const ALL: [Engine; 1] = [Engine::Piper];
@@ -147,8 +152,8 @@ pub struct TtsConfig {
     pub voices: BTreeMap<String, String>,
     /// The cloud voices among `voices`, by id, with their provider's key.
     pub clients: BTreeMap<String, cloud::Client>,
-    /// For each cloud voice that has one, by id: the downloaded voice of its
-    /// language that speaks when it hits its limits.
+    /// For each language with a cloud voice, where there's one: the
+    /// downloaded voice that speaks when it fails.
     pub fallbacks: BTreeMap<String, String>,
 }
 
@@ -172,9 +177,14 @@ impl TtsConfig {
             .filter(|v| cloud::is_cloud_id(v))
             .map(|v| cloud::Client::new(v, Kind::Voice).map(|c| (v.clone(), c)))
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let fallbacks = clients.iter().filter_map(|(id, c)| Some((id.clone(), local_voice(&pythons, c.model.model.language?)?.to_string()))).collect();
+        let fallbacks = voices
+            .iter()
+            .filter(|(_, v)| clients.contains_key(*v))
+            .filter_map(|(lang, _)| Some((lang.clone(), local_voice(&pythons, lang)?.to_string())))
+            .collect();
         Ok(Self { pythons, voices, clients, fallbacks })
     }
+
 
     /// The engines its voices need.
     pub fn engines(&self) -> impl Iterator<Item = Engine> + '_ {
@@ -221,6 +231,9 @@ impl std::error::Error for TtsError {}
 pub struct Tts {
     config: TtsConfig,
     servers: Mutex<BTreeMap<Engine, Process>>,
+    /// The cloud voices that failed and are left to their fallbacks: why,
+    /// and until when.
+    failed: Mutex<BTreeMap<String, (String, Instant)>>,
 }
 
 impl fmt::Debug for Tts {
@@ -231,7 +244,7 @@ impl fmt::Debug for Tts {
 
 impl Tts {
     pub fn new(config: TtsConfig) -> Self {
-        Self { config, servers: Mutex::new(BTreeMap::new()) }
+        Self { config, servers: Mutex::new(BTreeMap::new()), failed: Mutex::new(BTreeMap::new()) }
     }
 
     pub fn config(&self) -> &TtsConfig {
@@ -253,13 +266,37 @@ impl Tts {
     /// request, which takes most of a second). A cloud voice's key is only
     /// checked: each sentence spoken counts against a free plan.
     pub fn warm_up(&self) -> Result<(), TtsError> {
-        for voice in self.config.voices.values() {
+        for (language, voice) in &self.config.voices {
             match self.config.clients.get(voice) {
-                Some(client) => client.check().map_err(TtsError::cloud)?,
+                Some(client) => {
+                    if let Err(e) = client.check() {
+                        // Not working now: have its fallback ready instead, if it has one.
+                        let fallback = self.config.fallbacks.get(language).ok_or_else(|| TtsError::cloud(e.clone()))?;
+                        self.cloud_failed(voice, &e);
+                        drop(self.request("Ok.", fallback)?);
+                    }
+                }
                 None => drop(self.request("Ok.", voice)?),
             }
         }
         Ok(())
+    }
+
+    /// Why a cloud voice is being stood in for by a downloaded one, while it is.
+    pub fn cloud_trouble(&self) -> Option<String> {
+        let mut failed = self.failed.lock().unwrap();
+        failed.retain(|_, (_, until)| *until > Instant::now());
+        failed.values().next().map(|(why, _)| why.clone())
+    }
+
+    fn cloud_failed(&self, voice: &str, e: &CloudError) {
+        // One over its limits fails at once until it may ask again (crate::cloud): a minute here is enough.
+        self.failed.lock().unwrap().insert(voice.to_string(), (e.to_string(), Instant::now() + CLOUD_RETRY));
+    }
+
+    /// Whether a cloud voice is left to its fallback for now.
+    fn resting(&self, voice: &str) -> bool {
+        self.failed.lock().unwrap().get(voice).is_some_and(|(_, until)| *until > Instant::now())
     }
 
     /// Speak `text` in `language`: 16 kHz mono samples.
@@ -270,9 +307,23 @@ impl Tts {
         }
         let mut voice = self.voice_for(language).ok_or_else(|| TtsError::new(Engine::Piper, "no voice downloaded"))?.to_string();
         if let Some(client) = self.config.clients.get(&voice) {
-            match self.speak_cloud(client, text) {
-                Err(e) if e.is_limit() && self.config.fallbacks.contains_key(&voice) => voice = self.config.fallbacks[&voice].clone(),
-                spoken => return spoken.map_err(TtsError::cloud),
+            let fallback = self.config.fallbacks.get(language);
+            match fallback {
+                Some(f) if self.resting(&voice) => voice = f.clone(),
+                _ => match self.speak_cloud(client, text, language) {
+                    Ok(spoken) => {
+                        self.failed.lock().unwrap().remove(&voice);
+                        return Ok(spoken);
+                    }
+                    // Whatever went wrong, the downloaded voice answers.
+                    Err(e) => match fallback {
+                        Some(f) => {
+                            self.cloud_failed(&voice, &e);
+                            voice = f.clone();
+                        }
+                        None => return Err(TtsError::cloud(e)),
+                    },
+                },
             }
         }
         let wav = self.request(text, &voice)?;
@@ -282,10 +333,10 @@ impl Tts {
     }
 
     /// `text` spoken by a cloud voice, a piece at a time.
-    fn speak_cloud(&self, client: &cloud::Client, text: &str) -> Result<Vec<i16>, CloudError> {
+    fn speak_cloud(&self, client: &cloud::Client, text: &str, language: &str) -> Result<Vec<i16>, CloudError> {
         let mut out = Vec::new();
         for piece in cloud::chunks(text, client.model.model.max_chars) {
-            let wav = client.speak(&piece)?;
+            let wav = client.speak(&piece, Some(language))?;
             let (rate, samples) = parse_wav(&wav).ok_or_else(|| CloudError::Invalid { provider: client.model.provider.name, why: "not a 16-bit mono WAV".into() })?;
             out.extend(resample(&samples, rate, SAMPLE_RATE));
         }
@@ -327,7 +378,14 @@ impl Tts {
 
     fn start(&self, engine: Engine) -> Result<Process, String> {
         let dir = models_dir().ok_or("no data folder for the voices")?;
-        let voices: Vec<&Model> = self.config.voices.values().filter_map(|v| Model::by_id(v)).filter(|m| m.engine() == Some(engine)).collect();
+        // The fallbacks of cloud voices too: they may be all it speaks.
+        let ids = self.config.voices.values().chain(self.config.fallbacks.values());
+        let mut voices: Vec<&Model> = Vec::new();
+        for m in ids.filter_map(|v| Model::by_id(v)).filter(|m| m.engine() == Some(engine)) {
+            if !voices.iter().any(|v| v.id == m.id) {
+                voices.push(m);
+            }
+        }
         let first = voices.first().ok_or("no voice downloaded")?;
         if let Some(missing) = voices.iter().find(|m| !m.is_installed()) {
             return Err(format!("the voice {} isn't downloaded", missing.id));
@@ -466,6 +524,18 @@ mod tests {
         let out = resample(&tone, 22_050, 16_000);
         let rms = (out[200..15_800].iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 15_600.0).sqrt();
         assert!(rms < 300.0, "rms {rms}");
+    }
+
+    #[test]
+    fn a_failed_cloud_voice_rests() {
+        let tts = Tts::new(TtsConfig { pythons: BTreeMap::new(), voices: BTreeMap::new(), clients: BTreeMap::new(), fallbacks: BTreeMap::new() });
+        assert!(!tts.resting("elevenlabs:voice/x") && tts.cloud_trouble().is_none());
+        tts.cloud_failed("elevenlabs:voice/x", &CloudError::Network { provider: "ElevenLabs", why: "offline".into() });
+        assert!(tts.resting("elevenlabs:voice/x") && !tts.resting("groq:hannah"));
+        assert_eq!(tts.cloud_trouble().as_deref(), Some("ElevenLabs: offline"));
+        // Once its time is up, it's asked again.
+        tts.failed.lock().unwrap().values_mut().for_each(|(_, until)| *until = Instant::now());
+        assert!(!tts.resting("elevenlabs:voice/x") && tts.cloud_trouble().is_none());
     }
 
     #[test]

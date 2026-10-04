@@ -125,7 +125,8 @@ struct Args {
     tts: bool,
     /// A voice from `dualeye models` for its language, instead of the
     /// default one (repeat for Italian and English); a cloud one like
-    /// `groq:hannah` too
+    /// `groq:hannah` too, or a voice of an ElevenLabs account for both
+    /// (`elevenlabs:voice/<voice_id>`)
     #[arg(long, value_name = "VOICE", requires = "tts")]
     tts_voice: Vec<String>,
     /// After a spoken answer, don't listen for a few seconds more without
@@ -887,7 +888,10 @@ fn tts_config(voices: &[String]) -> Result<TtsConfig, String> {
     let mut config = TtsConfig::with_default_voices();
     for id in voices {
         if let Some(r) = CloudRef::by_id(id).filter(|r| r.model.kind == Kind::Voice) {
-            config.voices.insert(r.model.language.unwrap_or("en").to_string(), id.clone());
+            // One without a language (ElevenLabs') speaks both.
+            for lang in r.model.language.map_or(vec!["it", "en"], |l| vec![l]) {
+                config.voices.insert(lang.to_string(), id.clone());
+            }
             continue;
         }
         let m = Model::by_id(id).filter(|m| m.kind == Kind::Voice).ok_or_else(|| format!("{id}: not a voice; see dualeye models"))?;
@@ -916,6 +920,15 @@ fn cloud_command(action: Option<CloudAction>) -> ExitCode {
                     None => format!("no key: get one at {}, then dualeye cloud key {}", p.keys_url, p.id),
                 };
                 println!("{:<8} {}. {key}", p.id, p.note);
+                if p.api == cloud::Api::ElevenLabs {
+                    // Its voices are the account's.
+                    match p.api_key().map(|_| cloud::elevenlabs::voices()) {
+                        Some(Ok(voices)) => voices.iter().for_each(|v| println!("         {}:voice/{}  {} ({})", p.id, v.voice_id, v.name, v.category)),
+                        Some(Err(e)) => println!("         {e}"),
+                        None => println!("         {}:voice/<voice_id>: the voices of your account", p.id),
+                    }
+                    continue;
+                }
                 let models: Vec<String> = p.models.iter().map(|m| format!("{}:{}", p.id, m.id)).collect();
                 println!("         {}", models.join(", "));
             }
@@ -942,17 +955,13 @@ fn cloud_command(action: Option<CloudAction>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
             if key.is_some() {
-                // Listing the models is free: it only proves the key works.
-                let check = p.models.first().map(|m| cloud::Client::new(&format!("{}:{}", p.id, m.id), m.kind));
-                match check {
-                    Some(Ok(client)) => match client.check() {
-                        Ok(()) => println!("{} key saved and working", p.name),
-                        Err(e) => {
-                            eprintln!("saved, but {e}");
-                            return ExitCode::FAILURE;
-                        }
-                    },
-                    _ => println!("{} key saved", p.name),
+                // Something free of it: it only proves the key works.
+                match p.check_key() {
+                    Ok(()) => println!("{} key saved and working", p.name),
+                    Err(e) => {
+                        eprintln!("saved, but {e}");
+                        return ExitCode::FAILURE;
+                    }
                 }
             } else {
                 println!("{} key forgotten", p.name);

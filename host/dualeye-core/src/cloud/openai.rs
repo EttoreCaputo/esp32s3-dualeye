@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn chat_request_drops_llama_settings_and_adds_params() {
-        let client = Client { model: CloudRef::by_id("groq:openai/gpt-oss-20b").unwrap(), key: "k".into() };
+        let client = Client { model: CloudRef::by_id("groq:openai/gpt-oss-20b").unwrap(), key: "k".into(), voice_id: None };
         let request = json!({"messages": [], "tools": [], "tool_choice": "auto", "top_k": 20, "max_tokens": 256, "chat_template_kwargs": {}});
         let body = chat_request(&client, &request);
         assert_eq!(body["model"], "openai/gpt-oss-20b");

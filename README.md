@@ -142,6 +142,7 @@ After the wake word the screens turn into two animated eyes (the app's mirror sh
 They close and the watch faces come back when the conversation ends. While nobody is talking they also come out on their own every minute or two for a few seconds (a wink, a yawn, a look around, a dizzy spin...); turn off **Let the eyes play now and then while idle** in the Voice tab (firmware 1.0.2) to keep the faces still. Turn off **Show animated eyes while talking** in the Voice tab (firmware 1.0.1) for a ring round the faces instead, in the same colours: cyan with an arc that follows your voice, amber turning, green with the speaker's level, red.
 
 - **Personality.** Pick how it talks under **Personality**: cute (the default), playful, calm, sassy, a formal butler, minimal, or describe one of your own. It changes only the words, never what it does.
+- **ElevenLabs voices.** With an [ElevenLabs](#elevenlabs-voices) key, answer with a voice of your account. The wave icon on each personality has a prompt to design a voice to match on ElevenLabs.
 - **Follow-ups.** After an answer the board keeps listening for 4 s, so *"e anche a destra"* or *"a bit more"* works straight away; the last exchanges are remembered for 3 minutes. Turn it off with **Keep listening after an answer**.
 - **Interrupting.** Say "Alexa" while the board talks: it stops and listens.
 - **Opening apps.** *"Alexa, apri Spotify"*, *"avvia la calcolatrice"*, *"open Safari"*, *"launch Visual Studio Code"*: the app installed on the computer whose name is closest to what was said opens (Whisper's spellings and Italian names like *calcolatrice* or *impostazioni* work too). Only installed apps can be opened: the Applications folders on macOS, the Start menu on Windows, the `.desktop` entries on Linux.
@@ -176,6 +177,23 @@ A computer too slow for the local models can have an online service run them ins
 
 When the language model hits its limit, the fixed phrases answer instead. The key is kept in `keys.json` in DualEye's data folder, readable by you only.
 
+### ElevenLabs voices
+
+For a voice that suits a cat on the desk better than the downloaded ones, add an [ElevenLabs](https://elevenlabs.io) key under **Online services** (or set `ELEVENLABS_API_KEY`). Create it at [elevenlabs.io/app/developers/api-keys](https://elevenlabs.io/app/developers/api-keys) with the **Text to Speech** permission and **Voices** with read access. The voices of your account then show up under **ElevenLabs voices** in the Voice tab (yours) and in the voice lists under **Models** (ElevenLabs' own too). A voice speaks both Italian and English, with Flash v2.5.
+
+Voices are designed on ElevenLabs' site (**Voices → Create a voice → Voice design**), not in the app. Each personality has a wave icon: hover it, or click it to keep it open, for a prompt and a preview text written for that personality, ready to copy:
+
+| Personality | Suggested voice | Like |
+|-------------|-----------------|------|
+| Cute | Micio | Warm, light and smiling: the desk pet |
+| Playful | Birba | Quick, cheeky and bouncy: the cartoon sidekick |
+| Calm | Fusa | Low, velvety and unhurried: for late hours |
+| Sassy | Sornione | Smooth, dry and amused: the cat who knows better |
+| Butler | Maggiordomo | Deep, polished and courteous: at your service |
+| Minimal | Essenziale | Clear, even and quick: just the facts |
+
+Paste the two, generate, listen to the three voices, save the one you like, then press **Refresh** in the app. The free plan has 10,000 credits a month, about 20 minutes of answers. Whenever ElevenLabs fails (credits used up, no network, a refused key, an error of its own), the downloaded Piper voice of that language answers instead, if Piper and the voice are installed, and the Voice tab says why; ElevenLabs is asked again a minute later. The answers' text is sent to ElevenLabs.
+
 ### Privacy
 
 Unless you pick a [cloud model](#cloud-models), nothing you say leaves your computer. There is no account and no telemetry.
@@ -183,7 +201,7 @@ Unless you pick a [cloud model](#cloud-models), nothing you say leaves your comp
 - **The board** only listens for the wake word on its own; before it, nothing is sent. Muting the mic stops even that.
 - **Audio** goes over USB to the app, is kept in memory until it is transcribed, then dropped. It is written to disk only if you turn on **Keep recordings** (for debugging).
 - **Transcripts and answers** are shown in the Voice tab (the last 50) and forgotten when the app quits.
-- **Speech recognition, the language model and the voice** run as local programs reachable from this computer only (`127.0.0.1`). A cloud model gets what it works on instead: the recording for speech, the transcript, the board's state and the conversation's last few exchanges for the language model, the answer for the voice.
+- **Speech recognition, the language model and the voice** run as local programs reachable from this computer only (`127.0.0.1`). A cloud model gets what it works on instead: the recording for speech, the transcript, the board's state and the conversation's last few exchanges for the language model, the answer for the voice (Groq or ElevenLabs).
 - **The network** is used only to reach the cloud models you pick and to download what you ask for: models from Hugging Face (checked against a SHA-256), Piper from PyPI, and Python the first time the app flashes the board.
 
 ### Troubleshooting
@@ -293,7 +311,7 @@ dualeye call set_wake_word --word hiesp          # "Hi ESP" instead of "Alexa"
 dualeye call set_mic --muted true
 ```
 
-`--stt` takes a model from `dualeye models` or a ggml file, and `--stt`, `--llm` and `--tts-voice` a cloud model too (`dualeye cloud` lists them), `--stt-language it|en` skips language detection, `--voice-dump` keeps each utterance as a WAV file, `--llm` takes a model or a GGUF file, `--llm-gpu-layers 0` keeps it on the CPU, `--tts-voice ID` picks another voice for its language, `--no-follow-up` turns off listening after an answer, and `--no-follow-pointer` keeps the eyes face from following the mouse.
+`--stt` takes a model from `dualeye models` or a ggml file, and `--stt`, `--llm` and `--tts-voice` a cloud model too (`dualeye cloud` lists them), `--stt-language it|en` skips language detection, `--voice-dump` keeps each utterance as a WAV file, `--llm` takes a model or a GGUF file, `--llm-gpu-layers 0` keeps it on the CPU, `--tts-voice ID` picks another voice for its language (`elevenlabs:voice/<voice_id>` for both; `dualeye cloud` lists them), `--no-follow-up` turns off listening after an answer, and `--no-follow-pointer` keeps the eyes face from following the mouse.
 
 ### What each OS provides
 

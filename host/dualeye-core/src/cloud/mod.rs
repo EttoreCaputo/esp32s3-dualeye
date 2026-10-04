@@ -7,7 +7,8 @@
 //! ([`CloudModel`]). Wherever a local model id goes (`--stt`, `--llm`,
 //! `--tts-voice`, the app's settings) a cloud one does too, as
 //! `provider:model`: `groq:whisper-large-v3-turbo`, `groq:hannah`. Local ids
-//! have no `:`.
+//! have no `:`. ElevenLabs' voices are those of the person's account, by
+//! their id (`elevenlabs:voice/<voice_id>`), see [`elevenlabs`].
 //!
 //! Adding a service that speaks OpenAI's API is one more [`Provider`] in
 //! [`PROVIDERS`]; one that doesn't is another [`Api`], and a module like
@@ -23,6 +24,7 @@
 //! [`CloudError::RateLimited`], which [`crate::Stt`], [`crate::Llm`] and
 //! [`crate::Tts`] answer with a local model when there's one.
 
+pub mod elevenlabs;
 mod openai;
 
 use std::collections::BTreeMap;
@@ -44,6 +46,9 @@ use crate::models::Kind;
 pub enum Api {
     /// OpenAI's: `/chat/completions`, `/audio/transcriptions`, `/audio/speech`.
     OpenAi,
+    /// ElevenLabs': voices only ([`elevenlabs`]).
+    #[serde(rename = "elevenlabs")]
+    ElevenLabs,
 }
 
 /// An online service.
@@ -74,7 +79,7 @@ pub struct CloudModel {
     pub model: &'static str,
     /// A voice's name, for [`Kind::Voice`].
     pub voice: Option<&'static str>,
-    /// A voice's language: `it` or `en`.
+    /// A voice's language: `it` or `en`; none for one that speaks both.
     pub language: Option<&'static str>,
     pub note: &'static str,
     /// JSON merged into every chat request for it (thinking turned down, a
@@ -135,8 +140,35 @@ pub const GROQ: Provider = Provider {
     ],
 };
 
+/// [ElevenLabs](https://elevenlabs.io): voices only, those of the account,
+/// so none in the catalog. The free plan (October 2026): 10,000 credits a
+/// month, about 20 minutes of speech; voices are designed on its site.
+pub const ELEVENLABS: Provider = Provider {
+    id: "elevenlabs",
+    name: "ElevenLabs",
+    api: Api::ElevenLabs,
+    base_url: "https://api.elevenlabs.io",
+    key_env: "ELEVENLABS_API_KEY",
+    keys_url: "https://elevenlabs.io/app/developers/api-keys",
+    note: "The voices of your account; free plan: 10,000 credits a month. The answers are sent to ElevenLabs",
+    models: &[],
+};
+
+/// What `elevenlabs:voice/<voice_id>` names: a voice of the person's
+/// account, which isn't in the catalog. Its id is the [`Client`]'s.
+const ACCOUNT_VOICE: CloudModel = CloudModel {
+    id: "voice",
+    kind: Kind::Voice,
+    model: "eleven_flash_v2_5",
+    voice: Some("voice"),
+    language: None,
+    note: "A voice of your ElevenLabs account",
+    params: "",
+    max_chars: 0,
+};
+
 /// Every service DualEye can use.
-pub const PROVIDERS: &[Provider] = &[GROQ];
+pub const PROVIDERS: &[Provider] = &[GROQ, ELEVENLABS];
 
 impl Provider {
     pub fn by_id(id: &str) -> Option<&'static Provider> {
@@ -146,6 +178,18 @@ impl Provider {
     /// Its API key: from [`Provider::key_env`], else saved with [`set_api_key`].
     pub fn api_key(&self) -> Option<String> {
         self.key_source().map(|(key, _)| key)
+    }
+
+    /// Whether its key works, asking something free of it.
+    pub fn check_key(&'static self) -> Result<(), CloudError> {
+        let key = self.api_key().ok_or(CloudError::NoKey { provider: self.name, env: self.key_env })?;
+        match self.api {
+            Api::OpenAi => match self.models.first() {
+                Some(model) => Client { model: CloudRef { provider: self, model }, key, voice_id: None }.check(),
+                None => Ok(()),
+            },
+            Api::ElevenLabs => elevenlabs::check_key(&key),
+        }
     }
 
     /// Its API key and where it came from.
@@ -176,10 +220,13 @@ pub struct CloudRef {
 
 impl CloudRef {
     /// `groq:hannah` → Groq's Hannah. `None` for a local id (no `:`) or one
-    /// that isn't known.
+    /// that isn't known. Any `elevenlabs:voice/<voice_id>` is known.
     pub fn by_id(id: &str) -> Option<Self> {
         let (provider, model) = id.split_once(':')?;
         let provider = Provider::by_id(provider)?;
+        if provider.api == Api::ElevenLabs && account_voice_id(model).is_some() {
+            return Some(Self { provider, model: &ACCOUNT_VOICE });
+        }
         let model = provider.models.iter().find(|m| m.id == model)?;
         Some(Self { provider, model })
     }
@@ -193,6 +240,11 @@ impl CloudRef {
     pub fn id(&self) -> String {
         format!("{}:{}", self.provider.id, self.model.id)
     }
+}
+
+/// The `<voice_id>` of `voice/<voice_id>`.
+fn account_voice_id(model: &str) -> Option<&str> {
+    model.strip_prefix("voice/").filter(|v| !v.is_empty())
 }
 
 /// Whether `id` names a cloud model (or tries to: it has a `:`).
@@ -297,6 +349,8 @@ pub type TranscriptionReply = Value;
 pub struct Client {
     pub model: CloudRef,
     key: String,
+    /// The account's voice an `elevenlabs:voice/<voice_id>` names.
+    pub voice_id: Option<String>,
 }
 
 impl fmt::Debug for Client {
@@ -310,15 +364,18 @@ impl Client {
     pub fn new(id: &str, kind: Kind) -> Result<Self, String> {
         let model = CloudRef::by_id(id).filter(|r| r.model.kind == kind).ok_or_else(|| format!("unknown cloud model {id}"))?;
         let key = model.provider.api_key().ok_or_else(|| CloudError::NoKey { provider: model.provider.name, env: model.provider.key_env }.to_string())?;
-        Ok(Self { model, key })
+        let voice_id = id.split_once(':').and_then(|(_, m)| account_voice_id(m)).filter(|_| model.provider.api == Api::ElevenLabs).map(str::to_string);
+        Ok(Self { model, key, voice_id })
     }
 
     /// Check the key and that the service answers (lists its models: free).
     pub fn check(&self) -> Result<(), CloudError> {
         match self.model.provider.api {
             Api::OpenAi => openai::check(self),
+            Api::ElevenLabs => elevenlabs::check(self),
         }
     }
+
 
     /// A chat completion: OpenAI's request (`messages`, `tools`, sampling);
     /// the first choice's message. Settings only llama.cpp knows are left
@@ -326,6 +383,7 @@ impl Client {
     pub fn chat(&self, request: &Value) -> Result<Value, CloudError> {
         self.limited(|| match self.model.provider.api {
             Api::OpenAi => openai::chat(self, request),
+            Api::ElevenLabs => Err(self.unsupported("chat")),
         })
     }
 
@@ -333,14 +391,21 @@ impl Client {
     pub fn transcribe(&self, wav: &[u8], language: Option<&str>, prompt: &str) -> Result<TranscriptionReply, CloudError> {
         self.limited(|| match self.model.provider.api {
             Api::OpenAi => openai::transcribe(self, wav, language, prompt),
+            Api::ElevenLabs => Err(self.unsupported("transcription")),
         })
     }
 
-    /// Speak `text` with the voice: a WAV.
-    pub fn speak(&self, text: &str) -> Result<Vec<u8>, CloudError> {
+    /// Speak `text`, in `language` (`it`, `en`) where the voice speaks more
+    /// than one, with the voice: a WAV.
+    pub fn speak(&self, text: &str, language: Option<&str>) -> Result<Vec<u8>, CloudError> {
         self.limited(|| match self.model.provider.api {
             Api::OpenAi => openai::speak(self, text),
+            Api::ElevenLabs => elevenlabs::speak(self, text, language),
         })
+    }
+
+    fn unsupported(&self, what: &str) -> CloudError {
+        CloudError::Invalid { provider: self.model.provider.name, why: format!("no {what} here") }
     }
 
     /// Whether the model is left alone after hitting its limits.
@@ -414,6 +479,11 @@ mod tests {
         assert_eq!(CloudRef::by_id("groq:openai/gpt-oss-20b").map(|r| r.model.kind), Some(Kind::Llm));
         assert!(CloudRef::by_id("small").is_none());
         assert!(CloudRef::by_id("nobody:small").is_none());
+        // Any voice of an ElevenLabs account, by its id.
+        let r = CloudRef::by_id("elevenlabs:voice/JBFqnCBsd6RMkjVDRZzb").unwrap();
+        assert_eq!((r.provider.id, r.model.kind), ("elevenlabs", Kind::Voice));
+        assert!(CloudRef::by_id("elevenlabs:voice/").is_none());
+        assert!(CloudRef::by_id("groq:voice/x").is_none());
     }
 
     #[test]
@@ -422,7 +492,9 @@ mod tests {
             assert!(!p.id.contains(':') && p.base_url.starts_with("https://"));
             for m in p.models {
                 assert_eq!(p.models.iter().filter(|o| o.id == m.id).count(), 1, "{} twice", m.id);
-                assert_eq!(m.kind == Kind::Voice, m.voice.is_some() && m.language.is_some(), "{}", m.id);
+                assert_eq!(m.kind == Kind::Voice, m.voice.is_some(), "{}", m.id);
+                // A voice of one language says so, but for ElevenLabs': theirs speak both.
+                assert_eq!(m.kind == Kind::Voice && p.api == Api::OpenAi, m.language.is_some(), "{}", m.id);
                 assert!(m.params.is_empty() || serde_json::from_str::<serde_json::Map<String, Value>>(m.params).is_ok(), "{}", m.id);
             }
         }
@@ -432,7 +504,7 @@ mod tests {
 
     #[test]
     fn a_limit_is_remembered() {
-        let client = Client { model: CloudRef::by_id("groq:whisper-large-v3").unwrap(), key: "k".into() };
+        let client = Client { model: CloudRef::by_id("groq:whisper-large-v3").unwrap(), key: "k".into(), voice_id: None };
         let limit = || CloudError::RateLimited { provider: "Groq", retry_after: Some(Duration::from_secs(30)) };
         assert!(!client.is_limited());
         assert_eq!(client.limited(|| Err::<(), _>(limit())), Err(limit()));

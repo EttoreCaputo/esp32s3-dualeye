@@ -55,6 +55,7 @@ use dualeye_core::claude::hooks::{self, HooksStatus};
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
 use dualeye_core::hardware::{self, Hardware, Recommendation};
+use dualeye_core::cloud::elevenlabs::{self, AccountVoice};
 use dualeye_core::cloud::{self, CloudRef, KeySource, Provider};
 use dualeye_core::llm::{self, Llm, LlmConfig, LocalLlm};
 use dualeye_core::models::{self, Kind, Model};
@@ -478,6 +479,8 @@ struct VoiceInfo {
     piper_install: Option<String>,
     tts: &'static str,
     tts_error: Option<String>,
+    /// Why the downloaded voice is answering instead of the cloud one, while it is.
+    tts_fallback: Option<String>,
     /// The llama-server binary, if found.
     llm_server: Option<String>,
     llm: &'static str,
@@ -509,6 +512,7 @@ fn voice_info_of(state: &AppState) -> VoiceInfo {
         piper_install: installing.get(&Engine::Piper).cloned(),
         tts,
         tts_error,
+        tts_fallback: state.voice.lock().unwrap().tts.as_ref().and_then(|t| t.cloud_trouble()),
         llm_server: llm::find_server().map(|p| p.display().to_string()),
         llm,
         llm_error,
@@ -542,15 +546,21 @@ async fn set_api_key(app: AppHandle, provider: String, key: Option<String>) -> R
         let state = app.state::<AppState>();
         let p = Provider::by_id(&provider).ok_or_else(|| format!("unknown provider {provider}"))?;
         cloud::set_api_key(p, key.as_deref()).map_err(|e| e.to_string())?;
-        // Listing its models is free: it only proves the key works.
-        if let Some(m) = p.models.first().filter(|_| key.as_deref().is_some_and(|k| !k.trim().is_empty())) {
-            cloud::Client::new(&format!("{}:{}", p.id, m.id), m.kind)?.check().map_err(|e| e.to_string())?;
+        // Something free of it: it only proves the key works.
+        if key.as_deref().is_some_and(|k| !k.trim().is_empty()) {
+            p.check_key().map_err(|e| e.to_string())?;
         }
         apply_voice(&state);
         Ok(voice_info_of(&state))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The voices the ElevenLabs account can speak with: its own, then ElevenLabs'.
+#[tauri::command]
+async fn elevenlabs_voices() -> Result<Vec<AccountVoice>, String> {
+    tauri::async_runtime::spawn_blocking(|| elevenlabs::voices().map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1290,7 +1300,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

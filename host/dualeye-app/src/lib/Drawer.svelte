@@ -24,9 +24,11 @@
     type TimerKind,
     type TtsEngine,
     type ModelInfo,
+    type AccountVoice,
     type VoiceInfo,
     type VoiceSettings,
   } from "./monitor.svelte";
+  import { VOICE_PROMPTS } from "./voicePrompts";
 
   const TABS: [Tab, string][] = [
     ["voice", "Voice"],
@@ -180,7 +182,11 @@
 
   /** A model as its list shows it: size and whether it's here, or whether its service has a key. */
   function optionLabel(v: VoiceInfo, m: ModelInfo): string {
-    if (m.provider) return `${m.id.slice(m.id.indexOf(":") + 1)}${m.installed ? "" : ` · needs a ${providerName(v, m.provider)} key`}`;
+    if (m.provider) {
+      // ElevenLabs' voices by their names.
+      const name = accountVoices?.find((a) => m.id === accountId(a))?.name ?? m.id.slice(m.id.indexOf(":") + 1);
+      return `${name}${m.installed ? "" : ` · needs a ${providerName(v, m.provider)} key`}`;
+    }
     return `${m.id} · ${mb(m.bytes)}${m.installed ? " · downloaded" : ""}${m.id === v.recommendation.whisper || m.id === v.recommendation.llm ? " · recommended" : ""}`;
   }
 
@@ -200,6 +206,68 @@
       clearInterval(id);
     };
   });
+
+  /** The ElevenLabs account's voices, once read; null before. */
+  let accountVoices = $state<AccountVoice[] | null>(null);
+  let elevenError = $state("");
+  const hasElevenKey = $derived(!!voice?.providers.find((p) => p.id === "elevenlabs")?.key);
+
+  $effect(() => {
+    if (!open || tab !== "voice" || !hasElevenKey) return;
+    loadAccountVoices();
+  });
+
+  async function loadAccountVoices() {
+    elevenError = "";
+    try {
+      accountVoices = await monitor.elevenlabsVoices();
+    } catch (e) {
+      elevenError = String(e);
+      accountVoices = [];
+    }
+  }
+
+  const accountId = (a: AccountVoice) => `elevenlabs:voice/${a.voice_id}`;
+  const speaking = (v: VoiceInfo, id: string) => Object.values(v.settings.voices).includes(id);
+  /** The account's own voices, not ElevenLabs' stock ones. */
+  const ownVoices = $derived((accountVoices ?? []).filter((a) => a.category !== "premade"));
+
+  /** The account's voices, for the voice lists next to the downloaded ones. */
+  const accountModels = $derived<ModelInfo[]>(
+    (accountVoices ?? []).map((a) => ({
+      id: accountId(a),
+      kind: "voice",
+      language: null,
+      engine: null,
+      bytes: 0,
+      note: a.category === "premade" ? "One of ElevenLabs' own voices" : a.description || "A voice of your ElevenLabs account",
+      license: "",
+      installed: true,
+      provider: "elevenlabs",
+    })),
+  );
+
+  /** An ElevenLabs voice speaks both languages: it answers in either. */
+  async function useAccountVoice(id: string) {
+    if (!voice) return;
+    elevenError = "";
+    await setVoice({ voices: { ...voice.settings.voices, it: id, en: id } });
+  }
+
+  // The ElevenLabs prompt of a personality: shown while its icon is hovered, kept open by a click.
+  let hoverPrompt = $state<Personality | null>(null);
+  let pinnedPrompt = $state<Personality | null>(null);
+  const shownPrompt = $derived(hoverPrompt ?? pinnedPrompt);
+  let promptCopied = $state<string | null>(null);
+  async function copyPrompt(text: string, what: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      promptCopied = what;
+      setTimeout(() => promptCopied === what && (promptCopied = null), 1500);
+    } catch {
+      promptCopied = null;
+    }
+  }
 
   // The speaker's volume and the eyes live on the board: read them when the tab opens.
   let volume = $state<number | null>(null);
@@ -541,7 +609,7 @@
 
 <!-- One model to pick, from this computer's or an online service's, and what it still needs. -->
 {#snippet picker(v: VoiceInfo, label: string, what: string, kind: ModelInfo["kind"], lang: string | null, chosen: string, onpick: (id: string) => void, off: boolean)}
-  {@const list = v.models.filter((m) => m.kind === kind && (lang === null || m.language === lang))}
+  {@const list = [...v.models, ...accountModels].filter((m) => m.kind === kind && (lang === null || m.language === lang || m.language === null))}
   {@const m = list.find((x) => x.id === chosen)}
   {@const downloading = !!m && v.download?.[0] === m.id}
   {@const installing = m?.engine ? v[`${m.engine}_install`] : null}
@@ -661,6 +729,9 @@
               {#each [v.stt === "error" && v.stt_error, v.tts === "error" && v.tts_error, v.settings.llm && v.llm === "error" && v.llm_error && `${v.llm_error}. Meanwhile a few fixed phrases work.`] as err, i (i)}
                 {#if err}<p class="hint error">{err}</p>{/if}
               {/each}
+              {#if v.tts_fallback}
+                <p class="hint">The downloaded voice is answering for now: {v.tts_fallback}. The online voice is tried again in a minute.</p>
+              {/if}
             {/if}
             <div class="volume">
               <span class="rlabel">Volume</span>
@@ -697,12 +768,56 @@
             <h3>Personality</h3>
             <div class="persona" role="radiogroup" aria-label="Personality">
               {#each PERSONALITIES as [id, name, blurb] (id)}
-                <button class="pcard" class:checked={v.settings.personality === id} role="radio" aria-checked={v.settings.personality === id} onclick={() => setVoice({ personality: id })}>
-                  <b>{name}</b>
-                  <small>{blurb}</small>
-                </button>
+                <div class="pslot">
+                  <button class="pcard" class:checked={v.settings.personality === id} role="radio" aria-checked={v.settings.personality === id} onclick={() => setVoice({ personality: id })}>
+                    <b>{name}</b>
+                    <small>{blurb}</small>
+                  </button>
+                  {#if VOICE_PROMPTS[id]}
+                    <button
+                      class="vicon"
+                      class:on={shownPrompt === id}
+                      aria-label={`A prompt for a ${name} voice on ElevenLabs`}
+                      aria-expanded={pinnedPrompt === id}
+                      title="A prompt to design this voice on ElevenLabs (click to keep it open)"
+                      onmouseenter={() => (hoverPrompt = id)}
+                      onmouseleave={() => (hoverPrompt = null)}
+                      onfocus={() => (hoverPrompt = id)}
+                      onblur={() => (hoverPrompt = null)}
+                      onclick={() => (pinnedPrompt = pinnedPrompt === id ? null : id)}
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true"
+                        ><path d="M2 6.5v3M5 4v8M8 2.5v11M11 4.5v7M14 6.5v3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg
+                      >
+                    </button>
+                  {/if}
+                </div>
               {/each}
             </div>
+            {#if shownPrompt && VOICE_PROMPTS[shownPrompt]}
+              {@const p = VOICE_PROMPTS[shownPrompt]}
+              {@const label = PERSONALITIES.find(([id]) => id === shownPrompt)?.[1]}
+              <div class="vprompt">
+                <div class="vphead">
+                  <b>A “{label}” voice on ElevenLabs</b>
+                  {#if pinnedPrompt}<button class="btn small" onclick={() => (pinnedPrompt = null)}>Close</button>{/if}
+                </div>
+                <p class="hint">
+                  On elevenlabs.io: Voices → Create a voice → Voice design. Paste these two, generate, listen, and save the one you like as “{p.name}”.
+                  It then shows up under ElevenLabs voices, below.
+                </p>
+                <div class="vpfield">
+                  <span class="rlabel">Prompt</span>
+                  <button class="btn small" onclick={() => copyPrompt(p.description, "description")}>{promptCopied === "description" ? "Copied" : "Copy"}</button>
+                </div>
+                <p class="vptext">{p.description}</p>
+                <div class="vpfield">
+                  <span class="rlabel">Text to preview</span>
+                  <button class="btn small" onclick={() => copyPrompt(p.sample, "sample")}>{promptCopied === "sample" ? "Copied" : "Copy"}</button>
+                </div>
+                <p class="vptext">{p.sample}</p>
+              </div>
+            {/if}
             {#if v.settings.personality === "custom"}
               <div class="custom">
                 <textarea
@@ -721,6 +836,53 @@
                 ? "Changes how DualEye talks, from the next command. It still does what you ask the same way."
                 : "Turn on “Understand with a language model” below: the fixed phrases have no personality."}
             </p>
+          </section>
+
+          <section class="voice" class:dimmed={!v.settings.speak}>
+            <h3>ElevenLabs voices</h3>
+            {#if !hasElevenKey}
+              <p class="hint">
+                Answer with a voice of your ElevenLabs account, in both languages. The free plan has 10,000 credits a month, about 20 minutes of
+                answers. Design a voice on elevenlabs.io: the <span class="vinline">wave</span> on each personality above has a prompt for it.
+              </p>
+              <button class="btn small primary" onclick={() => (keysOpen = true)}>Add an ElevenLabs key</button>
+              <p class="hint">
+                Give the key the Text to Speech permission, and Voices with read access. It goes under Online services, below.
+              </p>
+            {:else}
+              {#if accountVoices === null}
+                <p class="hint small">Reading your account…</p>
+              {:else if !ownVoices.length}
+                <p class="hint">
+                  None of your own yet: design one on elevenlabs.io with the prompt on a personality above. ElevenLabs' own voices are in the lists under
+                  Models.
+                </p>
+              {:else}
+                <div class="ports">
+                  {#each ownVoices as a (a.voice_id)}
+                    {@const inUse = speaking(v, accountId(a))}
+                    <div class="port model" class:checked={inUse}>
+                      <span class="mtext">
+                        <span class="pname">{a.name}</span>
+                        <span class="mnote">{a.description || a.category}</span>
+                      </span>
+                      <span class="mside">
+                        {#if inUse}
+                          <span class="pmeta">Speaking</span>
+                        {:else}
+                          <button class="btn small" onclick={() => useAccountVoice(accountId(a))}>Use</button>
+                        {/if}
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+              <div class="vpfield">
+                <p class="hint">A voice speaks both Italian and English. Try it with Test, under Models.</p>
+                <button class="btn small" onclick={loadAccountVoices}>Refresh</button>
+              </div>
+            {/if}
+            {#if elevenError}<p class="hint error">{elevenError}</p>{/if}
           </section>
 
           <section class="voice">
@@ -1835,6 +1997,66 @@
   .pcard small {
     font: 450 11px/1.3 var(--sans);
     color: var(--faint);
+  }
+  .pslot {
+    position: relative;
+    display: grid;
+  }
+  .vicon {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--faint);
+    cursor: pointer;
+  }
+  .vicon svg {
+    width: 13px;
+    height: 13px;
+  }
+  .vicon:hover,
+  .vicon.on {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .vicon:focus-visible {
+    outline: 1.5px solid var(--accent);
+  }
+  .vinline {
+    color: var(--accent);
+  }
+  .vprompt {
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    border-radius: 11px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+  .vphead,
+  .vpfield {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .vphead b {
+    font: 600 12.5px/1.3 var(--sans);
+  }
+  .vpfield {
+    margin-top: 8px;
+  }
+  .vptext {
+    margin: 4px 0 0;
+    font: 450 11.5px/1.45 var(--sans);
+    color: var(--dim);
+    user-select: text;
   }
   .custom {
     position: relative;
