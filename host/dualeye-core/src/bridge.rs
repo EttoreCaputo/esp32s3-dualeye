@@ -25,29 +25,37 @@
 //! first to the board's timer face. When one is up the board rings and the
 //! same thread says what it was for; the wake word silences it.
 //!
+//! The pet keeps a [`Diary`] of your days from the snapshots and, rarely,
+//! comments on it out loud ([`crate::quips`]): the language model puts the
+//! fact in the pet's words, on the alerts thread.
+//!
 //! While a screen shows the music face, [`Music`] polls what's playing; its
 //! cover goes to the board (`music/art`) before the snapshot that names it.
 //! While one shows the eyes face, a thread of the session sends where the
 //! mouse pointer is (`eyes/gaze`), a few dozen times a second as it moves.
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use chrono::Local;
 use serde::Serialize;
 use serde_json::json;
 
 use crate::claude::alerts::{self, Alert, AlertSettings, Alerts, HookEvent};
-use crate::claude::{ClaudeMetrics, ClaudeUsage};
+use crate::claude::{ClaudeMetrics, ClaudeState, ClaudeUsage};
+use crate::diary::{self, Diary, Seen};
 use crate::firmware::{self, BoardFirmware};
 use crate::hub::Hub;
 use crate::link::{CallError, Link, LinkEvent};
 use crate::music::{self, Music};
 use crate::pointer;
 use crate::protocol::Channel;
+use crate::quips::{Quip, QuipLevel, Quips};
 use crate::sensors::Collector;
 use crate::serial;
 use crate::snapshot::{Face, Faces, Rotation, Rotations, Snapshot, Source, Sources};
@@ -86,6 +94,11 @@ pub struct BridgeConfig {
     /// Send the mouse pointer to the eyes face. Shared, so a frontend can
     /// turn it off while the bridge runs.
     pub follow_pointer: Arc<AtomicBool>,
+    /// How often the pet comments on your day, out loud (with text-to-speech
+    /// on). Shared like `voice`; in the language of `claude_alerts`.
+    pub quips: Arc<Mutex<QuipLevel>>,
+    /// Where the pet's diary of your days is kept; `None` keeps it in memory.
+    pub diary: Option<PathBuf>,
 }
 
 impl Default for BridgeConfig {
@@ -102,6 +115,8 @@ impl Default for BridgeConfig {
             timers: Arc::default(),
             music: Arc::default(),
             follow_pointer: Arc::new(AtomicBool::new(true)),
+            quips: Arc::default(),
+            diary: diary::default_file(),
         }
     }
 }
@@ -153,6 +168,9 @@ pub enum BridgeEvent {
     /// A timer or reminder is up (or a pomodoro moved on); `text` is what was
     /// said about it, `error` why it wasn't.
     TimerFired { fired: Fired, text: String, error: Option<String> },
+    /// The pet commented on your day ([`crate::quips`]); `error` says why it
+    /// wasn't said.
+    Quip { quip: Quip, text: String, error: Option<String> },
     Disconnected { port: String, reason: String, permission_denied: bool },
 }
 
@@ -260,6 +278,7 @@ pub fn run(config: &BridgeConfig, stop: &AtomicBool, on_event: EventSink) {
 fn connect_loop(config: &BridgeConfig, stop: &AtomicBool, alert_tx: &Sender<AlertInput>, target: &Mutex<Option<AlertTarget>>, on_event: &EventSink) {
     let mut collector = Collector::new();
     let mut claude = ClaudeUsage::new();
+    let mut pet = Pet { diary: Diary::open(config.diary.clone()), quips: Quips::default(), observed: None };
     let mut delay = Duration::from_secs(1);
     while !stop.load(Ordering::Relaxed) {
         let Some(port) = config.port.clone().or_else(serial::detect_board) else {
@@ -273,7 +292,7 @@ fn connect_loop(config: &BridgeConfig, stop: &AtomicBool, alert_tx: &Sender<Aler
             continue;
         };
         let started = Instant::now();
-        let result = session(&port, config, stop, &mut collector, &mut claude, alert_tx, target, on_event);
+        let result = session(&port, config, stop, &mut collector, &mut claude, &mut pet, alert_tx, target, on_event);
         *target.lock().unwrap() = None;
         if let Some(hub) = &config.hub {
             let why = result.as_ref().err().map_or_else(|| "the bridge stopped".to_string(), |e| format!("board disconnected: {e}"));
@@ -295,6 +314,34 @@ fn connect_loop(config: &BridgeConfig, stop: &AtomicBool, alert_tx: &Sender<Aler
     }
 }
 
+/// What the pet remembers of your days, and when it last spoke up about them.
+struct Pet {
+    diary: Diary,
+    quips: Quips,
+    observed: Option<Instant>,
+}
+
+impl Pet {
+    /// Note `snapshot` in the diary, and whether there's something to say.
+    fn observe(&mut self, snapshot: &Snapshot, fired: &[Fired], level: QuipLevel, busy: bool) -> Option<Quip> {
+        let dt = self.observed.map_or(1, |t| t.elapsed().as_secs_f32().round().clamp(1.0, 5.0) as u32);
+        self.observed = Some(Instant::now());
+        let hottest = [snapshot.cpu.temp_c, snapshot.gpu.temp_c].into_iter().flatten().reduce(f32::max);
+        let seen = Seen {
+            idle_s: snapshot.pet.and_then(|p| p.idle),
+            claude: snapshot.claude.as_ref().is_some_and(|c| c.state == ClaudeState::Work),
+            music: snapshot.music.as_ref().is_some_and(|m| m.state == "play"),
+            hottest_c: hottest,
+        };
+        let now = Local::now().naive_local();
+        self.diary.observe(now, &seen, dt);
+        for fired in fired {
+            self.diary.fired(fired);
+        }
+        self.quips.consider(&self.diary, now, level, busy || seen.music)
+    }
+}
+
 /// What the reader thread learns for the session loop.
 #[derive(Default)]
 struct Heard {
@@ -311,6 +358,7 @@ fn session(
     stop: &AtomicBool,
     collector: &mut Collector,
     claude: &mut ClaudeUsage,
+    pet: &mut Pet,
     alert_tx: &Sender<AlertInput>,
     target: &Mutex<Option<AlertTarget>>,
     on_event: &EventSink,
@@ -495,8 +543,9 @@ fn session(
         if let Some(metrics) = &snapshot.claude {
             let _ = alert_tx.send(AlertInput::Metrics(metrics.clone()));
         }
-        for fired in config.timers.tick() {
-            let _ = alert_tx.send(AlertInput::Timer(fired));
+        let fired = config.timers.tick();
+        for fired in &fired {
+            let _ = alert_tx.send(AlertInput::Timer(fired.clone()));
         }
         snapshot.timer = config.timers.board_view();
         // Watched for the music face, and for the pet, which dances to it.
@@ -525,6 +574,13 @@ fn session(
         }
         if let Some(hub) = &config.hub {
             hub.set_snapshot(&snapshot);
+        }
+        // Only with a voice to say it, and the board out of any conversation.
+        let can_speak = ready && config.voice.lock().unwrap().tts.is_some();
+        let busy = !can_speak || *voice_state.lock().unwrap() != "idle";
+        let level = *config.quips.lock().unwrap();
+        if let Some(quip) = pet.observe(&snapshot, &fired, level, busy) {
+            let _ = alert_tx.send(AlertInput::Quip(quip));
         }
         *latest.lock().unwrap() = Some(snapshot.clone());
         let sent = ready && snapshot.is_sendable();
@@ -592,6 +648,8 @@ enum AlertInput {
     Metrics(ClaudeMetrics),
     /// A timer that's up, to be said.
     Timer(Fired),
+    /// The pet has something to say about your day.
+    Quip(Quip),
 }
 
 /// The board the alerts go to, while a session has one.
@@ -621,6 +679,11 @@ fn alert_loop(config: &BridgeConfig, stop: &AtomicBool, target: &Mutex<Option<Al
                 let text = fired.spoken();
                 let error = say_timer(config, stop, target, fired).err();
                 on_event(BridgeEvent::TimerFired { fired: fired.clone(), text, error });
+                continue;
+            }
+            AlertInput::Quip(quip) => {
+                let (text, error) = say_quip(config, stop, target, quip, &settings.language);
+                on_event(BridgeEvent::Quip { quip: quip.clone(), text, error });
                 continue;
             }
         };
@@ -668,6 +731,41 @@ fn say_timer(config: &BridgeConfig, stop: &AtomicBool, target: &Mutex<Option<Ale
     }
     speaker.speak(&link, &tts, &fired.spoken(), &fired.timer.language).map(|_| ())
 }
+
+/// Put `quip` in the pet's words (the language model's, or the fallback's)
+/// and say it after a scene, once the board is out of any conversation:
+/// what was said, and why it wasn't.
+fn say_quip(config: &BridgeConfig, stop: &AtomicBool, target: &Mutex<Option<AlertTarget>>, quip: &Quip, language: &str) -> (String, Option<String>) {
+    let (tts, agent) = {
+        let voice = config.voice.lock().unwrap();
+        (voice.tts.clone(), voice.agent.clone())
+    };
+    let text = agent.and_then(|a| a.quip(&quip.fact, language).ok()).unwrap_or_else(|| quip.fallback(language));
+    let Some(tts) = tts else { return (text, Some("spoken replies are off".into())) };
+    let board = || {
+        let target = target.lock().unwrap();
+        let t = target.as_ref()?;
+        Some((t.link.upgrade()?, t.speaker.clone(), t.voice_state.clone()))
+    };
+    let Some((link, speaker, voice_state)) = board() else { return (text, Some("the board isn't connected".into())) };
+    let until = Instant::now() + CONVERSATION_WAIT;
+    while *voice_state.lock().unwrap() != "idle" && Instant::now() < until && !stop.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(250));
+    }
+    if *voice_state.lock().unwrap() != "idle" {
+        // Talking with it meanwhile: the moment's gone.
+        return (text, Some("the board was in a conversation".into()));
+    }
+    if link.call_tool("play_eyes", json!({"name": quip.topic.scene()}), TOOL_TIMEOUT).is_ok_and(|r| !r.is_error) {
+        // Speaking would cut the scene short.
+        thread::sleep(QUIP_SCENE);
+    }
+    let error = speaker.speak(&link, &tts, &text, language).err();
+    (text, error)
+}
+
+/// The scene before the words, long enough to be seen.
+const QUIP_SCENE: Duration = Duration::from_millis(1500);
 
 /// From a timer's end to saying why: the first chime's length and a breath.
 const TIMER_SPEECH_DELAY: Duration = Duration::from_millis(2600);

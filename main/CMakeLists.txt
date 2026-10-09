@@ -1,4 +1,4 @@
-idf_component_register(SRCS "pet.c" "sounds.c" "media.c" "main.c"
+idf_component_register(SRCS "ears.c" "pet.c" "sounds.c" "media.c" "main.c"
                             "board_display.c"
                             "lvgl_port.c"
                             "metrics_model.c"

@@ -11,6 +11,7 @@
 #include "link.h"
 #include "lvgl_port.h"
 #include "metrics_model.h"
+#include "ears.h"
 #include "pet.h"
 #include "playback.h"
 #include "ui_eyes.h"
@@ -375,9 +376,10 @@ static bool tool_set_pet(const cJSON *args, char *text, cJSON **structured)
 {
     const cJSON *sounds = cJSON_GetObjectItemCaseSensitive(args, "sounds");
     const cJSON *react = cJSON_GetObjectItemCaseSensitive(args, "react");
+    const cJSON *hear = cJSON_GetObjectItemCaseSensitive(args, "hear");
     if ((sounds != NULL && !cJSON_IsBool(sounds)) || (react != NULL && !cJSON_IsBool(react))
-        || (sounds == NULL && react == NULL)) {
-        snprintf(text, TEXT_MAX, "give sounds and/or react, true or false");
+        || (hear != NULL && !cJSON_IsBool(hear)) || (sounds == NULL && react == NULL && hear == NULL)) {
+        snprintf(text, TEXT_MAX, "give sounds, react and/or hear, true or false");
         return false;
     }
     int n = 0;
@@ -394,8 +396,15 @@ static bool tool_set_pet(const cJSON *args, char *text, cJSON **structured)
         bool on = cJSON_IsTrue(react);
         board_settings_set_pet_reactions(on);
         pet_set_reactions(on);
+        n += snprintf(text + n, TEXT_MAX - n, "%s%s", n ? "; " : "",
+                      on ? "it reacts to the computer" : "no reactions to the computer");
+    }
+    if (hear != NULL && n < TEXT_MAX) {
+        bool on = cJSON_IsTrue(hear);
+        board_settings_set_pet_hearing(on);
+        ears_set_on(on);
         snprintf(text + n, TEXT_MAX - n, "%s%s", n ? "; " : "",
-                 on ? "it reacts to the computer" : "no reactions to the computer");
+                 on ? "it listens to the room" : "it doesn't listen to the room");
     }
     return true;
 }
@@ -418,7 +427,7 @@ static bool tool_get_pet(const cJSON *args, char *text, cJSON **structured)
     cJSON_AddNumberToObject(p, "affection", round2(pet.affection));
     cJSON_AddBoolToObject(p, "away", pet.away);
     cJSON *now = cJSON_AddArrayToObject(p, "now");
-    for (uint32_t bit = 1; bit != 0 && bit <= PET_NOW_BORED; bit <<= 1) {
+    for (uint32_t bit = 1; bit != 0 && bit <= PET_NOW_LAST; bit <<= 1) {
         if (pet.now & bit) {
             cJSON_AddItemToArray(now, cJSON_CreateString(pet_now_name(bit)));
         }
@@ -443,6 +452,16 @@ static bool tool_get_pet(const cJSON *args, char *text, cJSON **structured)
     cJSON_AddBoolToObject(p, "sounds", settings.pet_sounds);
     cJSON_AddBoolToObject(p, "reactions", settings.pet_reactions);
     cJSON_AddBoolToObject(p, "idle_scenes", settings.idle_eyes);
+    cJSON_AddBoolToObject(p, "hearing", settings.pet_hearing);
+    ears_state_t ears;
+    ears_get(&ears);
+    if (ears.listening) {
+        cJSON *room = cJSON_AddObjectToObject(p, "room");
+        cJSON_AddNumberToObject(room, "floor_db", (int) ears.floor_db);
+        cJSON_AddNumberToObject(room, "level_db", (int) ears.level_db);
+        cJSON_AddNumberToObject(room, "quiet_s", ears.quiet_s);
+        cJSON_AddBoolToObject(room, "chatter", ears.chatter);
+    }
     *structured = p;
     text[0] = '\0';
     return true;
@@ -500,6 +519,7 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
     cJSON_AddBoolToObject(p, "away", pet.away);
     cJSON_AddBoolToObject(p, "sounds", settings.pet_sounds);
     cJSON_AddBoolToObject(p, "reactions", settings.pet_reactions);
+    cJSON_AddBoolToObject(p, "hearing", settings.pet_hearing);
     if (voice_available()) {
         cJSON_AddStringToObject(voice, "wake_word", voice_wake_word());
         cJSON_AddStringToObject(voice, "wake_word_id", voice_wake_word_id());
@@ -631,17 +651,18 @@ static const tool_t TOOLS[] = {
         .description = "The board as a pet: whether it makes its little sounds (sounds: in the eyes' scenes, hello, "
                        "snoring, mute...; chimes and alarms play either way) and whether it reacts to what happens on "
                        "the computer (react: a hot CPU, music, Claude finishing, the battery, bedtime, you coming "
-                       "back). Both on by default; the board remembers them.",
+                       "back) and to the room (hear: a bang, claps, people talking, silence). All on by default; the "
+                       "board remembers them.",
         .schema = "{\"type\":\"object\",\"properties\":{\"sounds\":{\"type\":\"boolean\"},"
-                  "\"react\":{\"type\":\"boolean\"}},\"minProperties\":1}",
+                  "\"react\":{\"type\":\"boolean\"},\"hear\":{\"type\":\"boolean\"}},\"minProperties\":1}",
         .fn = tool_set_pet,
     },
     {
         .name = "get_pet",
         .description = "Read the pet's mood (content, happy, excited, loving, bored, grumpy, sad, sleepy, hot), its "
                        "energy, happiness and affection (0 to 1), what's affecting it now (hot, music, claude, "
-                       "battery_low, charging, night, away, bored), its last reactions, its voice's pitch and how "
-                       "often it plays a scene.",
+                       "battery_low, charging, night, away, bored, quiet, chatter), what the room sounds like, its last "
+                       "reactions, its voice's pitch and how often it plays a scene.",
         .schema = "{\"type\":\"object\",\"properties\":{}}",
         .fn = tool_get_pet,
     },

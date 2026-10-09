@@ -7,6 +7,12 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.4.2
+
+- **It hears the room.** Between conversations the pet listens for a few sounds: it jumps at a slammed door or something falling (and gets cross if it keeps happening), answers two claps with a smile and three with a dance, perks up when people talk nearby and gets drowsy when the room has been quiet for half an hour. It all happens on the board: nothing is recorded or sent, and muting the mic stops it. Turn it off with **Listen to the room** in the Pet tab.
+- **It comments on your day.** With spoken replies on, the pet now and then says something about your day in its own personality: *"ieri hai fatto le 2, eh"*, *"three hours without a break: stretch a little?"*. Only when there's something worth saying, at a natural moment, never at night or over music, and once a day at most. Pick how often under **Comments on your day** in the Pet tab, or turn it off.
+- **Quicker reactions.** The pet reacts as soon as something happens, instead of up to a second later.
+
 ## 1.4.1
 
 - **A pet that makes sounds.** The board now has a little voice of its own: it chirps, giggles, purrs, yawns, sneezes, sighs, grumbles and snores along with its eyes. It plays a sound when it starts, says hello when your computer connects, goes "mm-hm" when it heard you, ticks at the new volume, and on the eyes face it wakes with a "huh?!" and snores a few times as it dozes off. Turn the pet sounds off in the app's new Pet tab; the wake chime and alarms play either way.

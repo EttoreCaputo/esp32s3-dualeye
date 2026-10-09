@@ -5,7 +5,9 @@
  * over time, kept in NVS across reboots. The mood picks the eyes' idle
  * scenes and how often they come, tints the eyes face and pitches the pet's
  * sounds. It also reacts to what the host tells: a hot CPU, music, Claude
- * finishing, the battery, the time of day, you coming back to the computer. */
+ * finishing, the battery, the time of day, you coming back to the computer,
+ * and to what it hears in the room (ears.c): it jumps at a bang, answers
+ * claps, perks up when people talk nearby and gets drowsy in a quiet room. */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -38,6 +40,16 @@ typedef enum {
     PET_EVENT_PLAYED,
 } pet_event_t;
 
+/* What it heard in the room (ears.c). */
+typedef enum {
+    /* Something loud and sudden: a door, something falling. */
+    PET_HEARD_BANG,
+    /* Two or more claps in a row: someone calling it. */
+    PET_HEARD_CLAPS,
+    /* People talking nearby for a while. */
+    PET_HEARD_CHATTER,
+} pet_heard_t;
+
 /* What's going on that moves the mood, as the pet sees it. */
 #define PET_NOW_HOT 0x01
 #define PET_NOW_MUSIC 0x02
@@ -47,11 +59,16 @@ typedef enum {
 #define PET_NOW_NIGHT 0x20
 #define PET_NOW_AWAY 0x40
 #define PET_NOW_BORED 0x80
+/* The room has been quiet a long while, and people talk in it (ears.c). */
+#define PET_NOW_QUIET 0x100
+#define PET_NOW_CHATTER 0x200
+#define PET_NOW_LAST PET_NOW_CHATTER
 
 /** One of the reactions it had, for get_pet. */
 typedef struct {
     /* What it reacted to (hot, cool, music, claude_start, claude_done,
-     * battery_low, charging, goodnight, greeting, errors) and the scene. */
+     * battery_low, charging, goodnight, greeting, errors, bang, claps,
+     * startled) and the scene. */
     const char *what;
     const char *scene;
     /* Seconds ago. */
@@ -90,6 +107,9 @@ void pet_update(const metrics_snapshot_t *snap);
 
 /** Safe from any task. */
 void pet_event(pet_event_t event);
+
+/** What it heard in the room (ears.c), `count` claps. Safe from any task. */
+void pet_heard(pet_heard_t what, int count);
 
 /** Reactions to what happens on the computer: on (the default) or off. */
 void pet_set_reactions(bool on);

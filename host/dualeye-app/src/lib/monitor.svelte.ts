@@ -259,7 +259,10 @@ type Status = {
 export type Link = "searching" | "connected" | "offline";
 /** The voice settings the board keeps; null where it doesn't say. */
 export type PetMood = "content" | "happy" | "excited" | "loving" | "bored" | "grumpy" | "sad" | "sleepy" | "hot";
-export type PetNow = "hot" | "music" | "claude" | "battery_low" | "charging" | "night" | "away" | "bored";
+export type PetNow = "hot" | "music" | "claude" | "battery_low" | "charging" | "night" | "away" | "bored" | "quiet" | "chatter";
+/** How often the pet comments on your day out loud. */
+export type QuipLevel = "off" | "rare" | "often";
+export type QuipsInfo = { level: QuipLevel; last: { topic: string; text: string; error: string | null; at: number } | null };
 export type PetReaction = { what: string; scene: string; ago_s: number };
 /** `get_pet` (firmware 1.4). */
 export type PetState = {
@@ -280,6 +283,10 @@ export type PetState = {
   sounds: boolean;
   reactions: boolean;
   idle_scenes: boolean;
+  /** It listens to the room (firmware 1.4.2). */
+  hearing?: boolean;
+  /** What it hears, while it listens. */
+  room?: { floor_db: number; level_db: number; quiet_s: number; chatter: boolean };
 };
 export type BoardVoice = {
   volume: number | null;
@@ -850,14 +857,26 @@ class Monitor {
     await invoke("set_board_wake_sound", { on });
   }
 
-  /** The pet's little sounds and its reactions to the computer (firmware 1.4.0). */
-  async setBoardPet(settings: { sounds?: boolean; react?: boolean }) {
+  /** The pet's little sounds, its reactions to the computer (firmware 1.4.0)
+   * and its ears for the room (1.4.2). */
+  async setBoardPet(settings: { sounds?: boolean; react?: boolean; hear?: boolean }) {
     if (this.preview) {
       if (settings.sounds !== undefined) previewPet.sounds = settings.sounds;
       if (settings.react !== undefined) previewPet.reactions = settings.react;
+      if (settings.hear !== undefined) previewPet.hearing = settings.hear;
       return;
     }
-    await invoke("set_board_pet", { sounds: settings.sounds ?? null, react: settings.react ?? null });
+    await invoke("set_board_pet", { sounds: settings.sounds ?? null, react: settings.react ?? null, hear: settings.hear ?? null });
+  }
+
+  async quipsInfo(): Promise<QuipsInfo> {
+    if (this.preview) return previewQuips;
+    return invoke<QuipsInfo>("quips_info");
+  }
+
+  async setQuips(level: QuipLevel): Promise<QuipsInfo> {
+    if (this.preview) return (previewQuips = { ...previewQuips, level });
+    return invoke<QuipsInfo>("set_quips", { level });
   }
 
   /** The pet's mood; null on a firmware before 1.4.0. */
@@ -956,6 +975,13 @@ const previewPet: PetState = {
   sounds: true,
   reactions: true,
   idle_scenes: true,
+  hearing: true,
+  room: { floor_db: -58, level_db: -55, quiet_s: 40, chatter: false },
+};
+
+let previewQuips: QuipsInfo = {
+  level: "rare",
+  last: { topic: "late_night", text: "Ieri hai fatto le 2, eh? Io intanto ho sognato croccantini.", error: null, at: Date.now() - 3 * 3600_000 },
 };
 
 function previewCloud(kind: ModelInfo["kind"], language: string | null, models: [string, string][]): ModelInfo[] {

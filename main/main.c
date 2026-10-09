@@ -15,6 +15,7 @@
 #include "metrics_model.h"
 #include "rpc.h"
 #include "board_audio.h"
+#include "ears.h"
 #include "pet.h"
 #include "playback.h"
 #include "ui_toast.h"
@@ -127,6 +128,7 @@ void app_main(void)
     board_settings_get(&settings);
     pet_init();
     pet_set_reactions(settings.pet_reactions);
+    ears_set_on(settings.pet_hearing);
 
     ESP_ERROR_CHECK(board_display_init(s_lcds));
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {

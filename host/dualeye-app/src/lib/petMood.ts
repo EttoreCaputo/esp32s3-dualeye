@@ -22,6 +22,8 @@ export const NOW: Record<PetNow, { label: string; color: string }> = {
   night: { label: "Night", color: "#7a9cff" },
   away: { label: "You're away", color: "#8aa4c0" },
   bored: { label: "Nothing to do", color: "#8aa4c0" },
+  quiet: { label: "Quiet room", color: "#7a9cff" },
+  chatter: { label: "People talking", color: "#30d5f0" },
 };
 
 /** What a reaction was to, as get_pet names it. */
@@ -36,6 +38,9 @@ export const REACTIONS: Record<string, string> = {
   goodnight: "Bedtime",
   greeting: "You came back",
   errors: "Things went wrong",
+  bang: "A loud bang",
+  claps: "You clapped",
+  noisy: "Too much noise",
 };
 
 export function ago(s: number) {

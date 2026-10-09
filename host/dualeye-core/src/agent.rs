@@ -87,6 +87,20 @@ Ask a short question back only once in a while, not at the end of every reply.
 - Your quirks are seasoning: use them now and then, not in every reply, and never open two \
 replies the same way.";
 
+/// What the pet says of its own accord ([`crate::quips`]): its character,
+/// a fact it noticed about the user's day, and one line about it.
+const QUIP_PROMPT: &str = "\
+You are a small pet who lives on the user's desk, in a board with two round displays and a speaker, \
+connected to their computer. You noticed something about the user's day and want to say it, unprompted.
+
+{character}
+
+How to say it:
+- One short sentence, two at most, under 25 words: a light, warm remark, a little teasing if it suits your character.
+- Talk to the user directly, like a pet who cares, never like an assistant: no advice lists, no offers of help.
+- Use the fact as given; don't invent other facts about the user.
+- Your words are spoken aloud: no markdown, emoji, quotes or stage directions.";
+
 /// A character for [`Agent::set_personality`]: one of the app's presets,
 /// or `custom` with the person's own words.
 pub fn personality_prompt(id: &str, custom: &str) -> String {
@@ -303,6 +317,30 @@ impl Agent {
 
     pub fn llm(&self) -> &Llm {
         &self.llm
+    }
+
+    /// One line about `fact` (a sentence in English) in the pet's character,
+    /// in `language` (`it` or `en`), for [`crate::quips`].
+    pub fn quip(&self, fact: &str, language: &str) -> Result<String, LlmError> {
+        let tongue = if language == "it" { "Italian" } else { "English" };
+        let system = QUIP_PROMPT.replace("{character}", &self.personality.lock().unwrap());
+        let request = json!({
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": format!("What you noticed: {fact}\nSay it to the user now, in {tongue}.")},
+            ],
+            "temperature": 0.9,
+            "top_p": 0.95,
+            "max_tokens": 80,
+            "chat_template_kwargs": {"enable_thinking": false},
+        });
+        let message = self.llm.chat(&request)?;
+        let text = spoken(message["content"].as_str().unwrap_or_default(), language);
+        let text = text.trim_matches(|c: char| c == '"' || c == '«' || c == '»' || c == '“' || c == '”').trim().to_string();
+        if text.is_empty() {
+            return Err(LlmError::Invalid("no words".into()));
+        }
+        Ok(text)
     }
 
     /// Start over: the next transcript has no earlier ones to refer to.

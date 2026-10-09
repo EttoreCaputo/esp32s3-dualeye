@@ -18,6 +18,7 @@ pub mod apps;
 pub mod bridge;
 pub mod claude;
 pub mod cloud;
+pub mod diary;
 #[cfg(feature = "download")]
 pub mod download;
 pub mod eval;
@@ -36,6 +37,7 @@ pub mod mcp;
 pub mod pointer;
 pub mod presence;
 pub mod protocol;
+pub mod quips;
 pub mod sensors;
 pub mod serial;
 pub(crate) mod sidecar;

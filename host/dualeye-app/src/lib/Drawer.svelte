@@ -17,6 +17,8 @@
     type PortInfo,
     type PowerHelper,
     type Personality,
+    type QuipLevel,
+    type QuipsInfo,
     type Reading,
     type SttLanguage,
     type ShowOn,
@@ -315,14 +317,43 @@
   const pet = $derived(monitor.pet);
   let petError = $state("");
 
-  async function setPet(key: "sounds" | "reactions", on: boolean) {
+  async function setPet(key: "sounds" | "reactions" | "hearing", on: boolean) {
     if (!monitor.pet) return;
     monitor.pet[key] = on;
     petError = "";
     try {
-      await monitor.setBoardPet(key === "sounds" ? { sounds: on } : { react: on });
+      await monitor.setBoardPet(key === "sounds" ? { sounds: on } : key === "reactions" ? { react: on } : { hear: on });
     } catch (e) {
       if (monitor.pet) monitor.pet[key] = !on;
+      petError = String(e);
+    }
+  }
+
+  // Its comments on your day, kept by the app.
+  let quips = $state<QuipsInfo | null>(null);
+  const QUIP_LEVELS: [QuipLevel, string, string][] = [
+    ["off", "Never", "It keeps its thoughts to itself"],
+    ["rare", "Rarely", "Once a day at most"],
+    ["often", "Sometimes", "Up to three times a day"],
+  ];
+
+  $effect(() => {
+    if (!open || tab !== "pet") return;
+    let alive = true;
+    const load = () => monitor.quipsInfo().then((q) => alive && (quips = q));
+    load();
+    const id = setInterval(load, 5000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  });
+
+  async function setQuips(level: QuipLevel) {
+    petError = "";
+    try {
+      quips = await monitor.setQuips(level);
+    } catch (e) {
       petError = String(e);
     }
   }
@@ -1278,6 +1309,34 @@
             <span class="track"><span class="knob"></span></span>
             <span class="slabel">Pet sounds: in the scenes, hello, mute, snoring</span>
           </label>
+          <label class="switch" title={pet?.hearing === undefined ? "Needs the board connected, with firmware 1.4.2 or newer" : ""}>
+            <input type="checkbox" checked={pet?.hearing ?? true} disabled={pet?.hearing === undefined} onchange={(e) => setPet("hearing", e.currentTarget.checked)} />
+            <span class="track"><span class="knob"></span></span>
+            <span class="slabel">Listen to the room: it jumps at a bang, answers two or three claps, perks up when people talk and dozes in a quiet room</span>
+          </label>
+          <p class="hint">It only listens for these sounds on the board, between conversations and while the mic is on: nothing is recorded or sent to the computer.</p>
+        </section>
+        <section class="petset">
+          <h3>Comments on your day</h3>
+          <p class="hint">
+            The pet keeps a diary of your days on this computer (when you start and stop, breaks, Claude, music, pomodoros) and now and then
+            says something about it, in its personality: "ieri hai fatto le 2, eh". Only when there's something worth saying, at a natural
+            moment, never at night or over music.
+          </p>
+          <div class="rotation">
+            <span class="rlabel">How often</span>
+            <div class="rots" role="radiogroup" aria-label="How often the pet comments on your day">
+              {#each QUIP_LEVELS as [level, label, title] (level)}
+                <button class="rot" class:checked={quips?.level === level} role="radio" aria-checked={quips?.level === level} {title} disabled={!quips} onclick={() => setQuips(level)}
+                  >{label}</button
+                >
+              {/each}
+            </div>
+          </div>
+          {#if quips?.last}
+            <p class="hint">Last time, at {new Date(quips.last.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: “{quips.last.text}”{quips.last.error ? ` (not said: ${quips.last.error})` : ""}</p>
+          {/if}
+          <p class="hint">It speaks with the voice and language of the Claude alerts; it needs “Answer out loud” on in the Voice tab.</p>
           {#if petError}<p class="hint error">{petError}</p>{/if}
         </section>
         <PetGallery connected={monitor.link === "connected"} petSounds={pet?.sounds ?? true} oldFirmware={monitor.link === "connected" && pet === null} />

@@ -44,6 +44,8 @@ use dualeye_core::tts::{self, Tts, TtsConfig};
 use dualeye_core::stt::{self, Stt, SttConfig, SttEngine, SttLanguage};
 use dualeye_core::eval::{self, EvalSet, Responder};
 use dualeye_core::llm::{self, Llm, LlmConfig, LocalLlm};
+use dualeye_core::diary;
+use dualeye_core::quips::QuipLevel;
 use dualeye_core::timers::{self, Timers};
 use dualeye_core::voice::{self, VoiceConfig};
 use dualeye_core::{
@@ -141,6 +143,10 @@ struct Args {
     /// ones start when they're needed, one that stops when it's next asked
     #[arg(long)]
     no_keep_warm: bool,
+    /// How often the pet comments on your day out loud (with --tts): once a
+    /// day at most (rare), up to three times (often), or never (off)
+    #[arg(long, default_value = "rare", value_parser = ["off", "rare", "often"])]
+    quips: String,
     #[command(flatten)]
     llm: LlmArgs,
 }
@@ -450,6 +456,12 @@ fn main() -> ExitCode {
         timers: Arc::new(Timers::open(timers::default_file())),
         music: Arc::default(),
         follow_pointer: Arc::new(AtomicBool::new(!args.no_follow_pointer)),
+        quips: Arc::new(Mutex::new(match args.quips.as_str() {
+            "off" => QuipLevel::Off,
+            "often" => QuipLevel::Often,
+            _ => QuipLevel::Rare,
+        })),
+        diary: diary::default_file(),
     };
     let stop = Arc::new(AtomicBool::new(false));
     // Ctrl-C ends the loop, so the whisper-server sidecar is stopped too.
@@ -511,6 +523,8 @@ fn main() -> ExitCode {
             ),
             BridgeEvent::TimerFired { text, error: None, .. } => println!("timer: {text}"),
             BridgeEvent::TimerFired { text, error: Some(e), .. } => println!("timer: {text} (not said: {e})"),
+            BridgeEvent::Quip { quip, text, error: None } => println!("pet ({}): {text}", quip.topic.name()),
+            BridgeEvent::Quip { quip, text, error: Some(e) } => println!("pet ({}): {text} (not said: {e})", quip.topic.name()),
             BridgeEvent::ClaudeAlert { text, error: None, .. } => println!("claude: {text}"),
             BridgeEvent::ClaudeAlert { text, error: Some(e), .. } => eprintln!("claude: {text} (not given: {e})"),
             BridgeEvent::Settings { faces, rotation } => println!(

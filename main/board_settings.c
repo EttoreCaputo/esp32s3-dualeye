@@ -27,6 +27,7 @@ static const char *const SRC_KEYS[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "src_cpu
 #define WAKE_SOUND_KEY "wake_sound"
 #define PET_SOUNDS_KEY "pet_sounds"
 #define PET_REACT_KEY "pet_react"
+#define PET_HEAR_KEY "pet_hear"
 
 static SemaphoreHandle_t s_lock;
 static board_settings_t s_settings;
@@ -88,6 +89,10 @@ static void load(void)
     if (nvs_get_u8(nvs, PET_REACT_KEY, &pet_react) == ESP_OK) {
         s_settings.pet_reactions = pet_react != 0;
     }
+    uint8_t pet_hear = 0;
+    if (nvs_get_u8(nvs, PET_HEAR_KEY, &pet_hear) == ESP_OK) {
+        s_settings.pet_hearing = pet_hear != 0;
+    }
     size_t len = sizeof(s_settings.wake_word);
     if (nvs_get_str(nvs, WAKE_WORD_KEY, s_settings.wake_word, &len) != ESP_OK) {
         s_settings.wake_word[0] = '\0';
@@ -125,6 +130,7 @@ void board_settings_init(void)
     s_settings.wake_sound = true;
     s_settings.pet_sounds = true;
     s_settings.pet_reactions = true;
+    s_settings.pet_hearing = true;
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -295,6 +301,18 @@ esp_err_t board_settings_set_pet_reactions(bool on)
     xSemaphoreGive(s_lock);
     if (changed) {
         save(PET_REACT_KEY, on, false);
+    }
+    return ESP_OK;
+}
+
+esp_err_t board_settings_set_pet_hearing(bool on)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool changed = s_settings.pet_hearing != on;
+    s_settings.pet_hearing = on;
+    xSemaphoreGive(s_lock);
+    if (changed) {
+        save(PET_HEAR_KEY, on, false);
     }
     return ESP_OK;
 }

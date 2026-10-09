@@ -1,7 +1,8 @@
 #pragma once
 
 /* Always-on wake word: I2S mic + speaker loopback -> ESP-SR AFE (AEC,
- * VAD) -> WakeNet, on core 1. After the wake word the AFE's output is
+ * VAD) -> WakeNet, on core 1. Between conversations the pet's ears (ears.c)
+ * hear the same audio. After the wake word the AFE's output is
  * streamed to the host on `audio_up` until the speaker stops (VAD), between
  * `utterance_start` and `utterance_end` notifications. Drives the voice state
  * the "eyes" overlay shows and tells the host with `wake` and `voice_state`

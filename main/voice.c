@@ -5,6 +5,7 @@
 #include "board_audio.h"
 #include "link.h"
 #include "cJSON.h"
+#include "ears.h"
 #include "esp_afe_config.h"
 #include "esp_afe_sr_models.h"
 #include "esp_heap_caps.h"
@@ -505,6 +506,12 @@ static void fetch_task(void *arg)
                     } else {
                         ESP_LOGI(TAG, "wake word ignored: the speaker is on");
                     }
+                }
+                if (!s_stream.active) {
+                    // The room, between conversations. The board's own sounds
+                    // and their echo don't count.
+                    ears_feed(res->data, res->data_size / (int) sizeof(int16_t), res->vad_state == VAD_SPEECH,
+                              s_state != VOICE_IDLE || esp_timer_get_time() < s_speaker_until_us);
                 }
             }
         }

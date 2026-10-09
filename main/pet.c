@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "ears.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -54,6 +55,14 @@ static const char *TAG = "pet";
 /* Three errors this close: sad. */
 #define ERRORS_SAD 3
 #define ERRORS_WINDOW_S 300
+/* Three bangs this close: it's had enough of the noise. */
+#define BANGS_NOISY 3
+#define BANGS_WINDOW_S 300
+/* Claps in a row for a dance rather than a smile. */
+#define CLAPS_DANCE 3
+/* A room this quiet for this long makes it drowsy. */
+#define QUIET_DROWSY_S 1800
+#define QUIET_ENERGY 0.12f
 
 typedef enum {
     R_HOT,
@@ -66,6 +75,9 @@ typedef enum {
     R_GOODNIGHT,
     R_GREETING,
     R_SAD,
+    R_BANG,
+    R_CLAPS,
+    R_NOISY,
     R_COUNT,
 } reaction_t;
 
@@ -73,7 +85,8 @@ typedef enum {
 static const uint16_t COOLDOWN_S[R_COUNT] = {
     [R_HOT] = 900,       [R_COOL] = 300,       [R_MUSIC] = 240,        [R_CLAUDE_DONE] = 300,
     [R_CLAUDE_START] = 1200, [R_BATTERY_LOW] = 1200, [R_CHARGING] = 120, [R_GOODNIGHT] = 3600,
-    [R_GREETING] = 600,  [R_SAD] = 600,
+    [R_GREETING] = 600,  [R_SAD] = 600,         [R_BANG] = 30,          [R_CLAPS] = 8,
+    [R_NOISY] = 900,
 };
 
 static const char *const REACTION_NAMES[R_COUNT] = {
@@ -87,6 +100,9 @@ static const char *const REACTION_NAMES[R_COUNT] = {
     [R_GOODNIGHT] = "goodnight",
     [R_GREETING] = "greeting",
     [R_SAD] = "errors",
+    [R_BANG] = "bang",
+    [R_CLAPS] = "claps",
+    [R_NOISY] = "noisy",
 };
 
 static const char *const MOOD_NAMES[PET_MOOD_COUNT] = {
@@ -155,6 +171,8 @@ static bool s_battery_low;
 static bool s_night_said;
 static int s_errors;
 static int64_t s_first_error_us;
+static int s_bangs;
+static int64_t s_first_bang_us;
 static bool s_claude_working;
 static float s_pitch = 1.0f;
 static int s_idle_s = -1;
@@ -221,6 +239,8 @@ void pet_init(void)
     ESP_LOGI(TAG, "energy %.2f, happiness %.2f, affection %.2f", s_energy, s_happy, s_affection);
 }
 
+static void react(reaction_t r, const char *scene, int64_t now);
+
 /** With s_lock held. */
 static void nudge(float energy, float happy, float affection)
 {
@@ -257,6 +277,56 @@ void pet_event(pet_event_t event)
     xSemaphoreGive(s_lock);
 }
 
+void pet_heard(pet_heard_t what, int count)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    int64_t now = esp_timer_get_time();
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    // The computer's speakers, more likely than the room: not for a reaction.
+    bool music = s_music_s > 0;
+    switch (what) {
+    case PET_HEARD_BANG:
+        if (music) {
+            break;
+        }
+        nudge(0.06f, -0.03f, 0);
+        if (s_bangs == 0 || now - s_first_bang_us > (int64_t) BANGS_WINDOW_S * 1000000) {
+            s_bangs = 0;
+            s_first_bang_us = now;
+        }
+        if (++s_bangs >= BANGS_NOISY) {
+            s_bangs = 0;
+            nudge(0, -0.06f, 0);
+            react(R_NOISY, "angry", now);
+        } else {
+            react(R_BANG, s_energy < 0.35f || s_mood == PET_MOOD_SAD ? "scared" : "surprised", now);
+        }
+        break;
+    case PET_HEARD_CLAPS:
+        if (music) {
+            break;
+        }
+        // Someone's calling it.
+        nudge(0.05f, 0.04f, 0.03f);
+        s_interacted_us = now;
+        react(R_CLAPS,
+              count >= CLAPS_DANCE && s_energy > 0.3f ? "dance"
+              : s_energy < 0.3f                       ? "yawn"
+              : s_mood == PET_MOOD_LOVING             ? "love"
+                                                      : "happy",
+              now);
+        break;
+    case PET_HEARD_CHATTER:
+        // Company: not bored, a bit livelier. No scene: they aren't talking to it.
+        nudge(0.03f, 0.01f, 0);
+        s_interacted_us = now;
+        break;
+    }
+    xSemaphoreGive(s_lock);
+}
+
 void pet_set_reactions(bool on)
 {
     s_react = on;
@@ -275,7 +345,8 @@ const char *pet_mood_name(pet_mood_t mood)
     return mood < PET_MOOD_COUNT ? MOOD_NAMES[mood] : "content";
 }
 
-static const char *const NOW_NAMES[] = {"hot", "music", "claude", "battery_low", "charging", "night", "away", "bored"};
+static const char *const NOW_NAMES[] = {"hot",  "music", "claude", "battery_low", "charging",
+                                        "night", "away", "bored",  "quiet",       "chatter"};
 
 const char *pet_now_name(uint32_t bit)
 {
@@ -293,6 +364,8 @@ void pet_get(pet_state_t *out)
 {
     memset(out, 0, sizeof(*out));
     int64_t now = esp_timer_get_time();
+    ears_state_t ears;
+    ears_get(&ears);
     xSemaphoreTake(s_lock, portMAX_DELAY);
     out->energy = s_energy;
     out->happiness = s_happy;
@@ -307,7 +380,8 @@ void pet_get(pet_state_t *out)
     out->now = (s_hot ? PET_NOW_HOT : 0) | (s_music_s > 0 ? PET_NOW_MUSIC : 0) | (s_claude_working ? PET_NOW_CLAUDE : 0)
                | (s_battery_low ? PET_NOW_BATTERY_LOW : 0) | (s_plugged ? PET_NOW_CHARGING : 0)
                | (s_minute >= 0 && is_night(s_minute) ? PET_NOW_NIGHT : 0) | (s_away ? PET_NOW_AWAY : 0)
-               | (s_mood == PET_MOOD_BORED ? PET_NOW_BORED : 0);
+               | (s_mood == PET_MOOD_BORED ? PET_NOW_BORED : 0)
+               | (ears.quiet_s >= QUIET_DROWSY_S ? PET_NOW_QUIET : 0) | (ears.chatter ? PET_NOW_CHATTER : 0);
     for (int i = 0; i < s_recent_count; i++) {
         int k = (s_recent_next - 1 - i + 2 * PET_RECENT) % PET_RECENT;
         out->recent[i].what = REACTION_NAMES[s_recent[k].r];
@@ -511,6 +585,12 @@ static void notice(const metrics_snapshot_t *snap, int64_t now)
 static void drift(const metrics_snapshot_t *snap, float dt)
 {
     float energy_rest = s_minute >= 0 ? day_energy(s_minute) : 0.7f;
+    ears_state_t ears;
+    ears_get(&ears);
+    if (ears.quiet_s >= QUIET_DROWSY_S && s_music_s == 0) {
+        // Nothing to hear for half an hour: drowsy.
+        energy_rest = fmaxf(0.1f, energy_rest - QUIET_ENERGY);
+    }
     float happy_rest = s_away && esp_timer_get_time() - s_away_since_us > 2LL * 3600 * 1000000 ? 0.5f : HAPPY_REST;
     s_energy += (energy_rest - s_energy) * dt / ENERGY_TAU_S;
     s_happy += (happy_rest - s_happy) * dt / HAPPY_TAU_S;
@@ -530,18 +610,31 @@ void pet_update(const metrics_snapshot_t *snap)
         return;
     }
     int64_t now = esp_timer_get_time();
-    if (s_tick_us != 0 && now - s_tick_us < TICK_US) {
-        return;
-    }
+    // The mood moves once a second; a reaction plays as soon as it comes (a
+    // bang in the room makes it jump now, not in a second).
+    bool tick = s_tick_us == 0 || now - s_tick_us >= TICK_US;
     float dt = s_tick_us != 0 ? (float) (now - s_tick_us) / 1000000.0f : 1.0f;
-    s_tick_us = now;
+    bool due = false;
+    float pitch = s_pitch;
+    const char *scene = NULL;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    notice(snap, now);
-    drift(snap, dt);
-    s_mood = mood_now(now);
-    float pitch = 1.0f + 0.16f * (s_happy - 0.5f) + 0.10f * (s_energy - 0.5f);
-    const char *scene = NULL;
+    if (tick) {
+        s_tick_us = now;
+        notice(snap, now);
+        drift(snap, dt);
+        s_mood = mood_now(now);
+        pitch = 1.0f + 0.16f * (s_happy - 0.5f) + 0.10f * (s_energy - 0.5f);
+        due = now - s_saved_us >= (int64_t) SAVE_EVERY_S * 1000000
+              && (fabsf(s_energy - s_saved[0]) >= SAVE_STEP || fabsf(s_happy - s_saved[1]) >= SAVE_STEP
+                  || fabsf(s_affection - s_saved[2]) >= SAVE_STEP);
+        if (due) {
+            s_saved[0] = s_energy;
+            s_saved[1] = s_happy;
+            s_saved[2] = s_affection;
+            s_saved_us = now;
+        }
+    }
     if (s_pending != NULL) {
         if (now > s_pending_until_us) {
             s_pending = NULL;
@@ -549,19 +642,12 @@ void pet_update(const metrics_snapshot_t *snap)
             scene = s_pending;
         }
     }
-    bool due = now - s_saved_us >= (int64_t) SAVE_EVERY_S * 1000000
-               && (fabsf(s_energy - s_saved[0]) >= SAVE_STEP || fabsf(s_happy - s_saved[1]) >= SAVE_STEP
-                   || fabsf(s_affection - s_saved[2]) >= SAVE_STEP);
-    if (due) {
-        s_saved[0] = s_energy;
-        s_saved[1] = s_happy;
-        s_saved[2] = s_affection;
-        s_saved_us = now;
-    }
     xSemaphoreGive(s_lock);
 
-    s_pitch = pitch;
-    playback_set_pet_pitch(pitch);
+    if (tick) {
+        s_pitch = pitch;
+        playback_set_pet_pitch(pitch);
+    }
     if (due) {
         save();
     }

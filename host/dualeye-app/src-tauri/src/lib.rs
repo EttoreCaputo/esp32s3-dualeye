@@ -51,6 +51,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dualeye_core::agent;
 use dualeye_core::claude::alerts::AlertSettings;
+use dualeye_core::quips::QuipLevel;
 use dualeye_core::claude::hooks::{self, HooksStatus};
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
@@ -95,6 +96,9 @@ struct Settings {
     /// The eyes face looks about on its own instead of at the mouse pointer.
     #[serde(default)]
     ignore_pointer: bool,
+    /// How often the pet comments on your day out loud.
+    #[serde(default)]
+    quips: QuipLevel,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -205,6 +209,8 @@ struct Link {
     logs: VecDeque<String>,
     /// The latest Claude alert: what it said, why it didn't reach the board, when (Unix ms).
     last_alert: Option<(String, Option<String>, u64)>,
+    /// The pet's latest comment on your day, likewise.
+    last_quip: Option<QuipEntry>,
     /// What the board's voice overlay shows (`idle` until it says otherwise).
     voice: Option<String>,
     transcripts: VecDeque<TranscriptEntry>,
@@ -266,12 +272,25 @@ impl Link {
                 let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
                 self.last_alert = Some((text.clone(), error.clone(), at));
             }
+            BridgeEvent::Quip { quip, text, error } => {
+                let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                self.last_quip = Some(QuipEntry { topic: quip.topic.name(), text: text.clone(), error: error.clone(), at });
+            }
             BridgeEvent::Disconnected { reason, .. } => {
                 self.kind = "offline";
                 self.message = Some(reason.clone());
             }
         }
     }
+}
+
+/// What the pet said about your day, and when (Unix ms).
+#[derive(Clone, Serialize)]
+struct QuipEntry {
+    topic: &'static str,
+    text: String,
+    error: Option<String>,
+    at: u64,
 }
 
 struct AppState {
@@ -302,6 +321,8 @@ struct AppState {
     music: Arc<Music>,
     /// Handed to every bridge, like `faces`.
     follow_pointer: Arc<AtomicBool>,
+    /// Handed to every bridge, like `faces`.
+    quips: Arc<Mutex<QuipLevel>>,
     /// Speech-to-text: `off`, `starting`, `ready` or `error`, and why.
     stt_state: Arc<Mutex<(&'static str, Option<String>)>>,
     /// Text-to-speech, likewise.
@@ -746,13 +767,16 @@ async fn set_board_wake_sound(on: bool) -> Result<(), String> {
 
 /// The board as a pet: its little sounds, its reactions to the computer.
 #[tauri::command]
-async fn set_board_pet(sounds: Option<bool>, react: Option<bool>) -> Result<(), String> {
+async fn set_board_pet(sounds: Option<bool>, react: Option<bool>, hear: Option<bool>) -> Result<(), String> {
     let mut args = serde_json::Map::new();
     if let Some(on) = sounds {
         args.insert("sounds".into(), on.into());
     }
     if let Some(on) = react {
         args.insert("react".into(), on.into());
+    }
+    if let Some(on) = hear {
+        args.insert("hear".into(), on.into());
     }
     tauri::async_runtime::spawn_blocking(move || call_board("set_pet", args.into()))
         .await
@@ -770,6 +794,26 @@ async fn board_pet() -> Result<Option<serde_json::Value>, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// How often the pet comments on your day, and what it said last.
+#[derive(Serialize)]
+struct QuipsInfo {
+    level: QuipLevel,
+    last: Option<QuipEntry>,
+}
+
+#[tauri::command]
+fn quips_info(state: State<AppState>) -> QuipsInfo {
+    QuipsInfo { level: *state.quips.lock().unwrap(), last: state.link.lock().unwrap().last_quip.clone() }
+}
+
+#[tauri::command]
+fn set_quips(state: State<AppState>, level: QuipLevel) -> QuipsInfo {
+    *state.quips.lock().unwrap() = level;
+    state.settings.lock().unwrap().quips = level;
+    state.save_settings();
+    quips_info(state)
 }
 
 /// One of the eyes' scenes, now.
@@ -1208,7 +1252,8 @@ fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
     let (faces, rotation, hub, voice) = (state.faces.clone(), state.rotation.clone(), state.hub.clone(), state.voice.clone());
     let (claude_alerts, timers) = (state.claude_alerts.clone(), state.timers.clone());
     let (music, follow_pointer) = (state.music.clone(), state.follow_pointer.clone());
-    let config = BridgeConfig { port, faces, rotation, hub, voice, claude_alerts, timers, music, follow_pointer, ..Default::default() };
+    let quips = state.quips.clone();
+    let config = BridgeConfig { port, faces, rotation, hub, voice, claude_alerts, timers, music, follow_pointer, quips, ..Default::default() };
     Bridge::spawn(config, move |event| {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
@@ -1316,6 +1361,7 @@ pub fn run() {
             let rotation = Arc::new(Mutex::new(settings.rotation));
             let claude_alerts = Arc::new(Mutex::new(settings.claude_alerts.clone()));
             let follow_pointer = Arc::new(AtomicBool::new(!settings.ignore_pointer));
+            let quips = Arc::new(Mutex::new(settings.quips));
             let (hub, hub_error) = match Hub::start() {
                 Ok(hub) => (Some(hub), None),
                 Err(e) => (None, Some(e.to_string())),
@@ -1337,6 +1383,7 @@ pub fn run() {
                 timers: Arc::new(Timers::open(timers::default_file())),
                 music: Arc::default(),
                 follow_pointer,
+                quips,
                 stt_state: Arc::new(Mutex::new(("off", None))),
                 tts_state: Arc::new(Mutex::new(("off", None))),
                 llm_state: Arc::new(Mutex::new(("off", None))),
@@ -1364,7 +1411,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, quips_info, set_quips, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {
