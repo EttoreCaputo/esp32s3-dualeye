@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lvgl_port.h"
@@ -39,10 +40,10 @@ static const char *TAG = "playback";
 #define TASK_CORE 1
 /* Above the voice tasks: an underrun is heard, a late fetch isn't. */
 #define TASK_PRIORITY 6
-/* Earcons: sine notes with this much fade in and out, at this amplitude
- * (the speaker volume applies on top). */
-#define EARCON_FADE_MS 8
-#define EARCON_AMPLITUDE 9000.0f
+/* Board sounds rendered this far ahead of the speaker, and how many can wait
+ * their turn. */
+#define SYNTH_AHEAD 1024u
+#define SOUND_QUEUE 6
 
 typedef enum {
     END_DONE,
@@ -58,23 +59,9 @@ static const char *const END_NAMES[] = {
 };
 
 typedef struct {
-    float hz; /* 0: a pause */
-    int ms;
-} note_t;
-
-static const note_t ERROR_NOTES[] = {{587.3f, 110}, {0, 40}, {392.0f, 200}};
-/* C6 E6 G6, once: short, so the wake word has the silence between to be
- * heard in. */
-static const note_t ALARM_NOTES[] = {
-    {1046.5f, 110}, {0, 30}, {1318.5f, 110}, {0, 30}, {1568.0f, 220},
-};
-/* G5 C6, short: over well within the wake word's tail, which the VAD ignores. */
-static const note_t WAKE_NOTES[] = {{784.0f, 60}, {0, 20}, {1046.5f, 90}};
-
-typedef struct {
     bool active;   /* frames of `id` are coming or buffered */
     bool end;      /* its last frame arrived */
-    bool local;    /* an earcon, not the host's */
+    bool local;    /* the board's own sounds, not the host's */
     uint8_t id;
     uint16_t next_seq;
     uint32_t received; /* samples */
@@ -99,6 +86,11 @@ static bool s_ended_pending;
 static int s_last_id = -1;
 static TaskHandle_t s_task;
 static bool s_available;
+/* Sounds waiting to be played, and the one being rendered (by the task). */
+static QueueHandle_t s_sounds;
+static synth_t s_synth;
+static bool s_synth_on;
+static volatile bool s_pet_sounds = true;
 
 bool playback_available(void)
 {
@@ -182,6 +174,7 @@ static void stop(end_reason_t reason)
         return;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    xQueueReset(s_sounds);
     end_locked(reason);
     xSemaphoreGive(s_lock);
     xTaskNotifyGive(s_task);
@@ -197,53 +190,81 @@ void playback_barge_in(void)
     stop(END_BARGE_IN);
 }
 
-void playback_earcon(playback_earcon_t earcon)
+void playback_sound(sound_t sound)
 {
-    const note_t *notes = ERROR_NOTES;
-    size_t count = sizeof(ERROR_NOTES) / sizeof(ERROR_NOTES[0]);
-    if (earcon == PLAYBACK_EARCON_ALARM) {
-        notes = ALARM_NOTES;
-        count = sizeof(ALARM_NOTES) / sizeof(ALARM_NOTES[0]);
-    } else if (earcon == PLAYBACK_EARCON_WAKE) {
-        notes = WAKE_NOTES;
-        count = sizeof(WAKE_NOTES) / sizeof(WAKE_NOTES[0]);
-    }
-    if (!s_available) {
+    if (!s_available || sound >= SOUND_COUNT || (sound >= SOUND_FIRST_PET && !s_pet_sounds)) {
         return;
     }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    stream_t *st = &s_stream;
-    if (st->active) {
-        // Speech (or another earcon) is playing: it says enough.
-        xSemaphoreGive(s_lock);
-        return;
-    }
-    memset(st, 0, sizeof(*st));
-    st->active = true;
-    st->local = true;
-    st->end = true;
-    const uint32_t rate_ms = BOARD_AUDIO_SAMPLE_RATE / 1000;
-    const uint32_t fade = EARCON_FADE_MS * rate_ms;
-    for (size_t i = 0; i < count; i++) {
-        uint32_t n = (uint32_t) notes[i].ms * rate_ms;
-        if (n > BUFFER_SAMPLES - buffered()) {
-            break;
+    uint8_t id = (uint8_t) sound;
+    if (sound < SOUND_FIRST_PET) {
+        // An earcon says something now (the wake chime must be over before
+        // the command): the pet's chatter makes way.
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_stream.active && s_stream.local) {
+            xQueueReset(s_sounds);
+            end_locked(END_REPLACED);
         }
-        for (uint32_t k = 0; k < n; k++) {
-            float gain = 1.0f;
-            if (k < fade) {
-                gain = (float) k / fade;
-            } else if (n - k < fade) {
-                gain = (float) (n - k) / fade;
+        xSemaphoreGive(s_lock);
+    }
+    // A full queue: this one is dropped, there's plenty to hear already.
+    if (xQueueSend(s_sounds, &id, 0) == pdTRUE) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
+void playback_set_pet_sounds(bool on)
+{
+    s_pet_sounds = on;
+}
+
+bool playback_pet_sounds(void)
+{
+    return s_pet_sounds;
+}
+
+/** With s_lock held, in the task: start the next queued sound when nothing
+ * plays, and keep the one playing rendered SYNTH_AHEAD samples ahead. The
+ * host's speech says enough: sounds queued meanwhile are dropped. */
+static void synth_feed_locked(void)
+{
+    stream_t *st = &s_stream;
+    uint8_t id;
+    if (st->active && !st->local) {
+        s_synth_on = false;
+        while (xQueueReceive(s_sounds, &id, 0) == pdTRUE) {
+        }
+        return;
+    }
+    if (!st->active) {
+        s_synth_on = false;
+        if (xQueueReceive(s_sounds, &id, 0) != pdTRUE) {
+            return;
+        }
+        memset(st, 0, sizeof(*st));
+        st->active = true;
+        st->local = true;
+        synth_begin(&s_synth, (sound_t) id);
+        s_synth_on = true;
+    }
+    int16_t chunk[CHUNK_SAMPLES];
+    while (s_synth_on && buffered() < SYNTH_AHEAD) {
+        uint32_t n = synth_render(&s_synth, chunk, CHUNK_SAMPLES);
+        if (n == 0) {
+            // Over: straight on to the next, in the same stream.
+            if (xQueueReceive(s_sounds, &id, 0) == pdTRUE) {
+                synth_begin(&s_synth, (sound_t) id);
+            } else {
+                s_synth_on = false;
+                st->end = true;
             }
-            float v = notes[i].hz > 0 ? EARCON_AMPLITUDE * gain * sinf(2.0f * (float) M_PI * notes[i].hz * k / BOARD_AUDIO_SAMPLE_RATE) : 0;
-            s_buf[(s_write + k) % BUFFER_SAMPLES] = (int16_t) v;
+            continue;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            s_buf[(s_write + i) % BUFFER_SAMPLES] = chunk[i];
         }
         s_write += n;
         st->received += n;
     }
-    xSemaphoreGive(s_lock);
-    xTaskNotifyGive(s_task);
 }
 
 static void report(const stream_t *st, end_reason_t reason)
@@ -271,7 +292,7 @@ static void set_level(float level)
     lvgl_port_unlock();
 }
 
-/** Speaker on, eyes speaking (not for an earcon), the wake word ignored
+/** Speaker on, eyes speaking (not for the board's sounds), the wake word ignored
  * or barging in. */
 static void begin(bool local)
 {
@@ -309,13 +330,15 @@ static void playback_task(void *arg)
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(IDLE_WAIT_MS));
         }
         xSemaphoreTake(s_lock, portMAX_DELAY);
+        synth_feed_locked();
         bool ended = s_ended_pending;
         stream_t done = s_ended;
         end_reason_t why = s_ended_reason;
         s_ended_pending = false;
         stream_t *st = &s_stream;
         uint32_t n = 0;
-        bool start = !playing && st->active && (buffered() >= PREBUFFER_MS * (BOARD_AUDIO_SAMPLE_RATE / 1000) || st->end);
+        bool start = !playing && st->active
+                     && (st->local || st->end || buffered() >= PREBUFFER_MS * (BOARD_AUDIO_SAMPLE_RATE / 1000));
         if (playing || start) {
             n = buffered() < CHUNK_SAMPLES ? buffered() : CHUNK_SAMPLES;
             for (uint32_t i = 0; i < n; i++) {
@@ -394,8 +417,9 @@ static void playback_task(void *arg)
 void playback_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+    s_sounds = xQueueCreate(SOUND_QUEUE, sizeof(uint8_t));
     s_buf = heap_caps_malloc(BUFFER_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_lock == NULL || s_buf == NULL) {
+    if (s_lock == NULL || s_sounds == NULL || s_buf == NULL) {
         ESP_LOGE(TAG, "out of memory, continuing without playback");
         return;
     }

@@ -9,6 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sounds.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -29,18 +31,15 @@ void playback_stop(void);
  * ends with `barge_in`. */
 void playback_barge_in(void);
 
-typedef enum {
-    /* Two falling notes: the host failed, or didn't catch the words. */
-    PLAYBACK_EARCON_ERROR,
-    /* A rising chime: a timer is up. Played again and again while it rings. */
-    PLAYBACK_EARCON_ALARM,
-    /* Two quick rising notes: the wake word was heard, the board listens. */
-    PLAYBACK_EARCON_WAKE,
-} playback_earcon_t;
+/** Play `sound` made on the board, after those queued before it, unless the
+ * host's speech is playing. It doesn't show `speaking` and isn't reported
+ * to the host. Safe from any task. */
+void playback_sound(sound_t sound);
 
-/** Play a short sound made on the board, unless the host's speech is
- * playing. It doesn't show `speaking` and isn't reported to the host. */
-void playback_earcon(playback_earcon_t earcon);
+/** The pet's sounds (from SOUND_FIRST_PET on: the eyes' scenes, hello...) are
+ * played, or quietly dropped. On by default. */
+void playback_set_pet_sounds(bool on);
+bool playback_pet_sounds(void);
 
 /** A stream is playing (or buffering to start). */
 bool playback_active(void);

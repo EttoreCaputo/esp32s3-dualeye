@@ -27,11 +27,16 @@
 /** A tool fills `text` with what it did, or why it refused (returning false). */
 typedef bool (*tool_fn_t)(const cJSON *args, char *text, cJSON **structured);
 
+/** A schema made at the time, for one that lists the board's own names. */
+typedef cJSON *(*schema_fn_t)(void);
+
 typedef struct {
     const char *name;
     const char *description;
     const char *schema;
     tool_fn_t fn;
+    /* Instead of `schema`. */
+    schema_fn_t schema_fn;
 } tool_t;
 
 static const char *const SCREEN_NAMES[BOARD_LCD_COUNT] = {[UI_SCREEN_CPU] = "left", [UI_SCREEN_GPU] = "right"};
@@ -194,6 +199,7 @@ static bool tool_set_mic(const cJSON *args, char *text, cJSON **structured)
         bool on = cJSON_IsTrue(muted);
         board_settings_set_mic_muted(on);
         voice_set_muted(on);
+        playback_sound(on ? SOUND_MUTE : SOUND_UNMUTE);
         n += snprintf(text, TEXT_MAX, on ? "microphone muted: not listening for \"%s\"" : "listening for \"%s\"",
                       voice_wake_word());
     }
@@ -246,6 +252,8 @@ static bool tool_set_volume(const cJSON *args, char *text, cJSON **structured)
         snprintf(text, TEXT_MAX, "the speaker is not available on this board");
         return false;
     }
+    // How loud it is now.
+    playback_sound(SOUND_VOLUME);
     snprintf(text, TEXT_MAX, "speaker volume %d%%", pct);
     return true;
 }
@@ -296,13 +304,85 @@ static bool tool_play_eyes(const cJSON *args, char *text, cJSON **structured)
         snprintf(text, TEXT_MAX, "not now: a conversation is on");
         return false;
     }
-    const char *names[24];
-    int count = ui_eyes_animations(names, 24);
+    const char *names[48];
+    int count = ui_eyes_animations(names, 48);
     int len = snprintf(text, TEXT_MAX, "unknown scene; one of:");
     for (int i = 0; i < count && len < TEXT_MAX; i++) {
         len += snprintf(text + len, TEXT_MAX - len, " %s", names[i]);
     }
     return false;
+}
+
+/** {"name": one of `names`} */
+static cJSON *name_schema(const char *const *names, int count)
+{
+    cJSON *schema = cJSON_CreateObject();
+    cJSON_AddStringToObject(schema, "type", "object");
+    cJSON *name = cJSON_AddObjectToObject(cJSON_AddObjectToObject(schema, "properties"), "name");
+    cJSON_AddStringToObject(name, "type", "string");
+    cJSON_AddItemToObject(name, "enum", cJSON_CreateStringArray(names, count));
+    return schema;
+}
+
+static cJSON *play_eyes_schema(void)
+{
+    const char *names[48];
+    return name_schema(names, ui_eyes_animations(names, 48));
+}
+
+static cJSON *play_sound_schema(void)
+{
+    const char *names[SOUND_COUNT];
+    int n = 0;
+    for (int i = 0; i < SOUND_COUNT; i++) {
+        names[n++] = sound_name((sound_t) i);
+    }
+    cJSON *schema = name_schema(names, n);
+    cJSON *required = cJSON_AddArrayToObject(schema, "required");
+    cJSON_AddItemToArray(required, cJSON_CreateString("name"));
+    return schema;
+}
+
+static bool tool_play_sound(const cJSON *args, char *text, cJSON **structured)
+{
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(args, "name");
+    if (!cJSON_IsString(name)) {
+        snprintf(text, TEXT_MAX, "name must be a string");
+        return false;
+    }
+    sound_t sound = sound_find(name->valuestring);
+    if (sound == SOUND_COUNT) {
+        snprintf(text, TEXT_MAX, "unknown sound \"%s\"", name->valuestring);
+        return false;
+    }
+    if (!playback_available()) {
+        snprintf(text, TEXT_MAX, "the speaker is not available on this board");
+        return false;
+    }
+    if (sound >= SOUND_FIRST_PET && !playback_pet_sounds()) {
+        snprintf(text, TEXT_MAX, "pet sounds are off");
+        return false;
+    }
+    playback_sound(sound);
+    snprintf(text, TEXT_MAX, "playing %s", name->valuestring);
+    return true;
+}
+
+static bool tool_set_sounds(const cJSON *args, char *text, cJSON **structured)
+{
+    const cJSON *pet = cJSON_GetObjectItemCaseSensitive(args, "pet");
+    if (!cJSON_IsBool(pet)) {
+        snprintf(text, TEXT_MAX, "pet must be true or false");
+        return false;
+    }
+    bool on = cJSON_IsTrue(pet);
+    board_settings_set_pet_sounds(on);
+    playback_set_pet_sounds(on);
+    if (on) {
+        playback_sound(SOUND_HAPPY);
+    }
+    snprintf(text, TEXT_MAX, on ? "the board makes its little sounds" : "the board keeps quiet, but for chimes and alarms");
+    return true;
 }
 
 static const char *metrics_state_name(metrics_ui_state_t state)
@@ -346,6 +426,7 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
     cJSON_AddBoolToObject(voice, "eyes", settings.eyes);
     cJSON_AddBoolToObject(voice, "idle_eyes", settings.idle_eyes);
     cJSON_AddBoolToObject(voice, "wake_sound", settings.wake_sound);
+    cJSON_AddBoolToObject(voice, "pet_sounds", settings.pet_sounds);
     if (voice_available()) {
         cJSON_AddStringToObject(voice, "wake_word", voice_wake_word());
         cJSON_AddStringToObject(voice, "wake_word_id", voice_wake_word_id());
@@ -460,14 +541,24 @@ static const tool_t TOOLS[] = {
     },
     {
         .name = "play_eyes",
-        .description = "Play one of the eyes' short scenes on the screens now (a few seconds), or a random one "
-                       "without a name. Refused during a voice conversation.",
-        // The names of SKITS in ui_eyes.c.
-        .schema = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"enum\":["
-                  "\"look_around\",\"sleepy\",\"suspicious\",\"happy\",\"surprised\",\"wink\",\"angry\","
-                  "\"sad\",\"dizzy\",\"cross_eyed\",\"eye_roll\",\"curious\",\"love\",\"scan\",\"shy\","
-                  "\"flutter\"]}}}",
+        .description = "Play one of the eyes' short scenes on the screens now (a few seconds, with its sounds), "
+                       "or a random one without a name. Refused during a voice conversation.",
+        .schema_fn = play_eyes_schema,
         .fn = tool_play_eyes,
+    },
+    {
+        .name = "play_sound",
+        .description = "Play one of the board's own little sounds on its speaker: a chirp, a giggle, a purr, "
+                       "a yawn, a sneeze, a tune...",
+        .schema_fn = play_sound_schema,
+        .fn = tool_play_sound,
+    },
+    {
+        .name = "set_sounds",
+        .description = "Whether the board makes its little pet sounds (in the eyes' scenes, hello, snoring, "
+                       "mute...): on by default. Chimes and alarms play either way. The board remembers it.",
+        .schema = "{\"type\":\"object\",\"properties\":{\"pet\":{\"type\":\"boolean\"}},\"required\":[\"pet\"]}",
+        .fn = tool_set_sounds,
     },
     {
         .name = "get_state",
@@ -495,7 +586,8 @@ cJSON *board_tools_list(const cJSON *params, size_t budget)
         cJSON *t = cJSON_CreateObject();
         cJSON_AddStringToObject(t, "name", TOOLS[i].name);
         cJSON_AddStringToObject(t, "description", TOOLS[i].description);
-        cJSON_AddItemToObject(t, "inputSchema", cJSON_Parse(TOOLS[i].schema));
+        cJSON_AddItemToObject(t, "inputSchema",
+                              TOOLS[i].schema_fn != NULL ? TOOLS[i].schema_fn() : cJSON_Parse(TOOLS[i].schema));
         char *text = cJSON_PrintUnformatted(t);
         size_t size = text != NULL ? strlen(text) + 1 : budget;
         cJSON_free(text);

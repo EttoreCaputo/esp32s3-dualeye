@@ -258,7 +258,13 @@ type Status = {
 
 export type Link = "searching" | "connected" | "offline";
 /** The voice settings the board keeps; null where it doesn't say. */
-export type BoardVoice = { volume: number | null; eyes: boolean | null; idle_eyes: boolean | null; wake_sound: boolean | null };
+export type BoardVoice = {
+  volume: number | null;
+  eyes: boolean | null;
+  idle_eyes: boolean | null;
+  wake_sound: boolean | null;
+  pet_sounds: boolean | null;
+};
 /** Mirrors `metrics_ui_state_t` plus the moments the firmware is not running the UI. */
 export type BoardState = "off" | "boot" | "waiting" | "live" | "stale";
 export type Sample = { t: number; cpuT?: number; cpuL?: number; gpuT?: number; gpuL?: number };
@@ -752,7 +758,7 @@ class Monitor {
 
   /** The board's speaker volume and eyes; null where the board doesn't say. */
   async boardVoice(): Promise<BoardVoice> {
-    if (this.preview) return { volume: previewVolume, eyes: previewEyes, idle_eyes: previewIdleEyes, wake_sound: previewWakeSound };
+    if (this.preview) return { volume: previewVolume, eyes: previewEyes, idle_eyes: previewIdleEyes, wake_sound: previewWakeSound, pet_sounds: previewPetSounds };
     const b = await invoke<BoardVoice>("board_voice");
     this.eyes = b.eyes ?? false;
     return b;
@@ -792,6 +798,27 @@ class Monitor {
       return;
     }
     await invoke("set_board_wake_sound", { on });
+  }
+
+  /** The board's little sounds: scenes, hello, snoring... (firmware 1.4.0). */
+  async setBoardPetSounds(on: boolean) {
+    if (this.preview) {
+      previewPetSounds = on;
+      return;
+    }
+    await invoke("set_board_pet_sounds", { on });
+  }
+
+  /** One of the eyes' scenes on the board now. */
+  async playScene(name: string) {
+    if (this.preview) return;
+    await invoke("play_board_scene", { name });
+  }
+
+  /** One of the board's sounds on its speaker. */
+  async playSound(name: string) {
+    if (this.preview) return;
+    await invoke("play_board_sound", { name });
   }
 
   async testVoice(language: string) {
@@ -847,6 +874,7 @@ let previewVolume = 60;
 let previewEyes = true;
 let previewIdleEyes = true;
 let previewWakeSound = true;
+let previewPetSounds = true;
 
 function previewCloud(kind: ModelInfo["kind"], language: string | null, models: [string, string][]): ModelInfo[] {
   return models.map(([id, note]) => ({ id: `groq:${id}`, kind, language, engine: null, bytes: 0, note, license: "", installed: false, provider: "groq" }));

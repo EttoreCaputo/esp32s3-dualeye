@@ -1,5 +1,5 @@
 <script module lang="ts">
-  export type Tab = "voice" | "timers" | "claude" | "device" | "diagnostics";
+  export type Tab = "voice" | "pet" | "timers" | "claude" | "device" | "diagnostics";
 </script>
 
 <script lang="ts">
@@ -29,9 +29,11 @@
     type VoiceSettings,
   } from "./monitor.svelte";
   import { VOICE_PROMPTS } from "./voicePrompts";
+  import PetGallery from "./PetGallery.svelte";
 
   const TABS: [Tab, string][] = [
     ["voice", "Voice"],
+    ["pet", "Pet"],
     ["timers", "Timers"],
     ["claude", "Claude"],
     ["device", "Device"],
@@ -274,8 +276,9 @@
   let eyes = $state<boolean | null>(null);
   let idleEyes = $state<boolean | null>(null);
   let wakeSound = $state<boolean | null>(null);
+  let petSounds = $state<boolean | null>(null);
   $effect(() => {
-    if (!open || tab !== "voice" || monitor.link !== "connected") return;
+    if (!open || (tab !== "voice" && tab !== "pet") || monitor.link !== "connected") return;
     let alive = true;
     monitor
       .boardVoice()
@@ -285,6 +288,7 @@
         eyes = b.eyes;
         idleEyes = b.idle_eyes;
         wakeSound = b.wake_sound;
+        petSounds = b.pet_sounds;
       })
       .catch(() => {
         if (!alive) return;
@@ -292,6 +296,7 @@
         eyes = null;
         idleEyes = null;
         wakeSound = null;
+        petSounds = null;
       });
     return () => {
       alive = false;
@@ -305,6 +310,18 @@
     } catch (e) {
       wakeSound = !on;
       voiceError = String(e);
+    }
+  }
+
+  let petError = $state("");
+  async function setPetSounds(on: boolean) {
+    petSounds = on;
+    petError = "";
+    try {
+      await monitor.setBoardPetSounds(on);
+    } catch (e) {
+      petSounds = !on;
+      petError = String(e);
     }
   }
 
@@ -922,11 +939,6 @@
               <span class="track"><span class="knob"></span></span>
               <span class="slabel">Show animated eyes while talking, instead of the ring</span>
             </label>
-            <label class="switch" title={idleEyes === null ? "Needs the board connected, with firmware 1.0.2 or newer" : ""}>
-              <input type="checkbox" checked={idleEyes ?? true} disabled={idleEyes === null} onchange={(e) => setIdleEyes(e.currentTarget.checked)} />
-              <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Let the eyes play now and then while idle</span>
-            </label>
           </section>
 
           <section class="voice">
@@ -1244,6 +1256,23 @@
             </div>
           {/if}
         </section>
+      {:else if tab === "pet"}
+        <section class="petset">
+          <h3>Behaviour</h3>
+          <p class="hint">The board is a little pet: now and then it plays a scene on its own, and it chirps, giggles, sneezes and snores along. It says hello when the computer connects and snores as it dozes on the eyes face.</p>
+          <label class="switch" title={idleEyes === null ? "Needs the board connected, with firmware 1.0.2 or newer" : ""}>
+            <input type="checkbox" checked={idleEyes ?? true} disabled={idleEyes === null} onchange={(e) => setIdleEyes(e.currentTarget.checked)} />
+            <span class="track"><span class="knob"></span></span>
+            <span class="slabel">Let the eyes play now and then while idle</span>
+          </label>
+          <label class="switch" title={petSounds === null ? "Needs the board connected, with firmware 1.4.0 or newer" : ""}>
+            <input type="checkbox" checked={petSounds ?? true} disabled={petSounds === null} onchange={(e) => setPetSounds(e.currentTarget.checked)} />
+            <span class="track"><span class="knob"></span></span>
+            <span class="slabel">Pet sounds: in the scenes, hello, mute, snoring</span>
+          </label>
+          {#if petError}<p class="hint error">{petError}</p>{/if}
+        </section>
+        <PetGallery connected={monitor.link === "connected"} petSounds={petSounds ?? true} oldFirmware={monitor.link === "connected" && petSounds === null && idleEyes !== null} />
       {:else if tab === "timers"}
         {@const info = monitor.timers}
         <p class="hint">
@@ -1627,7 +1656,7 @@
   nav {
     position: relative;
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     margin: 14px;
     padding: 3px;
     border-radius: 12px;
@@ -1656,7 +1685,7 @@
     top: 3px;
     bottom: 3px;
     left: 3px;
-    width: calc((100% - 6px) / 5);
+    width: calc((100% - 6px) / 6);
     border-radius: 9px;
     background: rgba(255, 255, 255, 0.08);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
@@ -1902,6 +1931,9 @@
 
   .voice {
     --accent: #30d5f0;
+  }
+  .petset {
+    --accent: #40e080;
   }
   .voice.dimmed .persona {
     opacity: 0.5;

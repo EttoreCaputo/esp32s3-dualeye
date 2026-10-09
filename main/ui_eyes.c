@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_random.h"
+#include "playback.h"
 
 /* 25 fps: both eyes repainted each frame stay well inside the SPI bus. */
 #define FRAME_MS 40
@@ -55,6 +56,9 @@
 #define POINTER_FRESH_MS 6000
 #define DOZE_AFTER_MS 60000
 #define DOZE_MS 20000
+/* Fast asleep, it snores this many times, this far apart, then sleeps quietly. */
+#define SNORES 3
+#define SNORE_EVERY_MS 5200
 /* How far the pointer moves the eyes, in pixels: up and down about a point a
  * little above the middle, the board usually sitting below the screen. */
 #define LOOK_X 36.0f
@@ -129,22 +133,39 @@ static float s_look_x;
 static float s_look_y;
 static uint32_t s_next_look_ms;
 static float s_doze;
+static int s_snores;
+static uint32_t s_next_snore_ms;
+
+/* A sound in a scene, `ms` into it. */
+typedef struct {
+    uint16_t ms;
+    sound_t sound;
+} cue_t;
+
+#define MAX_CUES 4
 
 /* A scene the eyes play on their own while idle: what each eye looks like
- * `t` seconds in, for `ms`, in `color`. */
+ * `t` seconds in, for `ms`, in `color` (RAINBOW: going round the hues), and
+ * what it says meanwhile. The cues are in order; SOUND_WAKE (0) ends them,
+ * no scene plays it. */
 typedef struct {
     const char *name;
     uint32_t color;
     uint32_t ms;
     bool blinks;
     void (*fn)(int eye, float t, float out[P_COUNT]);
+    cue_t cues[MAX_CUES];
 } skit_t;
+
+#define RAINBOW 0
 
 static const skit_t *s_skit;
 /* The scene that just ended, its colour kept while the eyes close. */
 static const skit_t *s_closing;
 static const skit_t *s_last_skit;
 static uint32_t s_skit_ms;
+/* The scene's next cue. */
+static int s_cue;
 static lv_timer_t *s_idle_timer;
 static bool s_idle_on;
 static bool s_busy;
@@ -172,11 +193,31 @@ static uint32_t ambient_color(void)
     return c;
 }
 
+/* Round the hues once every 3 s, bright. */
+static uint32_t rainbow_color(void)
+{
+    float h = fmodf((float) lv_tick_get() / 3000.0f, 1.0f) * 6.0f;
+    float x = 1.0f - fabsf(fmodf(h, 2.0f) - 1.0f);
+    float rgb[3] = {0};
+    int sector = (int) h;
+    static const int8_t PICK[6][3] = {{0, 1, -1}, {1, 0, -1}, {-1, 0, 1}, {-1, 1, 0}, {1, -1, 0}, {0, -1, 1}};
+    for (int c = 0; c < 3; c++) {
+        int8_t which = PICK[sector % 6][c];
+        rgb[c] = which == 0 ? 1.0f : which == 1 ? x : 0.0f;
+    }
+    // Never quite black: the eyes stay eyes.
+    uint32_t out = 0;
+    for (int c = 0; c < 3; c++) {
+        out = (out << 8) | (uint32_t) (60.0f + 195.0f * rgb[c]);
+    }
+    return out;
+}
+
 static uint32_t state_color(voice_state_t state)
 {
     const skit_t *skit = s_skit != NULL ? s_skit : s_closing;
     if (skit != NULL && state == VOICE_IDLE) {
-        return skit->color;
+        return skit->color == RAINBOW ? rainbow_color() : skit->color;
     }
     if (state == VOICE_IDLE && any_ambient()) {
         return ambient_color();
@@ -383,24 +424,313 @@ static void skit_flutter(int eye, float t, float out[P_COUNT])
     out[P_Y] = burst ? 4.0f : 0;
 }
 
+static float smooth01(float x)
+{
+    x = x < 0 ? 0 : x > 1 ? 1 : x;
+    return x * x * (3.0f - 2.0f * x);
+}
+
+/* A scrambled `n`, the same on the mirror (eyes.ts). */
+static uint32_t hash32(uint32_t n)
+{
+    n *= 2654435761u;
+    n ^= n >> 15;
+    n *= 2246822519u;
+    n ^= n >> 13;
+    return n;
+}
+
+static void skit_yawn(int eye, float t, float out[P_COUNT])
+{
+    // Squeezed into wide slits as the mouth would open, then heavy and slow.
+    open_pose(out);
+    if (t >= 0.3f && t < 1.5f) {
+        out[P_W] = 132.0f;
+        out[P_H] = 22.0f;
+        out[P_Y] = -10.0f;
+    } else if (t >= 1.5f) {
+        out[P_H] = t >= 2.6f && t < 2.9f ? 10.0f : t < 2.6f ? 70.0f : 92.0f;
+        out[P_LID_IN] = out[P_LID_OUT] = 0.3f;
+        out[P_Y] = 6.0f;
+    }
+}
+
+static void skit_sneeze(int eye, float t, float out[P_COUNT])
+{
+    // Ah... ah... (wider, higher) CHOO: shut tight, ducking; a shake after.
+    open_pose(out);
+    if (t >= 0.5f && t < 0.74f) {
+        out[P_W] = 118.0f;
+        out[P_H] = 146.0f;
+        out[P_Y] = -10.0f;
+    } else if (t >= 0.74f && t < 0.84f) {
+        out[P_H] = 128.0f;
+        out[P_Y] = -4.0f;
+    } else if (t >= 0.84f && t < 1.18f) {
+        out[P_W] = 124.0f;
+        out[P_H] = 160.0f;
+        out[P_Y] = -16.0f;
+    } else if (t >= 1.18f && t < 1.5f) {
+        out[P_W] = 134.0f;
+        out[P_H] = 8.0f;
+        out[P_Y] = 18.0f;
+    } else if (t >= 1.5f && t < 2.4f) {
+        out[P_X] = 10.0f * sinf(PI2 * 7.0f * t) * expf(-3.0f * (t - 1.5f));
+        out[P_H] = 110.0f;
+        out[P_LID_OUT] = 0.15f;
+    }
+}
+
+static void skit_giggle(int eye, float t, float out[P_COUNT])
+{
+    // Smiling, shaking with laughter.
+    out[P_W] = 118.0f;
+    out[P_H] = 104.0f;
+    out[P_HAPPY] = 0.5f;
+    float shake = t > 0.3f ? fabsf(sinf(PI2 * 4.5f * t)) : 0;
+    out[P_Y] = -4.0f - 8.0f * shake;
+}
+
+static void skit_excited(int eye, float t, float out[P_COUNT])
+{
+    // Big, sparkling and jumping up and down.
+    float pulse = sinf(PI2 * 2.5f * t);
+    out[P_W] = 124.0f + 6.0f * pulse;
+    out[P_H] = 146.0f + 8.0f * pulse;
+    out[P_Y] = -10.0f - 18.0f * fabsf(sinf(PI2 * 1.25f * t));
+    out[P_HAPPY] = 0.22f;
+}
+
+static void skit_bored(int eye, float t, float out[P_COUNT])
+{
+    // Half shut, a sigh that sinks them, a slow look away.
+    out[P_W] = 112.0f;
+    out[P_H] = 72.0f;
+    out[P_LID_IN] = out[P_LID_OUT] = 0.42f;
+    out[P_Y] = t < 1.2f ? 4.0f : 14.0f;
+    out[P_X] = t < 2.5f ? 0 : -24.0f;
+}
+
+static void skit_confused(int eye, float t, float out[P_COUNT])
+{
+    // One eye raised and big, the other low and squinting; then the other way.
+    bool raised = (eye == 0) != (t >= 2.0f);
+    out[P_W] = raised ? 116.0f : 104.0f;
+    out[P_H] = raised ? 140.0f : 92.0f;
+    out[P_Y] = raised ? -14.0f : 8.0f;
+    out[P_LID_IN] = raised ? 0 : 0.28f;
+    out[P_X] = t < 0.3f ? 0 : 10.0f * sinf(PI2 * 0.5f * t);
+}
+
+static void skit_scared(int eye, float t, float out[P_COUNT])
+{
+    // Small and trembling, darting from side to side.
+    out[P_W] = 84.0f;
+    out[P_H] = 100.0f;
+    out[P_LID_OUT] = 0.25f;
+    out[P_X] = (t < 0.3f ? 0 : fmodf(t, 1.2f) < 0.6f ? -22.0f : 22.0f) + 2.5f * sinf(PI2 * 13.0f * t);
+    out[P_Y] = 6.0f;
+}
+
+static void skit_peekaboo(int eye, float t, float out[P_COUNT])
+{
+    // Hiding, shut... and back, big and delighted.
+    if (t < 0.4f) {
+        open_pose(out);
+    } else if (t < 2.0f) {
+        out[P_W] = 124.0f;
+        out[P_H] = 6.0f;
+    } else {
+        out[P_W] = 128.0f;
+        out[P_H] = 150.0f;
+        out[P_HAPPY] = t > 2.4f ? 0.4f : 0;
+        out[P_Y] = -10.0f - 10.0f * fabsf(sinf(PI2 * 1.5f * (t - 2.0f)));
+    }
+}
+
+static void skit_nod(int eye, float t, float out[P_COUNT])
+{
+    // Yes, yes, yes.
+    open_pose(out);
+    out[P_HAPPY] = 0.2f;
+    out[P_Y] = t >= 0.4f && t < 2.0f ? 18.0f * fabsf(sinf(3.1415927f * 1.875f * (t - 0.4f))) : 0;
+}
+
+static void skit_shake(int eye, float t, float out[P_COUNT])
+{
+    // No, no, no.
+    out[P_W] = 110.0f;
+    out[P_H] = 104.0f;
+    out[P_LID_IN] = out[P_LID_OUT] = 0.14f;
+    out[P_X] = t >= 0.4f && t < 2.0f ? 26.0f * sinf(PI2 * 1.9f * (t - 0.4f)) : 0;
+}
+
+static void skit_hiccup(int eye, float t, float out[P_COUNT])
+{
+    // A jump at every hic.
+    open_pose(out);
+    if (t >= 0.6f && fmodf(t - 0.6f, 1.2f) < 0.14f) {
+        out[P_Y] = -20.0f;
+        out[P_W] = 104.0f;
+        out[P_H] = 150.0f;
+    }
+}
+
+static void skit_mischief(int eye, float t, float out[P_COUNT])
+{
+    // A sly grin, lids down at the inner corners, a look each way.
+    out[P_W] = 118.0f;
+    out[P_H] = 86.0f;
+    out[P_LID_IN] = 0.34f;
+    out[P_HAPPY] = 0.3f;
+    out[P_X] = t < 0.5f ? 0 : t < 2.2f ? -22.0f : 22.0f;
+    out[P_Y] = 4.0f;
+}
+
+static void skit_dance(int eye, float t, float out[P_COUNT])
+{
+    // Bouncing on the beat (120 bpm), swaying a bar each way.
+    out[P_W] = 116.0f;
+    out[P_H] = 120.0f;
+    out[P_HAPPY] = 0.3f;
+    out[P_Y] = 4.0f - 18.0f * expf(-8.0f * fmodf(t, 0.5f));
+    out[P_X] = 20.0f * sinf(3.1415927f * t);
+}
+
+static void skit_sing(int eye, float t, float out[P_COUNT])
+{
+    // Eyes smiling shut, swaying, bobbing on each note.
+    out[P_W] = 114.0f;
+    out[P_H] = 100.0f;
+    out[P_HAPPY] = 0.45f;
+    out[P_X] = 12.0f * sinf(PI2 * 0.6f * t);
+    out[P_Y] = -4.0f - (t >= 0.3f && t < 1.6f ? 6.0f * fabsf(sinf(3.1415927f * 4.55f * (t - 0.3f))) : 0);
+}
+
+static void skit_purr(int eye, float t, float out[P_COUNT])
+{
+    // Content, all but shut, breathing slowly.
+    float breath = sinf(PI2 * 0.6f * t);
+    out[P_W] = 120.0f + 3.0f * breath;
+    out[P_H] = 76.0f;
+    out[P_HAPPY] = 0.55f;
+    out[P_LID_IN] = out[P_LID_OUT] = 0.1f;
+    out[P_Y] = 2.0f + 3.0f * breath;
+}
+
+static void skit_sigh(int eye, float t, float out[P_COUNT])
+{
+    // A big breath in, looking up, then sinking with the sigh.
+    open_pose(out);
+    if (t >= 0.5f && t < 0.8f) {
+        out[P_W] = 114.0f;
+        out[P_H] = 136.0f;
+        out[P_Y] = -12.0f;
+    } else if (t >= 0.8f) {
+        float d = smooth01((t - 0.8f) / 0.9f);
+        out[P_W] = 112.0f;
+        out[P_H] = 136.0f - 50.0f * d;
+        out[P_LID_IN] = out[P_LID_OUT] = 0.32f * d;
+        out[P_Y] = -12.0f + 24.0f * d;
+    }
+}
+
+static void skit_focus(int eye, float t, float out[P_COUNT])
+{
+    // Narrowing on something just in front: zoom, lock.
+    if (t < 0.4f) {
+        open_pose(out);
+        return;
+    }
+    bool zoom = t >= 0.5f && t < 0.9f;
+    out[P_W] = zoom ? 96.0f : 106.0f;
+    out[P_H] = zoom ? 54.0f : 68.0f;
+    out[P_LID_IN] = 0.12f;
+    out[P_LID_OUT] = 0.06f;
+    out[P_X] = eye == 0 ? 8.0f : -8.0f;
+}
+
+static void skit_snore(int eye, float t, float out[P_COUNT])
+{
+    // Dropping off, then a line that swells with each snore.
+    if (t < 1.2f) {
+        float d = smooth01(t / 1.2f);
+        out[P_W] = 110.0f + 14.0f * d;
+        out[P_H] = 124.0f - 114.0f * d;
+        out[P_LID_IN] = out[P_LID_OUT] = 0.3f * fminf(1.0f, 2.0f * d);
+        out[P_Y] = 16.0f * d;
+        return;
+    }
+    float b = fmodf(t - 1.5f + 2.5f, 2.5f);
+    out[P_W] = 124.0f;
+    out[P_H] = 8.0f + (b < 0.9f ? 8.0f * sinf(3.1415927f * b / 0.9f) : 0);
+    out[P_Y] = 16.0f;
+}
+
+static void skit_glitch(int eye, float t, float out[P_COUNT])
+{
+    // Robot fault: jumping about in random boxes.
+    open_pose(out);
+    if (t > 0.3f && t < 2.2f) {
+        uint32_t h = hash32((uint32_t) (t * 14.0f) + (uint32_t) eye * 7u);
+        if (h & 1u) {
+            out[P_X] = (float) ((h >> 1) % 60u) - 30.0f;
+            out[P_Y] = (float) ((h >> 7) % 40u) - 20.0f;
+            out[P_W] = 60.0f + (float) ((h >> 13) % 90u);
+            out[P_H] = 20.0f + (float) ((h >> 19) % 140u);
+        }
+    }
+}
+
+static void skit_proud(int eye, float t, float out[P_COUNT])
+{
+    // Chin up, lids half down, smiling.
+    out[P_W] = 116.0f;
+    out[P_H] = 96.0f;
+    out[P_LID_IN] = out[P_LID_OUT] = 0.22f;
+    out[P_HAPPY] = 0.3f;
+    out[P_Y] = t < 0.3f ? 0 : -16.0f;
+}
+
 /* Names as play_eyes (board_tools.c) takes them. */
 static const skit_t SKITS[] = {
-    {"look_around", 0x30D5F0, 4300, true, skit_look_around},
-    {"sleepy", 0x6A8CFF, 6000, false, skit_sleepy},
-    {"suspicious", 0x30D5F0, 4200, false, skit_suspicious},
-    {"happy", 0x40E080, 3500, true, skit_happy},
-    {"surprised", 0x30D5F0, 3300, false, skit_surprised},
-    {"wink", 0x30D5F0, 2800, false, skit_wink},
-    {"angry", 0xFF5A30, 3200, false, skit_angry},
-    {"sad", 0x4A7BFF, 4200, true, skit_sad},
-    {"dizzy", 0xC070FF, 4000, false, skit_dizzy},
-    {"cross_eyed", 0x30D5F0, 3000, false, skit_cross_eyed},
-    {"eye_roll", 0x30D5F0, 3400, false, skit_eye_roll},
-    {"curious", 0x30D5F0, 4000, true, skit_curious},
-    {"love", 0xFF5AA8, 4000, false, skit_love},
-    {"scan", 0x30F0B0, 3800, false, skit_scan},
-    {"shy", 0xFF8AB0, 3600, false, skit_shy},
-    {"flutter", 0x30D5F0, 2600, false, skit_flutter},
+    {"look_around", 0x30D5F0, 4300, true, skit_look_around, {{3000, SOUND_HMM}}},
+    {"sleepy", 0x6A8CFF, 6000, false, skit_sleepy, {{300, SOUND_YAWN}, {3400, SOUND_STARTLE}}},
+    {"suspicious", 0x30D5F0, 4200, false, skit_suspicious, {{500, SOUND_HMM}}},
+    {"happy", 0x40E080, 3500, true, skit_happy, {{200, SOUND_HAPPY}}},
+    {"surprised", 0x30D5F0, 3300, false, skit_surprised, {{450, SOUND_GASP}}},
+    {"wink", 0x30D5F0, 2800, false, skit_wink, {{850, SOUND_WINK}}},
+    {"angry", 0xFF5A30, 3200, false, skit_angry, {{400, SOUND_GRUMBLE}}},
+    {"sad", 0x4A7BFF, 4200, true, skit_sad, {{500, SOUND_AWW}}},
+    {"dizzy", 0xC070FF, 4000, false, skit_dizzy, {{100, SOUND_BOING}}},
+    {"cross_eyed", 0x30D5F0, 3000, false, skit_cross_eyed, {{450, SOUND_BOOP}}},
+    {"eye_roll", 0x30D5F0, 3400, false, skit_eye_roll, {{1800, SOUND_PFFT}}},
+    {"curious", 0x30D5F0, 4000, true, skit_curious, {{400, SOUND_HMM}, {2000, SOUND_CHIRP}}},
+    {"love", 0xFF5AA8, 4000, false, skit_love,
+     {{0, SOUND_HEARTBEAT}, {1000, SOUND_HEARTBEAT}, {2000, SOUND_HEARTBEAT}, {3000, SOUND_HEARTBEAT}}},
+    {"scan", 0x30F0B0, 3800, false, skit_scan, {{300, SOUND_SCAN}}},
+    {"shy", 0xFF8AB0, 3600, false, skit_shy, {{400, SOUND_EEP}}},
+    {"flutter", 0x30D5F0, 2600, false, skit_flutter, {{600, SOUND_FLUTTER}}},
+    {"yawn", 0x7A9CFF, 4200, false, skit_yawn, {{300, SOUND_YAWN}}},
+    {"sneeze", 0x30D5F0, 3400, false, skit_sneeze, {{500, SOUND_SNEEZE}}},
+    {"giggle", 0x40E080, 3200, false, skit_giggle, {{300, SOUND_GIGGLE}, {1700, SOUND_GIGGLE}}},
+    {"excited", 0xFFD040, 3400, false, skit_excited, {{200, SOUND_EXCITED}, {1700, SOUND_EXCITED}}},
+    {"bored", 0x8AA4C0, 4600, true, skit_bored, {{1100, SOUND_SIGH}}},
+    {"confused", 0xC0A0FF, 3800, true, skit_confused, {{400, SOUND_CONFUSED}}},
+    {"scared", 0xA0C8FF, 3800, false, skit_scared, {{300, SOUND_WHIMPER}}},
+    {"peekaboo", 0x40E0C0, 3800, false, skit_peekaboo, {{2000, SOUND_BOO}, {2500, SOUND_GIGGLE}}},
+    {"nod", 0x40E080, 2800, true, skit_nod, {{400, SOUND_YES}}},
+    {"shake", 0x30D5F0, 2800, false, skit_shake, {{400, SOUND_NOPE}}},
+    {"hiccup", 0x30D5F0, 4200, true, skit_hiccup, {{600, SOUND_HICCUP}, {1800, SOUND_HICCUP}, {3000, SOUND_HICCUP}}},
+    {"mischief", 0xB060FF, 3800, false, skit_mischief, {{600, SOUND_MISCHIEF}}},
+    {"dance", RAINBOW, 4400, false, skit_dance, {{0, SOUND_BEAT}, {2000, SOUND_BEAT}}},
+    {"sing", 0x70E0FF, 3200, false, skit_sing, {{300, SOUND_SING}}},
+    {"purr", 0xFFB070, 3600, false, skit_purr, {{400, SOUND_PURR}, {2000, SOUND_PURR}}},
+    {"sigh", 0x5A8AE0, 3600, false, skit_sigh, {{500, SOUND_SIGH}}},
+    {"focus", 0x40FFD0, 3200, false, skit_focus, {{500, SOUND_LOCK}}},
+    {"snore", 0x34507A, 6500, false, skit_snore, {{1500, SOUND_SNORE}, {4000, SOUND_SNORE}}},
+    {"glitch", 0x30F0B0, 2800, false, skit_glitch, {{300, SOUND_GLITCH}, {1400, SOUND_GLITCH}}},
+    {"proud", 0xFFD040, 3200, true, skit_proud, {{300, SOUND_TADA}}},
 };
 
 #define SKIT_COUNT (sizeof(SKITS) / sizeof(SKITS[0]))
@@ -588,7 +918,8 @@ static void ambient_step(uint32_t now)
         }
     }
     if (doze == 0 && s_doze > 0.3f && s_state == VOICE_IDLE && s_skit == NULL) {
-        // Woken up: eyes wide for a moment.
+        // Woken up: eyes wide for a moment, "huh?!".
+        playback_sound(SOUND_STARTLE);
         for (int i = 0; i < BOARD_LCD_COUNT; i++) {
             if (s_ambient[i]) {
                 s_eyes[i].p[P_H].vel += 420.0f;
@@ -597,6 +928,15 @@ static void ambient_step(uint32_t now)
         s_next_blink_ms = now + lv_rand(300, 700);
     }
     s_doze = doze;
+    if (doze < 1.0f) {
+        s_snores = 0;
+        s_next_snore_ms = now + SNORE_EVERY_MS / 2;
+    } else if (s_state == VOICE_IDLE && s_skit == NULL && s_snores < SNORES
+               && (int32_t) (now - s_next_snore_ms) >= 0) {
+        playback_sound(SOUND_SNORE);
+        s_snores++;
+        s_next_snore_ms = now + SNORE_EVERY_MS;
+    }
 }
 
 static void color_step(void)
@@ -679,6 +1019,10 @@ static void frame(lv_timer_t *timer)
         s_state_ms = now;
     }
     float t = (float) ((s_skit != NULL ? now - s_skit_ms : now - s_state_ms)) / 1000.0f;
+    while (s_skit != NULL && s_cue < MAX_CUES && s_skit->cues[s_cue].sound != SOUND_WAKE
+           && now - s_skit_ms >= s_skit->cues[s_cue].ms) {
+        playback_sound(s_skit->cues[s_cue++].sound);
+    }
 
     s_level += (s_level_in - s_level) * fminf(1.0f, dt * 12.0f);
     ambient_step(now);
@@ -902,6 +1246,7 @@ static void play(const skit_t *skit)
     s_skit = s_last_skit = skit;
     s_closing = NULL;
     s_skit_ms = now;
+    s_cue = 0;
     if (!s_open || !both_shown()) {
         open_eyes(now);
     }

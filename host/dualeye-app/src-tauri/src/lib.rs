@@ -681,13 +681,14 @@ fn board() -> Board {
 
 /// The board's own voice settings (it keeps them in NVS); `None` where it
 /// doesn't say (`eyes`: a firmware before 1.0.1; `idle_eyes`: before 1.0.2;
-/// `wake_sound`: before 1.3.3).
+/// `wake_sound`: before 1.3.3; `pet_sounds`: before 1.4.0).
 #[derive(serde::Serialize)]
 struct BoardVoice {
     volume: Option<u8>,
     eyes: Option<bool>,
     idle_eyes: Option<bool>,
     wake_sound: Option<bool>,
+    pet_sounds: Option<bool>,
 }
 
 #[tauri::command]
@@ -700,6 +701,7 @@ async fn board_voice() -> Result<BoardVoice, String> {
             eyes: s.pointer("/voice/eyes").and_then(|v| v.as_bool()),
             idle_eyes: s.pointer("/voice/idle_eyes").and_then(|v| v.as_bool()),
             wake_sound: s.pointer("/voice/wake_sound").and_then(|v| v.as_bool()),
+            pet_sounds: s.pointer("/voice/pet_sounds").and_then(|v| v.as_bool()),
         })
     })
     .await
@@ -738,6 +740,30 @@ async fn set_board_idle_eyes(on: bool) -> Result<(), String> {
 #[tauri::command]
 async fn set_board_wake_sound(on: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || call_board("set_mic", serde_json::json!({"wake_sound": on})))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The board's little sounds: in the eyes' scenes, hello, snoring...
+#[tauri::command]
+async fn set_board_pet_sounds(on: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || call_board("set_sounds", serde_json::json!({"pet": on})))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// One of the eyes' scenes, now.
+#[tauri::command]
+async fn play_board_scene(name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || call_board("play_eyes", serde_json::json!({"name": name})))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// One of the board's own sounds, now.
+#[tauri::command]
+async fn play_board_sound(name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || call_board("play_sound", serde_json::json!({"name": name})))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1318,7 +1344,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet_sounds, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

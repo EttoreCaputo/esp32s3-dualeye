@@ -241,14 +241,19 @@ export const eyes = new Eyes();
 
 /** One frame of eye `eye` on a canvas `size` px across. */
 export function drawEye(ctx: CanvasRenderingContext2D, eye: number, size: number) {
-  const s = size / LCD;
-  ctx.setTransform(s, 0, 0, s, 0, 0);
-  ctx.clearRect(0, 0, LCD, LCD);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, size, size);
   if (!eyes.open) return;
+  paintEye(ctx, eyes.geom(eye), eyes.color, size);
+}
+
+/** An eye `g` in `color` on a black screen `size` px across, where `ctx` is now. */
+export function paintEye(ctx: CanvasRenderingContext2D, g: Geom, color: string, size: number) {
+  ctx.save();
+  ctx.scale(size / LCD, size / LCD);
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, LCD, LCD);
-  const g = eyes.geom(eye);
-  ctx.fillStyle = eyes.color;
+  ctx.fillStyle = color;
   ctx.beginPath();
   ctx.roundRect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0, g.radius);
   ctx.fill();
@@ -267,4 +272,5 @@ export function drawEye(ctx: CanvasRenderingContext2D, eye: number, size: number
     ctx.arc((g.x0 + g.x1) / 2, g.happyTop + r, r, 0, Math.PI * 2);
     ctx.fill();
   }
+  ctx.restore();
 }

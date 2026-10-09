@@ -7,6 +7,11 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.4.0
+
+- **A pet that makes sounds.** The board now has a little voice of its own: it chirps, giggles, purrs, yawns, sneezes, sighs, grumbles and snores along with its eyes. It plays a sound when it starts, says hello when your computer connects, goes "mm-hm" when it heard you, ticks at the new volume, and on the eyes face it wakes with a "huh?!" and snores a few times as it dozes off. Turn the pet sounds off in the app's new Pet tab; the wake chime and alarms play either way.
+- **20 new scenes**: yawn, sneeze, giggle, excited, bored, confused, scared, peekaboo, nod, shake, hiccup, mischief, dance (in every colour), sing, purr, sigh, focus, snore, glitch and proud, and every old one has its sound too. See them all, and play any of them, in the app's Pet tab.
+
 ## 1.3.3
 
 - **A sound when it hears you.** Saying "Alexa" now plays two short rising notes as the board starts listening, not just the eyes opening. Turn it off in the app's Voice tab.

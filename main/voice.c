@@ -324,7 +324,10 @@ void voice_set_state(voice_state_t state)
         notify_state(state);
     }
     if (state == VOICE_ERROR) {
-        playback_earcon(PLAYBACK_EARCON_ERROR);
+        playback_sound(SOUND_ERROR);
+    } else if (changed && state == VOICE_THINKING) {
+        // "Mm-hm": heard you, on it.
+        playback_sound(SOUND_THINK);
     }
 }
 
@@ -432,7 +435,7 @@ static void on_wake(const afe_fetch_result_t *res)
     if (s_wake_sound) {
         // Echo cancellation keeps it out of the utterance, and it ends within
         // WAKE_TAIL_MS anyway.
-        playback_earcon(PLAYBACK_EARCON_WAKE);
+        playback_sound(SOUND_WAKE);
     }
     stream_start("wake", WAKE_TAIL_MS, NO_SPEECH_MS);
 }

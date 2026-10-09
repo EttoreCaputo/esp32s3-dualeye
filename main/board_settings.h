@@ -35,6 +35,8 @@ typedef struct {
     bool idle_eyes;
     /* A short chime as the board starts listening after the wake word. */
     bool wake_sound;
+    /* The pet's own sounds: in the eyes' scenes, hello, mute... */
+    bool pet_sounds;
 } board_settings_t;
 
 /** Open NVS and load the saved settings (defaults where none). */
@@ -55,6 +57,7 @@ esp_err_t board_settings_set_volume(uint8_t percent);
 esp_err_t board_settings_set_eyes(bool on);
 esp_err_t board_settings_set_idle_eyes(bool on);
 esp_err_t board_settings_set_wake_sound(bool on);
+esp_err_t board_settings_set_pet_sounds(bool on);
 
 #ifdef __cplusplus
 }

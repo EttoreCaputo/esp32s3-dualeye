@@ -83,7 +83,7 @@ static void ring_alarm(const metrics_snapshot_t *snap, uint32_t *since_ms, uint3
         return;
     }
     *last_ms = now;
-    playback_earcon(PLAYBACK_EARCON_ALARM);
+    playback_sound(SOUND_ALARM);
 }
 
 static void ui_refresh_task(void *arg)
@@ -98,6 +98,10 @@ static void ui_refresh_task(void *arg)
         board_settings_t settings;
         current_view(&snap, &settings);
         ring_alarm(&snap, &alarm_since_ms, &alarm_ms);
+        if (snap.state == METRICS_UI_LIVE && prev.state != METRICS_UI_LIVE) {
+            // The host is here (again): say hi.
+            playback_sound(SOUND_HELLO);
+        }
         bool turned = memcmp(settings.rot, s_rot, sizeof(s_rot)) != 0;
         if (turned || memcmp(&prev, &snap, sizeof(snap)) != 0) {
             lvgl_port_lock();
@@ -155,6 +159,8 @@ void app_main(void)
         audio_selftest_start();
         voice_start(settings.mic_muted, settings.wake_word);
         playback_start();
+        playback_set_pet_sounds(settings.pet_sounds);
+        playback_sound(SOUND_BOOT);
     } else {
         ESP_LOGE(TAG, "audio init failed, continuing without audio");
     }
