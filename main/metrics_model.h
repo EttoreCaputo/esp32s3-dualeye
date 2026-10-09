@@ -164,6 +164,17 @@ typedef struct {
     char artist[48];
 } metrics_music_t;
 
+/* What the host can tell of the person at the computer, for the pet's mood
+ * (pet.c): the local time and how long since they last touched the mouse
+ * or the keyboard. */
+typedef struct {
+    bool valid;
+    /* Minutes since local midnight, 0..1439. */
+    int minute;
+    /* Seconds without input. */
+    int idle_s;
+} metrics_host_t;
+
 typedef struct {
     uint32_t ts;
     uint32_t updated_ms;
@@ -176,6 +187,7 @@ typedef struct {
     metrics_battery_t battery;
     metrics_timer_t timer;
     metrics_music_t music;
+    metrics_host_t host;
     /* Board settings, not from the host's snapshot: filled in before drawing. */
     metrics_face_t cpu_face;
     metrics_face_t gpu_face;

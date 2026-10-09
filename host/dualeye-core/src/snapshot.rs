@@ -375,6 +375,10 @@ pub struct Snapshot {
     /// from its [`crate::Music`] while a screen shows the face.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub music: Option<BoardMusic>,
+    /// The time and how long since your last input, for the pet's mood
+    /// (firmware 1.4), set by the bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pet: Option<crate::presence::Presence>,
 }
 
 impl Snapshot {
@@ -448,6 +452,7 @@ mod tests {
             claude: None,
             timer: None,
             music: None,
+            pet: None,
         };
         assert_eq!(
             payload(&snap),
@@ -474,6 +479,7 @@ mod tests {
             claude: None,
             timer: None,
             music: None,
+            pet: None,
         };
         assert_eq!(payload(&snap), "{\"v\":1,\"ts\":0}");
         assert!(!snap.is_sendable());
@@ -503,6 +509,7 @@ mod tests {
             }),
             timer: None,
             music: None,
+            pet: None,
         };
         assert_eq!(
             payload(&snap),
@@ -542,6 +549,7 @@ mod tests {
             claude: None,
             timer: None,
             music: None,
+            pet: None,
         };
         assert_eq!(payload(&snap), "{\"v\":1,\"ts\":0,\"cpu\":{\"temp_c\":40.0}}");
         // Frontends still see it on the snapshot.

@@ -30,6 +30,7 @@
   } from "./monitor.svelte";
   import { VOICE_PROMPTS } from "./voicePrompts";
   import PetGallery from "./PetGallery.svelte";
+  import PetMood from "./PetMood.svelte";
 
   const TABS: [Tab, string][] = [
     ["voice", "Voice"],
@@ -276,7 +277,6 @@
   let eyes = $state<boolean | null>(null);
   let idleEyes = $state<boolean | null>(null);
   let wakeSound = $state<boolean | null>(null);
-  let petSounds = $state<boolean | null>(null);
   $effect(() => {
     if (!open || (tab !== "voice" && tab !== "pet") || monitor.link !== "connected") return;
     let alive = true;
@@ -288,7 +288,6 @@
         eyes = b.eyes;
         idleEyes = b.idle_eyes;
         wakeSound = b.wake_sound;
-        petSounds = b.pet_sounds;
       })
       .catch(() => {
         if (!alive) return;
@@ -296,7 +295,6 @@
         eyes = null;
         idleEyes = null;
         wakeSound = null;
-        petSounds = null;
       });
     return () => {
       alive = false;
@@ -313,14 +311,18 @@
     }
   }
 
+  // The pet's mood: the monitor reads it every few seconds.
+  const pet = $derived(monitor.pet);
   let petError = $state("");
-  async function setPetSounds(on: boolean) {
-    petSounds = on;
+
+  async function setPet(key: "sounds" | "reactions", on: boolean) {
+    if (!monitor.pet) return;
+    monitor.pet[key] = on;
     petError = "";
     try {
-      await monitor.setBoardPetSounds(on);
+      await monitor.setBoardPet(key === "sounds" ? { sounds: on } : { react: on });
     } catch (e) {
-      petSounds = !on;
+      if (monitor.pet) monitor.pet[key] = !on;
       petError = String(e);
     }
   }
@@ -1257,22 +1259,28 @@
           {/if}
         </section>
       {:else if tab === "pet"}
+        {#if pet}<PetMood {pet} />{/if}
         <section class="petset">
           <h3>Behaviour</h3>
-          <p class="hint">The board is a little pet: now and then it plays a scene on its own, and it chirps, giggles, sneezes and snores along. It says hello when the computer connects and snores as it dozes on the eyes face.</p>
+          <p class="hint">The board is a little pet with a mood of its own: lively by day and sleepy at night, glad when you talk to it, play with it or come back to the computer. Its mood picks what it does now and then, colours the eyes face and pitches its voice.</p>
           <label class="switch" title={idleEyes === null ? "Needs the board connected, with firmware 1.0.2 or newer" : ""}>
             <input type="checkbox" checked={idleEyes ?? true} disabled={idleEyes === null} onchange={(e) => setIdleEyes(e.currentTarget.checked)} />
             <span class="track"><span class="knob"></span></span>
             <span class="slabel">Let the eyes play now and then while idle</span>
           </label>
-          <label class="switch" title={petSounds === null ? "Needs the board connected, with firmware 1.4.0 or newer" : ""}>
-            <input type="checkbox" checked={petSounds ?? true} disabled={petSounds === null} onchange={(e) => setPetSounds(e.currentTarget.checked)} />
+          <label class="switch" title={!pet ? "Needs the board connected, with firmware 1.4.0 or newer" : ""}>
+            <input type="checkbox" checked={pet?.reactions ?? true} disabled={!pet} onchange={(e) => setPet("reactions", e.currentTarget.checked)} />
+            <span class="track"><span class="knob"></span></span>
+            <span class="slabel">React to the computer: heat, music, Claude, the battery, bedtime, you coming back</span>
+          </label>
+          <label class="switch" title={!pet ? "Needs the board connected, with firmware 1.4.0 or newer" : ""}>
+            <input type="checkbox" checked={pet?.sounds ?? true} disabled={!pet} onchange={(e) => setPet("sounds", e.currentTarget.checked)} />
             <span class="track"><span class="knob"></span></span>
             <span class="slabel">Pet sounds: in the scenes, hello, mute, snoring</span>
           </label>
           {#if petError}<p class="hint error">{petError}</p>{/if}
         </section>
-        <PetGallery connected={monitor.link === "connected"} petSounds={petSounds ?? true} oldFirmware={monitor.link === "connected" && petSounds === null && idleEyes !== null} />
+        <PetGallery connected={monitor.link === "connected"} petSounds={pet?.sounds ?? true} oldFirmware={monitor.link === "connected" && pet === null} />
       {:else if tab === "timers"}
         {@const info = monitor.timers}
         <p class="hint">

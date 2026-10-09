@@ -1,8 +1,11 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { monitor } from "./monitor.svelte";
+  import { MOODS } from "./petMood";
 
-  let { onSettings }: { onSettings: () => void } = $props();
+  let { onSettings, onPet }: { onSettings: () => void; onPet: () => void } = $props();
+
+  const pet = $derived(monitor.pet ? { ...(MOODS[monitor.pet.mood] ?? MOODS.content), away: monitor.pet.away } : null);
 
   const pill = $derived.by(() => {
     const port = monitor.port ?? "";
@@ -48,6 +51,12 @@
   </div>
 
   <div class="actions">
+    {#if pet}
+      <button class="mood" style:--c={pet.color} onclick={onPet} title="The pet's mood: open the Pet tab">
+        <span class="face" aria-hidden="true"><i></i><i></i></span>
+        <span>{pet.away ? "Resting" : pet.label}</span>
+      </button>
+    {/if}
     <button class="icon" onclick={onSettings} aria-label="Settings" title="Settings">
       <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
     </button>
@@ -188,6 +197,48 @@
     display: flex;
     align-items: center;
     gap: 2px;
+  }
+  .mood {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 28px;
+    margin-right: 6px;
+    padding: 0 11px 0 9px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--c) 30%, transparent);
+    background: color-mix(in srgb, var(--c) 10%, transparent);
+    color: var(--text);
+    font: 550 11.5px/1 var(--sans);
+    cursor: pointer;
+    transition:
+      background 300ms,
+      border-color 300ms;
+  }
+  .mood:hover {
+    background: color-mix(in srgb, var(--c) 18%, transparent);
+  }
+  /* Two little eyes in the mood's colour, blinking now and then. */
+  .face {
+    display: flex;
+    gap: 3px;
+  }
+  .face i {
+    width: 5px;
+    height: 7px;
+    border-radius: 2px;
+    background: var(--c);
+    animation: blink 5s infinite;
+  }
+  @keyframes blink {
+    0%,
+    94%,
+    100% {
+      transform: scaleY(1);
+    }
+    97% {
+      transform: scaleY(0.15);
+    }
   }
   .sep {
     width: 1px;

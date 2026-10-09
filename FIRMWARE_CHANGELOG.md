@@ -7,10 +7,12 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
-## 1.4.0
+## 1.4.1
 
 - **A pet that makes sounds.** The board now has a little voice of its own: it chirps, giggles, purrs, yawns, sneezes, sighs, grumbles and snores along with its eyes. It plays a sound when it starts, says hello when your computer connects, goes "mm-hm" when it heard you, ticks at the new volume, and on the eyes face it wakes with a "huh?!" and snores a few times as it dozes off. Turn the pet sounds off in the app's new Pet tab; the wake chime and alarms play either way.
-- **20 new scenes**: yawn, sneeze, giggle, excited, bored, confused, scared, peekaboo, nod, shake, hiccup, mischief, dance (in every colour), sing, purr, sigh, focus, snore, glitch and proud, and every old one has its sound too. See them all, and play any of them, in the app's Pet tab.
+- **A mood of its own.** The pet now has energy, happiness and affection that change with what happens and stay across reboots: lively by day and sleepy late at night, happier when you talk to it, play with it or put music on, grumpy after things go wrong, bored when ignored. Its mood picks which scenes it plays and how often, tints the eyes face, makes it droop or smile there, and even pitches its voice. The app shows it in the title bar, and the Pet tab has the details: its energy, happiness and affection, what's affecting it right now and what it last reacted to.
+- **It notices the computer.** It pants when the CPU or GPU gets too hot and sighs with relief once it cools, dances when music plays, gets focused when Claude starts and proud when it's done, winds down on a low battery and perks up when plugged in, yawns at bedtime, rests while you're away and greets you when you're back. Turn the reactions off in the Pet tab.
+- **24 new scenes**: hot, relieved, tired, charged and yawn, sneeze, giggle, excited, bored, confused, scared, peekaboo, nod, shake, hiccup, mischief, dance (in every colour), sing, purr, sigh, focus, snore, glitch and proud, and every old one has its sound too. See them all, and play any of them, in the app's Pet tab.
 
 ## 1.3.3
 

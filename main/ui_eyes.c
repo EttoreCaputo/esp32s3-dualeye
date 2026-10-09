@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_random.h"
+#include "pet.h"
 #include "playback.h"
 
 /* 25 fps: both eyes repainted each frame stay well inside the SPI bus. */
@@ -181,12 +182,13 @@ static bool any_ambient(void)
     return false;
 }
 
-/* White awake, a dim blue asleep. */
+/* White awake (tinted by the pet's mood), a dim blue asleep. */
 static uint32_t ambient_color(void)
 {
+    uint32_t awake = pet_tint(AMBIENT_COLOR);
     uint32_t c = 0;
     for (int shift = 0; shift <= 16; shift += 8) {
-        float a = (float) ((AMBIENT_COLOR >> shift) & 0xFF);
+        float a = (float) ((awake >> shift) & 0xFF);
         float b = (float) ((ASLEEP_COLOR >> shift) & 0xFF);
         c |= (uint32_t) (a + (b - a) * s_doze + 0.5f) << shift;
     }
@@ -692,6 +694,56 @@ static void skit_proud(int eye, float t, float out[P_COUNT])
     out[P_Y] = t < 0.3f ? 0 : -16.0f;
 }
 
+static void skit_hot(int eye, float t, float out[P_COUNT])
+{
+    // Too hot: squinting, drooping, panting.
+    float pant = fabsf(sinf(PI2 * 2.2f * t));
+    out[P_W] = 120.0f + 4.0f * pant;
+    out[P_H] = 70.0f - 6.0f * pant;
+    out[P_LID_OUT] = 0.3f;
+    out[P_LID_IN] = 0.1f;
+    out[P_Y] = 8.0f + 6.0f * pant;
+}
+
+static void skit_relieved(int eye, float t, float out[P_COUNT])
+{
+    // A wide-open breath, then a long, happy breath out.
+    if (t < 0.3f) {
+        open_pose(out);
+    } else if (t < 0.6f) {
+        out[P_W] = 116.0f;
+        out[P_H] = 136.0f;
+        out[P_Y] = -8.0f;
+    } else {
+        float d = smooth01((t - 0.6f) / 0.8f);
+        out[P_W] = 116.0f + 4.0f * d;
+        out[P_H] = 136.0f - 36.0f * d;
+        out[P_HAPPY] = 0.35f * d;
+        out[P_LID_IN] = out[P_LID_OUT] = 0.15f * d;
+        out[P_Y] = -8.0f + 14.0f * d;
+    }
+}
+
+static void skit_tired(int eye, float t, float out[P_COUNT])
+{
+    // The battery running out: shrinking and sinking as it winds down.
+    float d = smooth01((t - 0.3f) / 2.6f);
+    out[P_W] = 110.0f - 10.0f * d;
+    out[P_H] = 110.0f - 64.0f * d;
+    out[P_LID_IN] = out[P_LID_OUT] = 0.4f * d;
+    out[P_Y] = 22.0f * d;
+}
+
+static void skit_charged(int eye, float t, float out[P_COUNT])
+{
+    // Plugged in: filling up from the bottom, then a bright smile.
+    float d = smooth01((t - 0.2f) / 1.4f);
+    out[P_W] = 112.0f;
+    out[P_H] = 40.0f + 94.0f * d;
+    out[P_Y] = 30.0f - 36.0f * d;
+    out[P_HAPPY] = t > 1.8f ? 0.32f : 0;
+}
+
 /* Names as play_eyes (board_tools.c) takes them. */
 static const skit_t SKITS[] = {
     {"look_around", 0x30D5F0, 4300, true, skit_look_around, {{3000, SOUND_HMM}}},
@@ -731,6 +783,10 @@ static const skit_t SKITS[] = {
     {"snore", 0x34507A, 6500, false, skit_snore, {{1500, SOUND_SNORE}, {4000, SOUND_SNORE}}},
     {"glitch", 0x30F0B0, 2800, false, skit_glitch, {{300, SOUND_GLITCH}, {1400, SOUND_GLITCH}}},
     {"proud", 0xFFD040, 3200, true, skit_proud, {{300, SOUND_TADA}}},
+    {"hot", 0xFF4A30, 4200, false, skit_hot, {{300, SOUND_PANT}, {2000, SOUND_PANT}}},
+    {"relieved", 0x60E0FF, 3200, true, skit_relieved, {{400, SOUND_PHEW}}},
+    {"tired", 0xFFA030, 4200, false, skit_tired, {{300, SOUND_DRAIN}}},
+    {"charged", 0x40E080, 3200, false, skit_charged, {{200, SOUND_CHARGE}}},
 };
 
 #define SKIT_COUNT (sizeof(SKITS) / sizeof(SKITS[0]))
@@ -745,6 +801,12 @@ static void ambient_pose(float t, float out[P_COUNT])
     out[P_X] = s_look_x * (1.0f - d);
     out[P_Y] = s_look_y * (1.0f - d) + 16.0f * d;
     out[P_LID_IN] = out[P_LID_OUT] = 0.3f * fminf(1.0f, 2.0f * d);
+    // Awake, it wears its mood: heavy lids when tired, a smile when happy.
+    float droop, smile;
+    pet_pose(&droop, &smile);
+    out[P_LID_IN] += droop * (1.0f - d);
+    out[P_LID_OUT] += droop * (1.0f - d);
+    out[P_HAPPY] = smile * (1.0f - d);
 }
 
 /** What eye `eye` should look like `t` seconds into `state`. The left eye is
@@ -1256,9 +1318,21 @@ static void play(const skit_t *skit)
     s_next_blink_ms = now + lv_rand(900, 2200);
 }
 
+/* Sooner when the pet is lively. */
 static uint32_t idle_gap_ms(void)
 {
-    return lv_rand(IDLE_MIN_S * 1000, IDLE_MAX_S * 1000);
+    float pace = pet_idle_pace();
+    return (uint32_t) (pace * IDLE_MIN_S * 1000) + lv_rand(0, (uint32_t) (pace * (IDLE_MAX_S - IDLE_MIN_S) * 1000));
+}
+
+static const skit_t *find_skit(const char *name)
+{
+    for (size_t i = 0; i < SKIT_COUNT; i++) {
+        if (strcmp(SKITS[i].name, name) == 0) {
+            return &SKITS[i];
+        }
+    }
+    return NULL;
 }
 
 /** Once a second: a scene when it's been quiet long enough. Anything on the
@@ -1266,20 +1340,25 @@ static uint32_t idle_gap_ms(void)
 static void idle_check(lv_timer_t *timer)
 {
     uint32_t now = lv_tick_get();
-    // Not over an eyes face that has dozed off.
-    if (!s_idle_on || s_busy || s_open || s_state != VOICE_IDLE || s_doze > 0) {
+    // Not over an eyes face that has dozed off, nor with nobody there.
+    if (!s_idle_on || s_busy || s_open || s_state != VOICE_IDLE || s_doze > 0 || pet_quiet()) {
         s_next_idle_ms = now + idle_gap_ms();
         return;
     }
     if ((int32_t) (now - s_next_idle_ms) < 0) {
         return;
     }
-    // Any but the last one.
-    uint32_t i = lv_rand(0, SKIT_COUNT - 2);
-    if (s_last_skit != NULL && &SKITS[i] >= s_last_skit) {
-        i++;
+    // One that suits the mood, else any; not the last one again.
+    const char *name = pet_idle_scene();
+    const skit_t *skit = name != NULL ? find_skit(name) : NULL;
+    if (skit == NULL || skit == s_last_skit) {
+        uint32_t i = lv_rand(0, SKIT_COUNT - 2);
+        if (s_last_skit != NULL && &SKITS[i] >= s_last_skit) {
+            i++;
+        }
+        skit = &SKITS[i];
     }
-    play(&SKITS[i]);
+    play(skit);
 }
 
 void ui_eyes_set_idle(bool on)
@@ -1342,13 +1421,11 @@ bool ui_eyes_play(const char *name)
         play(&SKITS[i]);
         return true;
     }
-    for (size_t i = 0; i < SKIT_COUNT; i++) {
-        if (strcmp(SKITS[i].name, name) == 0) {
-            play(&SKITS[i]);
-            return true;
-        }
+    const skit_t *skit = find_skit(name);
+    if (skit != NULL) {
+        play(skit);
     }
-    return false;
+    return skit != NULL;
 }
 
 int ui_eyes_animations(const char **names, int max)

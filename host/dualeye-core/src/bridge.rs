@@ -499,10 +499,12 @@ fn session(
             let _ = alert_tx.send(AlertInput::Timer(fired));
         }
         snapshot.timer = config.timers.board_view();
-        if snapshot.face.is_some_and(|f| f.shows(Face::Music)) {
+        // Watched for the music face, and for the pet, which dances to it.
+        if ready || snapshot.face.is_some_and(|f| f.shows(Face::Music)) {
             config.music.want();
         }
         snapshot.music = config.music.board_view();
+        snapshot.pet = Some(crate::presence::sample());
         if let Some(view) = snapshot.music.as_mut().filter(|_| ready && has_music) {
             // The cover first, so the snapshot naming it finds it there.
             match config.music.cover().filter(|c| Some(c.id) == view.art) {

@@ -10,7 +10,7 @@
 //! [`ClaudeUsage`] adds Claude Code's usage for the Claude faces, [`Timers`]
 //! the timers, pomodoro and reminders the timer face counts down, [`Music`]
 //! what's playing for the music face, [`pointer`] where the mouse is for the
-//! eyes face. The CLI
+//! eyes face, [`presence`] the time and whether you're there for the pet. The CLI
 //! and a Tauri app are both thin shells over this.
 
 pub mod agent;
@@ -34,6 +34,7 @@ pub mod music;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod pointer;
+pub mod presence;
 pub mod protocol;
 pub mod sensors;
 pub mod serial;

@@ -203,6 +203,22 @@ static const tone_t GLITCH[] = {
     {4000, 4000, 30, W_NOISE, 45, 0, 0, 0}, {200, 200, 60, W_TRI, 50, 0, 0, 0},
 };
 
+/* Hot: "hah-hah-hah-hah", in and out. */
+#define PANT_IN {1300, 1700, 110, W_NOISE, 75, 0, 0, E_SWELL}
+#define PANT_OUT {1800, 1200, 130, W_NOISE, 80, 0, 0, E_SWELL}
+static const tone_t PANT[] = {PANT_IN, REST(50), PANT_OUT, REST(80), PANT_IN, REST(50), PANT_OUT};
+/* Cooled down: a long breath out and a little whistle. */
+static const tone_t PHEW[] = {
+    {2600, 1100, 420, W_NOISE, 60, 0, 0, E_SWELL},
+    {950, 620, 260, W_SINE, 40, 0, 0, E_SWELL},
+};
+/* The battery running out: winding down. */
+static const tone_t DRAIN[] = {{900, 180, 750, W_TRI, 55, 4, 5, E_SWELL}};
+/* Plugged in: winding up, then "bip!". */
+static const tone_t CHARGE[] = {
+    {180, 900, 550, W_TRI, 55, 0, 0, E_SWELL}, REST(40), {1400, 1800, 90, W_SINE, 65, 0, 0, E_PLUCK},
+};
+
 typedef struct {
     const char *name;
     const tone_t *tones;
@@ -258,6 +274,10 @@ static const sound_def_t SOUNDS[SOUND_COUNT] = {
     DEF(SOUND_WHIMPER, "whimper", WHIMPER),
     DEF(SOUND_BOO, "boo", BOO),
     DEF(SOUND_GLITCH, "glitch", GLITCH),
+    DEF(SOUND_PANT, "pant", PANT),
+    DEF(SOUND_PHEW, "phew", PHEW),
+    DEF(SOUND_DRAIN, "drain", DRAIN),
+    DEF(SOUND_CHARGE, "charge", CHARGE),
 };
 
 const char *sound_name(sound_t sound)
@@ -280,16 +300,17 @@ static void tone_begin(synth_t *s)
     const tone_t *t = &((const tone_t *) s->tones)[s->tone];
     s->k = 0;
     s->n = (uint32_t) t->ms * (BOARD_AUDIO_SAMPLE_RATE / 1000);
-    s->freq = t->f0;
+    s->freq = t->f0 * s->pitch;
     s->step = t->f0 > 0 && t->f1 > 0 && s->n > 0 ? powf((float) t->f1 / t->f0, 1.0f / s->n) : 1.0f;
     s->decay = 1.0f;
     s->decay_step = s->n > 0 ? expf(-PLUCK_DECAY / s->n) : 1.0f;
 }
 
-void synth_begin(synth_t *s, sound_t sound)
+void synth_begin(synth_t *s, sound_t sound, float pitch)
 {
     memset(s, 0, sizeof(*s));
     s->rng = 0x9E3779B9u;
+    s->pitch = pitch;
     if (sound >= SOUND_COUNT) {
         return;
     }

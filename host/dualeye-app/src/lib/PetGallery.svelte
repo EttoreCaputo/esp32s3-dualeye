@@ -25,6 +25,7 @@
     grumpy: "#ff7a50",
     silly: "#c070ff",
     robot: "#30f0b0",
+    life: "#ffa030",
   };
   const pets = SOUND_LIST.filter((s) => s.pet);
   const chimes = SOUND_LIST.filter((s) => !s.pet);
@@ -164,7 +165,7 @@
   </div>
 
   {#if oldFirmware && connected}
-    <p class="hint">The board's firmware only knows the first 16 scenes and no pet sounds: update it from the Device tab.</p>
+    <p class="hint">The board's firmware only knows the first 16 scenes, with no sounds or moods: update it from the Device tab.</p>
   {/if}
   {#if error}<p class="hint error">{error}</p>{/if}
 

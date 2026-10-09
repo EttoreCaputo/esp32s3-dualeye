@@ -41,6 +41,9 @@ void playback_sound(sound_t sound);
 void playback_set_pet_sounds(bool on);
 bool playback_pet_sounds(void);
 
+/** How high the pet's sounds are, 1 as written (0.7..1.4): its mood. */
+void playback_set_pet_pitch(float pitch);
+
 /** A stream is playing (or buffering to start). */
 bool playback_active(void);
 

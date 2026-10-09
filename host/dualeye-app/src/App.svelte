@@ -91,6 +91,11 @@
       picking = null;
       settings = true;
     }}
+    onPet={() => {
+      picking = null;
+      drawerTab = "pet";
+      settings = true;
+    }}
   />
   <UpdateBanner
     onUpdate={() => {

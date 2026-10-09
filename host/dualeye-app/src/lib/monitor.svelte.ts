@@ -258,6 +258,29 @@ type Status = {
 
 export type Link = "searching" | "connected" | "offline";
 /** The voice settings the board keeps; null where it doesn't say. */
+export type PetMood = "content" | "happy" | "excited" | "loving" | "bored" | "grumpy" | "sad" | "sleepy" | "hot";
+export type PetNow = "hot" | "music" | "claude" | "battery_low" | "charging" | "night" | "away" | "bored";
+export type PetReaction = { what: string; scene: string; ago_s: number };
+/** `get_pet` (firmware 1.4). */
+export type PetState = {
+  mood: PetMood;
+  energy: number;
+  happiness: number;
+  affection: number;
+  away: boolean;
+  now: PetNow[];
+  /** Local minutes since midnight, as the host told the board. */
+  minute?: number;
+  idle_s?: number;
+  /** Since someone last talked or played with it, or music played. */
+  lonely_s: number;
+  pitch: number;
+  pace: number;
+  recent: PetReaction[];
+  sounds: boolean;
+  reactions: boolean;
+  idle_scenes: boolean;
+};
 export type BoardVoice = {
   volume: number | null;
   eyes: boolean | null;
@@ -301,6 +324,9 @@ class Monitor {
   voice = $state<VoiceState>("idle");
   /** Whether the board shows eyes for its voice (else the ring); read once it's connected. */
   eyes = $state(true);
+  /** The pet's mood, read every few seconds while the board is live:
+   * undefined until it's read, null on a firmware before 1.4. */
+  pet = $state<PetState | null | undefined>(undefined);
   /** Transcribed utterances, oldest first. */
   transcripts = $state<TranscriptEntry[]>([]);
   /** What each screen's image face shows, as data URLs; null without a picture. */
@@ -349,7 +375,31 @@ class Monitor {
     if (this.preview) startPreviewFeed((e) => this.#apply(e), () => this.faces, () => this.rotation);
     else void this.#connect();
     this.#watchPointer();
+    this.#watchPet();
     void this.firmwareInfo();
+  }
+
+  /** Every PET_EVERY_MS while the board is live; once a firmware has said
+   * it has no pet, not again until it reconnects. */
+  #watchPet() {
+    let reading = false;
+    let since = -1;
+    setInterval(async () => {
+      if (this.link !== "connected" || this.boardState === "boot") {
+        this.pet = undefined;
+        return;
+      }
+      if (reading || (this.pet === null && since === this.connectedAt)) return;
+      reading = true;
+      try {
+        this.pet = await this.boardPet();
+        since = this.connectedAt;
+      } catch {
+        // Busy or rebooting: next time.
+      } finally {
+        reading = false;
+      }
+    }, PET_EVERY_MS);
   }
 
   async #connect() {
@@ -758,7 +808,7 @@ class Monitor {
 
   /** The board's speaker volume and eyes; null where the board doesn't say. */
   async boardVoice(): Promise<BoardVoice> {
-    if (this.preview) return { volume: previewVolume, eyes: previewEyes, idle_eyes: previewIdleEyes, wake_sound: previewWakeSound, pet_sounds: previewPetSounds };
+    if (this.preview) return { volume: previewVolume, eyes: previewEyes, idle_eyes: previewIdleEyes, wake_sound: previewWakeSound, pet_sounds: previewPet.sounds };
     const b = await invoke<BoardVoice>("board_voice");
     this.eyes = b.eyes ?? false;
     return b;
@@ -800,13 +850,24 @@ class Monitor {
     await invoke("set_board_wake_sound", { on });
   }
 
-  /** The board's little sounds: scenes, hello, snoring... (firmware 1.4.0). */
-  async setBoardPetSounds(on: boolean) {
+  /** The pet's little sounds and its reactions to the computer (firmware 1.4.0). */
+  async setBoardPet(settings: { sounds?: boolean; react?: boolean }) {
     if (this.preview) {
-      previewPetSounds = on;
+      if (settings.sounds !== undefined) previewPet.sounds = settings.sounds;
+      if (settings.react !== undefined) previewPet.reactions = settings.react;
       return;
     }
-    await invoke("set_board_pet_sounds", { on });
+    await invoke("set_board_pet", { sounds: settings.sounds ?? null, react: settings.react ?? null });
+  }
+
+  /** The pet's mood; null on a firmware before 1.4.0. */
+  async boardPet(): Promise<PetState | null> {
+    if (this.preview) {
+      // Something that moves, for the preview.
+      const t = Date.now() / 60000;
+      return { ...previewPet, energy: 0.55 + 0.3 * Math.sin(t), happiness: 0.7 + 0.2 * Math.sin(t * 1.7), affection: 0.62, recent: [...previewPet.recent] };
+    }
+    return invoke<PetState | null>("board_pet");
   }
 
   /** One of the eyes' scenes on the board now. */
@@ -874,7 +935,28 @@ let previewVolume = 60;
 let previewEyes = true;
 let previewIdleEyes = true;
 let previewWakeSound = true;
-let previewPetSounds = true;
+const PET_EVERY_MS = 4000;
+const previewPet: PetState = {
+  mood: "happy",
+  energy: 0.7,
+  happiness: 0.72,
+  affection: 0.6,
+  away: false,
+  now: ["music", "claude"],
+  minute: 16 * 60 + 20,
+  idle_s: 4,
+  lonely_s: 95,
+  pitch: 1.06,
+  pace: 0.9,
+  recent: [
+    { what: "music", scene: "dance", ago_s: 95 },
+    { what: "claude_start", scene: "focus", ago_s: 640 },
+    { what: "greeting", scene: "excited", ago_s: 3900 },
+  ],
+  sounds: true,
+  reactions: true,
+  idle_scenes: true,
+};
 
 function previewCloud(kind: ModelInfo["kind"], language: string | null, models: [string, string][]): ModelInfo[] {
   return models.map(([id, note]) => ({ id: `groq:${id}`, kind, language, engine: null, bytes: 0, note, license: "", installed: false, provider: "groq" }));

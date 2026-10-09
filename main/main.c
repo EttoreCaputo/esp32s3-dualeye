@@ -15,6 +15,7 @@
 #include "metrics_model.h"
 #include "rpc.h"
 #include "board_audio.h"
+#include "pet.h"
 #include "playback.h"
 #include "ui_toast.h"
 #include "ui_eyes.h"
@@ -98,6 +99,7 @@ static void ui_refresh_task(void *arg)
         board_settings_t settings;
         current_view(&snap, &settings);
         ring_alarm(&snap, &alarm_since_ms, &alarm_ms);
+        pet_update(&snap);
         if (snap.state == METRICS_UI_LIVE && prev.state != METRICS_UI_LIVE) {
             // The host is here (again): say hi.
             playback_sound(SOUND_HELLO);
@@ -123,6 +125,8 @@ void app_main(void)
     art_init();
     board_settings_t settings;
     board_settings_get(&settings);
+    pet_init();
+    pet_set_reactions(settings.pet_reactions);
 
     ESP_ERROR_CHECK(board_display_init(s_lcds));
     for (int i = 0; i < BOARD_LCD_COUNT; i++) {

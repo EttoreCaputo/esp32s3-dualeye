@@ -62,6 +62,10 @@ typedef enum {
     SOUND_WHIMPER,
     SOUND_BOO,
     SOUND_GLITCH,
+    SOUND_PANT,
+    SOUND_PHEW,
+    SOUND_DRAIN,
+    SOUND_CHARGE,
     SOUND_COUNT,
 } sound_t;
 
@@ -81,10 +85,13 @@ typedef struct {
     uint8_t tone;
     uint32_t k, n;
     float phase, freq, step, decay, decay_step, lp1, lp2;
+    /* Every pitch times this. */
+    float pitch;
     uint32_t rng;
 } synth_t;
 
-void synth_begin(synth_t *s, sound_t sound);
+/** Start rendering `sound`, `pitch` times higher (1: as written). */
+void synth_begin(synth_t *s, sound_t sound, float pitch);
 
 /** Up to `max` samples of the sound at BOARD_AUDIO_SAMPLE_RATE; 0 once it's over. */
 uint32_t synth_render(synth_t *s, int16_t *out, uint32_t max);

@@ -147,6 +147,7 @@ impl Collector {
             claude: None,
             timer: None,
             music: None,
+            pet: None,
         }
     }
 

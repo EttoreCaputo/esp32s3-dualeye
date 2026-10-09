@@ -452,7 +452,7 @@ const ALARM_FOLLOW_UP: Duration = Duration::from_secs(20);
 /// Board tools the voice agent doesn't get: muted by voice, the board
 /// couldn't be unmuted by voice; the eyes and the pet's sounds are settings
 /// for the app and toys, not worth a tool in a small model's prompt.
-const NOT_BY_VOICE: &[&str] = &["set_mic", "set_eyes", "play_eyes", "set_sounds", "play_sound"];
+const NOT_BY_VOICE: &[&str] = &["set_mic", "set_eyes", "play_eyes", "set_pet", "play_sound"];
 
 /// The board's tools as the voice agent gets them: without those in
 /// [`NOT_BY_VOICE`], plus the host's `get_metrics`, timers ([`Timers::tools`]),

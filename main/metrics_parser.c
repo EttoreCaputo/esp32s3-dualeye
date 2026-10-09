@@ -523,6 +523,41 @@ static bool parse_battery_object(js_t *j, metrics_battery_t *bat)
     }
 }
 
+static bool parse_host_object(js_t *j, metrics_host_t *host)
+{
+    if (!consume(j, '{')) {
+        return false;
+    }
+    bool got_min = false;
+    for (;;) {
+        char key[32];
+        bool done = false;
+        if (!object_key(j, key, sizeof(key), &done)) {
+            return false;
+        }
+        if (done) {
+            host->valid = got_min;
+            return true;
+        }
+        bool ok = true;
+        float value = 0.0f;
+        if (strcmp(key, "min") == 0) {
+            ok = read_number_field(j, &value);
+            host->minute = (int) value % 1440;
+            got_min = ok && value >= 0;
+        } else if (strcmp(key, "idle") == 0) {
+            ok = read_number_field(j, &value);
+            host->idle_s = value > 0 ? (int) value : 0;
+        } else {
+            ok = skip_value(j, 1);
+        }
+        if (!ok) {
+            return false;
+        }
+        object_sep(j);
+    }
+}
+
 static metrics_timer_kind_t timer_kind_from_name(const char *name)
 {
     if (strcmp(name, "work") == 0) {
@@ -683,6 +718,8 @@ esp_err_t metrics_parse_line(const char *line, metrics_snapshot_t *out)
             ok = parse_timer_object(&j, &out->timer);
         } else if (strcmp(key, "music") == 0) {
             ok = parse_music_object(&j, &out->music);
+        } else if (strcmp(key, "pet") == 0) {
+            ok = parse_host_object(&j, &out->host);
         } else if (strcmp(key, "ts") == 0) {
             double value = 0.0;
             ok = parse_number(&j, &value);

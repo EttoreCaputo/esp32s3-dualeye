@@ -18,7 +18,7 @@ export type Scene = {
   mood: Mood;
 };
 
-export type Mood = "joy" | "calm" | "sleepy" | "grumpy" | "silly" | "robot";
+export type Mood = "joy" | "calm" | "sleepy" | "grumpy" | "silly" | "robot" | "life";
 
 export const MOODS: [Mood, string][] = [
   ["joy", "Joy"],
@@ -27,6 +27,7 @@ export const MOODS: [Mood, string][] = [
   ["grumpy", "Grumpy"],
   ["silly", "Silly"],
   ["robot", "Robot"],
+  ["life", "Reactions"],
 ];
 
 const PI2 = Math.PI * 2;
@@ -382,6 +383,43 @@ export const SCENES: Scene[] = [
     p.lidIn = p.lidOut = 0.22;
     p.happy = 0.3;
     p.y = t < 0.3 ? 0 : -16;
+  }),
+  S("hot", "Too hot", "life", "#ff4a30", 4200, false, [[300, "pant"], [2000, "pant"]], (eye, t, p) => {
+    const pant = abs(sin(PI2 * 2.2 * t));
+    p.w = 120 + 4 * pant;
+    p.h = 70 - 6 * pant;
+    p.lidOut = 0.3;
+    p.lidIn = 0.1;
+    p.y = 8 + 6 * pant;
+  }),
+  S("relieved", "Relieved", "life", "#60e0ff", 3200, true, [[400, "phew"]], (eye, t, p) => {
+    if (t < 0.3) openPose(p);
+    else if (t < 0.6) {
+      p.w = 116;
+      p.h = 136;
+      p.y = -8;
+    } else {
+      const d = smooth01((t - 0.6) / 0.8);
+      p.w = 116 + 4 * d;
+      p.h = 136 - 36 * d;
+      p.happy = 0.35 * d;
+      p.lidIn = p.lidOut = 0.15 * d;
+      p.y = -8 + 14 * d;
+    }
+  }),
+  S("tired", "Low battery", "life", "#ffa030", 4200, false, [[300, "drain"]], (eye, t, p) => {
+    const d = smooth01((t - 0.3) / 2.6);
+    p.w = 110 - 10 * d;
+    p.h = 110 - 64 * d;
+    p.lidIn = p.lidOut = 0.4 * d;
+    p.y = 22 * d;
+  }),
+  S("charged", "Charging", "life", "#40e080", 3200, false, [[200, "charge"]], (eye, t, p) => {
+    const d = smooth01((t - 0.2) / 1.4);
+    p.w = 112;
+    p.h = 40 + 94 * d;
+    p.y = 30 - 36 * d;
+    p.happy = t > 1.8 ? 0.32 : 0;
   }),
 ];
 

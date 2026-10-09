@@ -744,12 +744,32 @@ async fn set_board_wake_sound(on: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
-/// The board's little sounds: in the eyes' scenes, hello, snoring...
+/// The board as a pet: its little sounds, its reactions to the computer.
 #[tauri::command]
-async fn set_board_pet_sounds(on: bool) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || call_board("set_sounds", serde_json::json!({"pet": on})))
+async fn set_board_pet(sounds: Option<bool>, react: Option<bool>) -> Result<(), String> {
+    let mut args = serde_json::Map::new();
+    if let Some(on) = sounds {
+        args.insert("sounds".into(), on.into());
+    }
+    if let Some(on) = react {
+        args.insert("react".into(), on.into());
+    }
+    tauri::async_runtime::spawn_blocking(move || call_board("set_pet", args.into()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// The pet's mood, what's moving it and its last reactions (`get_pet`,
+/// firmware 1.4); `None` on an older firmware, which doesn't have the tool.
+#[tauri::command]
+async fn board_pet() -> Result<Option<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(|| match board().call_tool("get_pet", serde_json::json!({})) {
+        Ok(result) if !result.is_error => Ok(result.structured_content),
+        Ok(_) | Err(dualeye_core::CallError::Rpc { .. }) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// One of the eyes' scenes, now.
@@ -1344,7 +1364,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet_sounds, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

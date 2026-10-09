@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include "lvgl_port.h"
 #include "model_path.h"
+#include "pet.h"
 #include "playback.h"
 #include "rpc.h"
 #include "ui_voice.h"
@@ -325,6 +326,7 @@ void voice_set_state(voice_state_t state)
     }
     if (state == VOICE_ERROR) {
         playback_sound(SOUND_ERROR);
+        pet_event(PET_EVENT_ERROR);
     } else if (changed && state == VOICE_THINKING) {
         // "Mm-hm": heard you, on it.
         playback_sound(SOUND_THINK);
@@ -432,6 +434,7 @@ static void on_wake(const afe_fetch_result_t *res)
     cJSON_AddStringToObject(params, "model", s_model);
     cJSON_AddNumberToObject(params, "volume_db", (int) res->data_volume);
     rpc_notify("wake", params);
+    pet_event(PET_EVENT_TALKED);
     if (s_wake_sound) {
         // Echo cancellation keeps it out of the utterance, and it ends within
         // WAKE_TAIL_MS anyway.
