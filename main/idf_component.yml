@@ -5,3 +5,4 @@ dependencies:
   espressif/esp_lcd_gc9a01: ^2.0.4
   lvgl/lvgl: 9.3.0
   espressif/esp-sr: ^2.5.5
+  espressif/mdns: ^1.8.2

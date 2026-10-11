@@ -43,7 +43,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::claude::alerts::{self, Alert, AlertSettings, Alerts, HookEvent};
@@ -58,16 +58,31 @@ use crate::protocol::Channel;
 use crate::quips::{Quip, QuipLevel, Quips};
 use crate::sensors::Collector;
 use crate::serial;
+use crate::wifi;
 use crate::snapshot::{Face, Faces, Rotation, Rotations, Snapshot, Source, Sources};
 use crate::stt::Transcript;
 use crate::timers::{Fired, Timers};
 use crate::voice::{self, Hearing, Receiving, Session, Speaker, Spoken, Utterance, VoiceConfig};
 use crate::intents;
 
+/// Which way the bridge reaches the board, when no port is given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    /// USB when the board is plugged in, otherwise WiFi (firmware 1.4.3), and
+    /// back to USB as soon as it's plugged in again.
+    #[default]
+    Auto,
+    Usb,
+    Wifi,
+}
+
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
-    /// Serial port; `None` auto-detects the Espressif board on every (re)connect.
+    /// Serial port, or `wifi:<id>` for a paired board on WiFi; `None` finds
+    /// the board on every (re)connect, the way `transport` says.
     pub port: Option<String>,
+    pub transport: Transport,
     /// Time between snapshots. The firmware marks data stale after 3 s.
     pub interval: Duration,
     /// Watch face of each screen. Shared, so a frontend can change it while
@@ -105,6 +120,7 @@ impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
             port: None,
+            transport: Transport::Auto,
             interval: Duration::from_secs(1),
             faces: Arc::default(),
             rotation: Arc::default(),
@@ -281,15 +297,17 @@ fn connect_loop(config: &BridgeConfig, stop: &AtomicBool, alert_tx: &Sender<Aler
     let mut pet = Pet { diary: Diary::open(config.diary.clone()), quips: Quips::default(), observed: None };
     let mut delay = Duration::from_secs(1);
     while !stop.load(Ordering::Relaxed) {
-        let Some(port) = config.port.clone().or_else(serial::detect_board) else {
-            let reason = "board not found on USB";
-            if let Some(hub) = &config.hub {
-                hub.set_unavailable(reason);
+        let port = match pick_target(config) {
+            Ok(port) => port,
+            Err(reason) => {
+                if let Some(hub) = &config.hub {
+                    hub.set_unavailable(reason);
+                }
+                on_event(BridgeEvent::Waiting { reason: reason.into() });
+                sleep_unless_stopped(delay, stop);
+                delay = (delay * 2).min(Duration::from_secs(5));
+                continue;
             }
-            on_event(BridgeEvent::Waiting { reason: reason.into() });
-            sleep_unless_stopped(delay, stop);
-            delay = (delay * 2).min(Duration::from_secs(5));
-            continue;
         };
         let started = Instant::now();
         let result = session(&port, config, stop, &mut collector, &mut claude, &mut pet, alert_tx, target, on_event);
@@ -313,6 +331,22 @@ fn connect_loop(config: &BridgeConfig, stop: &AtomicBool, alert_tx: &Sender<Aler
         }
     }
 }
+
+/// The port to open next: the one given, or the board on USB or WiFi, as
+/// `config.transport` says; otherwise why there's none.
+fn pick_target(config: &BridgeConfig) -> Result<String, &'static str> {
+    if let Some(port) = &config.port {
+        return Ok(port.clone());
+    }
+    match config.transport {
+        Transport::Usb => serial::detect_board().ok_or("board not found on USB"),
+        Transport::Wifi => wifi::default_target().ok_or("no board set up for WiFi: set its WiFi up over USB first"),
+        Transport::Auto => serial::detect_board().or_else(wifi::default_target).ok_or("board not found on USB"),
+    }
+}
+
+/// While on WiFi in [`Transport::Auto`], how often to look for the board on USB.
+const USB_LOOK_EVERY: Duration = Duration::from_secs(3);
 
 /// What the pet remembers of your days, and when it last spoke up about them.
 struct Pet {
@@ -432,7 +466,13 @@ fn session(
         timers: config.timers.clone(),
         music: config.music.clone(),
     });
+    // On WiFi, where it is rather than which board.
+    let label = link.peer().map_or_else(|| port.to_string(), |addr| format!("WiFi {}", addr.ip()));
+    let port = label.as_str();
     on_event(BridgeEvent::Connected { port: port.to_string() });
+    // Back to USB as soon as the board is plugged in (Auto only).
+    let watch_usb = link.peer().is_some() && config.port.is_none() && config.transport == Transport::Auto;
+    let mut next_usb_look = Instant::now() + USB_LOOK_EVERY;
 
     let mut reported: Option<BoardFirmware> = None;
     let mut report = |firmware: BoardFirmware| {
@@ -465,6 +505,13 @@ fn session(
     while !stop.load(Ordering::Relaxed) {
         if !link.is_alive() {
             return Err(closed(&link));
+        }
+        if watch_usb && Instant::now() >= next_usb_look {
+            next_usb_look = Instant::now() + USB_LOOK_EVERY;
+            if serial::detect_board().is_some() {
+                on_event(BridgeEvent::BoardLog { line: "host: the board is on USB, switching to it".into() });
+                return Ok(());
+            }
         }
         if heard.rebooted.swap(false, Ordering::Relaxed) {
             if let Some(hub) = &config.hub {

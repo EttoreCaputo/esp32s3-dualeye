@@ -4,9 +4,12 @@
 /// Protocol version the `hello` handshake announces.
 pub const PROTOCOL: u32 = 2;
 pub const MAX_PAYLOAD: usize = 4096;
+/// On WiFi each payload carries the 16-byte AES-GCM tag ([`crate::wifi`]).
+pub const SEAL_OVERHEAD: usize = 16;
+const MAX_WIRE_PAYLOAD: usize = MAX_PAYLOAD + SEAL_OVERHEAD;
 const OVERHEAD: usize = 5;
 /// Longest piece between delimiters a valid frame can be.
-const MAX_ENCODED: usize = MAX_PAYLOAD + OVERHEAD + (MAX_PAYLOAD + OVERHEAD) / 254 + 1;
+const MAX_ENCODED: usize = MAX_WIRE_PAYLOAD + OVERHEAD + (MAX_WIRE_PAYLOAD + OVERHEAD) / 254 + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -91,9 +94,16 @@ fn cobs_decode(data: &[u8]) -> Option<Vec<u8>> {
 /// One frame, delimiters included, ready to write.
 pub fn encode(channel: Channel, payload: &[u8]) -> Vec<u8> {
     assert!(payload.len() <= MAX_PAYLOAD, "payload of {} bytes is over {MAX_PAYLOAD}", payload.len());
+    encode_raw(channel as u8, payload)
+}
+
+/// [`encode`] for a raw channel byte and a payload up to [`MAX_PAYLOAD`] +
+/// [`SEAL_OVERHEAD`]: a sealed one.
+pub fn encode_raw(channel: u8, payload: &[u8]) -> Vec<u8> {
+    assert!(payload.len() <= MAX_WIRE_PAYLOAD, "payload of {} bytes is over {MAX_WIRE_PAYLOAD}", payload.len());
     let len = payload.len() as u16;
     let mut body = Vec::with_capacity(payload.len() + OVERHEAD);
-    body.push(channel as u8);
+    body.push(channel);
     body.extend_from_slice(&len.to_le_bytes());
     body.extend_from_slice(payload);
     let crc = crc16(&body);
@@ -114,7 +124,7 @@ pub fn decode(piece: &[u8]) -> Option<Frame> {
     }
     let (head, crc) = body.split_at(body.len() - 2);
     let len = u16::from_le_bytes([head[1], head[2]]) as usize;
-    if len != head.len() - 3 || len > MAX_PAYLOAD || crc16(head) != u16::from_le_bytes([crc[0], crc[1]]) {
+    if len != head.len() - 3 || len > MAX_WIRE_PAYLOAD || crc16(head) != u16::from_le_bytes([crc[0], crc[1]]) {
         return None;
     }
     Some(Frame { channel: head[0], payload: head[3..].to_vec() })

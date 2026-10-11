@@ -94,7 +94,7 @@ bool link_frame_decode(uint8_t *buf, size_t n, uint8_t *chan, uint8_t **payload,
     }
     size_t body = out - 2;
     size_t plen = buf[1] | ((size_t) buf[2] << 8);
-    if (plen != body - 3 || plen > LINK_MAX_PAYLOAD) {
+    if (plen != body - 3 || plen > LINK_MAX_WIRE_PAYLOAD) {
         return false;
     }
     uint16_t want = buf[body] | ((uint16_t) buf[body + 1] << 8);

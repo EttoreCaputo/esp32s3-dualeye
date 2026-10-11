@@ -98,6 +98,32 @@ export type ImageSent = { frames: number; source_frames: number; bytes: number; 
 /** An image face's screen, as `media/...` names it. */
 export type Side = "left" | "right";
 export type PortInfo = { name: string; vid: number; pid: number; product: string | null; is_board: boolean };
+
+/** How the app reaches the board: USB when plugged in and WiFi otherwise, or only one of them. */
+export type Transport = "auto" | "usb" | "wifi";
+export type WifiState = "off" | "connecting" | "connected" | "no_network" | "wrong_password" | "disconnected";
+/** The board's `wifi/status` (firmware 1.4.3). */
+export type WifiStatus = {
+  enabled: boolean;
+  ssid: string | null;
+  state: WifiState;
+  ip: string | null;
+  rssi?: number;
+  host: string;
+  port: number;
+  id: string;
+  /** It has a pairing key: the WiFi was set up. */
+  paired: boolean;
+};
+export type WifiInfo = {
+  transport: Transport;
+  /** Boards this computer holds a key for. */
+  paired: { id: string; ssid: string | null }[];
+  /** `null` when the board doesn't answer, or has no WiFi, with `error`. */
+  board: WifiStatus | null;
+  error: string | null;
+};
+export type WifiNetwork = { ssid: string; rssi: number; secure: boolean };
 export type Reading = { source: string; label: string; value: number; unit: string };
 /** `power_helper::HelperStatus`: the macOS root helper that reads the exact CPU power. */
 export type PowerHelperState = "unavailable" | "off" | "needs_approval" | "on";
@@ -578,6 +604,41 @@ class Monitor {
   async setPort(port: string | null) {
     this.portSetting = port;
     if (!this.preview) await invoke("set_port", { port });
+  }
+
+  async wifiInfo(): Promise<WifiInfo> {
+    if (this.preview) return previewWifi.info();
+    return invoke<WifiInfo>("wifi_info");
+  }
+
+  async setTransport(transport: Transport) {
+    if (this.preview) return previewWifi.setTransport(transport);
+    await invoke("set_transport", { transport });
+  }
+
+  async wifiScan(): Promise<WifiNetwork[]> {
+    if (this.preview) return previewWifi.scan();
+    return (await invoke<{ networks: WifiNetwork[] }>("wifi_scan")).networks;
+  }
+
+  /** Put the board on `ssid` over USB, and pair this computer with it. */
+  async wifiSetup(ssid: string, password: string): Promise<WifiStatus> {
+    if (this.preview) return previewWifi.setup(ssid);
+    return invoke<WifiStatus>("wifi_setup", { ssid, password });
+  }
+
+  async wifiEnable(on: boolean): Promise<WifiStatus> {
+    if (this.preview) return previewWifi.enable(on);
+    return invoke<WifiStatus>("wifi_enable", { on });
+  }
+
+  async wifiForget(): Promise<WifiStatus> {
+    if (this.preview) return previewWifi.forget();
+    return invoke<WifiStatus>("wifi_forget");
+  }
+
+  async wifiPair() {
+    if (!this.preview) await invoke("wifi_pair");
   }
 
   async setFaces(faces: Faces) {
@@ -1339,3 +1400,39 @@ function previewReadings(s: Snapshot | null): Reading[] {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const r1 = (v: number) => Math.round(v * 10) / 10;
+
+/** The WiFi in the browser preview: a board that joins whatever it's given. */
+const previewWifi = (() => {
+  let transport: Transport = "auto";
+  let status: WifiStatus = { enabled: false, ssid: null, state: "off", ip: null, host: "dualeye-c3d4e5.local", port: 7340, id: "a1b2c3d4e5f6", paired: false };
+  let joinedAt = 0;
+  const now = (): WifiStatus =>
+    status.state === "connecting" && Date.now() - joinedAt > 2500 ? (status = { ...status, state: "connected", ip: "192.168.1.42", rssi: -54 }) : status;
+  return {
+    info: async (): Promise<WifiInfo> => ({
+      transport,
+      paired: status.paired ? [{ id: status.id, ssid: status.ssid }] : [],
+      board: now(),
+      error: null,
+    }),
+    setTransport: async (t: Transport) => void (transport = t),
+    scan: async (): Promise<WifiNetwork[]> => {
+      await new Promise((r) => setTimeout(r, 1500));
+      return [
+        { ssid: "Casa", rssi: -48, secure: true },
+        { ssid: "Casa-5G", rssi: -61, secure: true },
+        { ssid: "Vicino", rssi: -80, secure: true },
+        { ssid: "Ospiti", rssi: -72, secure: false },
+      ];
+    },
+    setup: async (ssid: string): Promise<WifiStatus> => {
+      joinedAt = Date.now();
+      return (status = { ...status, enabled: true, ssid, state: "connecting", ip: null, paired: true });
+    },
+    enable: async (on: boolean): Promise<WifiStatus> => {
+      joinedAt = Date.now();
+      return (status = { ...status, enabled: on, state: on ? "connecting" : "off", ip: null });
+    },
+    forget: async (): Promise<WifiStatus> => (status = { ...status, enabled: false, ssid: null, state: "off", ip: null, paired: false }),
+  };
+})();

@@ -11,6 +11,7 @@
 #include "link.h"
 #include "lvgl_port.h"
 #include "media.h"
+#include "net.h"
 #include "metrics_io.h"
 #include "metrics_model.h"
 #include "rpc.h"
@@ -175,6 +176,8 @@ void app_main(void)
     link_on_receive(LINK_CHAN_CTRL, rpc_handle);
     link_on_receive(LINK_CHAN_METRICS, metrics_io_handle);
     link_on_receive(LINK_CHAN_AUDIO_DOWN, playback_receive);
+    // Joins the WiFi if it's set up; nothing of it runs otherwise.
+    net_init();
     link_start();
     // A host already listening (e.g. right after flashing) learns the board rebooted.
     rpc_announce();

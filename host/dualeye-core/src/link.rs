@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -14,8 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use serialport::SerialPort;
 
-use crate::protocol::{self, Channel, Chunk, Decoder, PROTOCOL};
+use crate::protocol::{self, Channel, Chunk, Decoder, Frame, PROTOCOL};
 use crate::serial;
+use crate::wifi::{self, Cipher};
 
 /// What the board sends besides responses.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +87,12 @@ pub struct Hello {
     pub channels: Vec<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// The board's id, its WiFi MAC (firmware 1.4.3).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// How this host reaches it: `usb` or `wifi` (firmware 1.4.3).
+    #[serde(default)]
+    pub transport: Option<String>,
 }
 
 /// A board tool, as `tools/list` describes it (the MCP `Tool` shape).
@@ -127,21 +135,59 @@ struct Shared {
     closed_reason: Mutex<Option<String>>,
 }
 
+/// Where frames go: the port, or the WiFi session sealing each one.
+struct Tx {
+    out: Box<dyn Write + Send>,
+    seal: Option<Cipher>,
+}
+
+/// How the reader thread gets its bytes.
+struct Rx {
+    input: Box<dyn Read + Send>,
+    /// TCP: a read of nothing is the board hanging up. On a serial port it's
+    /// just the timeout.
+    eof_closes: bool,
+    decoder: Decoder,
+    /// Frames read before the reader started (the WiFi handshake's).
+    pending: Vec<Frame>,
+    open: Option<Cipher>,
+}
+
 pub struct Link {
-    tx: Mutex<Box<dyn SerialPort>>,
+    tx: Mutex<Tx>,
     shared: Arc<Shared>,
     next_id: AtomicU64,
     reader: Option<JoinHandle<()>>,
+    /// The board's address on WiFi; the socket, to hang up on drop.
+    peer: Option<(SocketAddr, TcpStream)>,
 }
 
 impl Link {
-    /// Open the port (without resetting the board) and start reading.
+    /// Open the port (without resetting the board) and start reading. `wifi`
+    /// or `wifi:<id>` is a paired board on the network ([`wifi::open`]).
     pub fn open(port: &str, on_event: impl Fn(LinkEvent) + Send + 'static) -> io::Result<Self> {
+        if wifi::target(port).is_some() {
+            return Self::wifi(wifi::open(port)?, on_event);
+        }
         Self::new(serial::open(port)?, on_event)
     }
 
     pub fn new(port: Box<dyn SerialPort>, on_event: impl Fn(LinkEvent) + Send + 'static) -> io::Result<Self> {
-        let rx = port.try_clone()?;
+        let rx = Rx { input: port.try_clone()?, eof_closes: false, decoder: Decoder::new(), pending: Vec::new(), open: None };
+        Self::start(Tx { out: Box::new(port), seal: None }, rx, None, on_event)
+    }
+
+    /// A WiFi session that passed the handshake.
+    pub fn wifi(session: wifi::Session, on_event: impl Fn(LinkEvent) + Send + 'static) -> io::Result<Self> {
+        let wifi::Session { stream, addr, tx, rx, decoder, pending } = session;
+        stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+        let input = stream.try_clone()?;
+        let hangup = stream.try_clone()?;
+        let rx = Rx { input: Box::new(input), eof_closes: true, decoder, pending, open: Some(rx) };
+        Self::start(Tx { out: Box::new(stream), seal: Some(tx) }, rx, Some((addr, hangup)), on_event)
+    }
+
+    fn start(tx: Tx, rx: Rx, peer: Option<(SocketAddr, TcpStream)>, on_event: impl Fn(LinkEvent) + Send + 'static) -> io::Result<Self> {
         let shared = Arc::new(Shared {
             pending: Mutex::default(),
             stop: AtomicBool::new(false),
@@ -152,7 +198,12 @@ impl Link {
             let shared = shared.clone();
             thread::Builder::new().name("dualeye-link".into()).spawn(move || read_loop(rx, &shared, &on_event))?
         };
-        Ok(Self { tx: Mutex::new(port), shared, next_id: AtomicU64::new(1), reader: Some(reader) })
+        Ok(Self { tx: Mutex::new(tx), shared, next_id: AtomicU64::new(1), reader: Some(reader), peer })
+    }
+
+    /// The board's address, when this link is on WiFi.
+    pub fn peer(&self) -> Option<SocketAddr> {
+        self.peer.as_ref().map(|(addr, _)| *addr)
     }
 
     /// False once reading the port has failed (unplugged, or the board reset its USB).
@@ -169,14 +220,24 @@ impl Link {
         if payload.len() > protocol::MAX_PAYLOAD {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "payload too large for one frame"));
         }
-        self.send_raw(&protocol::encode(channel, payload))
+        let mut tx = self.tx.lock().unwrap();
+        let bytes = match tx.seal.as_mut() {
+            Some(seal) => protocol::encode_raw(channel as u8, &seal.seal(channel as u8, payload)),
+            None => protocol::encode(channel, payload),
+        };
+        tx.out.write_all(&bytes)?;
+        tx.out.flush()
     }
 
     /// Bytes as they are, outside the framing (the protocol 1 version query).
+    /// Not on WiFi, where there is no firmware that old.
     pub fn send_raw(&self, bytes: &[u8]) -> io::Result<()> {
         let mut tx = self.tx.lock().unwrap();
-        tx.write_all(bytes)?;
-        tx.flush()
+        if tx.seal.is_some() {
+            return Ok(());
+        }
+        tx.out.write_all(bytes)?;
+        tx.out.flush()
     }
 
     /// Send a JSON-RPC request and wait for its response.
@@ -259,6 +320,10 @@ impl Link {
 impl Drop for Link {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        if let Some((_, socket)) = &self.peer {
+            // The board learns at once, and goes back to USB.
+            let _ = socket.shutdown(Shutdown::Both);
+        }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
@@ -282,32 +347,57 @@ pub(crate) fn save_tools_cache(tools: &[Tool]) {
     }
 }
 
-fn read_loop(mut rx: Box<dyn SerialPort>, shared: &Shared, on_event: &dyn Fn(LinkEvent)) {
-    let mut decoder = Decoder::new();
+fn read_loop(mut rx: Rx, shared: &Shared, on_event: &dyn Fn(LinkEvent)) {
     let mut text = TextLines::default();
     let mut buf = [0u8; 1024];
+    // A sealed frame that doesn't open: tampered with, or out of step.
+    let broken = std::cell::Cell::new(false);
+    let open = &mut rx.open;
     let mut handle = |chunk: Chunk| match chunk {
-        Chunk::Frame(frame) => {
+        Chunk::Frame(mut frame) => {
             text.flush(on_event);
+            if let Some(cipher) = open.as_mut() {
+                match cipher.open(frame.channel, &frame.payload) {
+                    Some(plain) => frame.payload = plain,
+                    None => {
+                        broken.set(true);
+                        return;
+                    }
+                }
+            }
             on_frame(frame, shared, on_event);
         }
         Chunk::Text(t) => text.push(&t, on_event),
         Chunk::Bad => {}
     };
+    for frame in std::mem::take(&mut rx.pending) {
+        handle(Chunk::Frame(frame));
+    }
+    let close = |why: String| {
+        *shared.closed_reason.lock().unwrap() = Some(why.clone());
+        shared.alive.store(false, Ordering::Relaxed);
+        // Dropping the senders wakes every waiting call with Closed.
+        shared.pending.lock().unwrap().clear();
+        on_event(LinkEvent::Closed(why));
+    };
     while !shared.stop.load(Ordering::Relaxed) {
-        match rx.read(&mut buf) {
-            Ok(0) => decoder.idle(&mut handle),
-            Ok(n) => decoder.push(&buf[..n], &mut handle),
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => decoder.idle(&mut handle),
+        match rx.input.read(&mut buf) {
+            Ok(0) if rx.eof_closes => {
+                drop(handle);
+                return close("the board closed the connection".into());
+            }
+            Ok(0) => rx.decoder.idle(&mut handle),
+            Ok(n) => rx.decoder.push(&buf[..n], &mut handle),
+            Err(e) if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => rx.decoder.idle(&mut handle),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
-                *shared.closed_reason.lock().unwrap() = Some(e.to_string());
-                shared.alive.store(false, Ordering::Relaxed);
-                // Dropping the senders wakes every waiting call with Closed.
-                shared.pending.lock().unwrap().clear();
-                on_event(LinkEvent::Closed(e.to_string()));
-                return;
+                drop(handle);
+                return close(e.to_string());
             }
+        }
+        if broken.get() {
+            drop(handle);
+            return close("a frame from the board didn't check out".into());
         }
     }
 }

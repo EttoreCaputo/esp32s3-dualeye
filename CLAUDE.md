@@ -4,6 +4,8 @@
 
 Whenever you change the firmware (`main/`, `sdkconfig*`, `partitions.csv`) or anything the board runs:
 
+> **Always produce a new ESP32-S3 firmware build with a higher version number.** No firmware change is done until `version.txt` has been bumped and `idf.py build merge-bin` has succeeded, which regenerates `build/merged-binary.bin`. This applies even to one-line fixes. Don't skip it or leave it for the user. If the build fails, fix it, or report the failure clearly.
+
 1. **Bump `version.txt`** (patch by default, e.g. 1.4.1 → 1.4.2; minor for a new feature set when asked). Check `git log` first: if the current version has already been committed (released), it must go up. Bump once per piece of work, not on every edit within the same uncommitted change.
 2. **Add a `## <version>` section at the top of `FIRMWARE_CHANGELOG.md`** with the changes, written for the person using the board. Never add new changes to a version that's already committed.
 3. **Update the "firmware X.Y.Z or newer" mentions** for the new features (README, `docs/protocol.md`, the app's hints in `host/dualeye-app/src`) to the new version.

@@ -671,9 +671,10 @@ void voice_start(bool muted, const char *wake_word)
         return;
     }
     update_run();
-    // Core 1, clear of LVGL on core 0. Fetch runs WakeNet, hence its stack.
+    // Core 1, clear of LVGL on core 0. Fetch runs WakeNet, hence its stack
+    // (it peaks at about 1.5 KB; 5 KB leaves internal RAM for the WiFi).
     if (xTaskCreatePinnedToCore(feed_task, "voice_feed", 4096, NULL, TASK_PRIORITY, NULL, TASK_CORE) != pdPASS
-        || xTaskCreatePinnedToCore(fetch_task, "voice_fetch", 8192, NULL, TASK_PRIORITY, NULL, TASK_CORE) != pdPASS) {
+        || xTaskCreatePinnedToCore(fetch_task, "voice_fetch", 5120, NULL, TASK_PRIORITY, NULL, TASK_CORE) != pdPASS) {
         ESP_LOGE(TAG, "voice tasks not started");
         return;
     }

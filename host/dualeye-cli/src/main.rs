@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use dualeye_core::agent;
-use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent};
+use dualeye_core::bridge::{self, BridgeConfig, BridgeEvent, Transport};
 use dualeye_core::claude::{hooks, statusline};
 use dualeye_core::cloud::{self, CloudRef, Provider};
 use dualeye_core::hardware::{self, Hardware};
@@ -48,6 +48,7 @@ use dualeye_core::diary;
 use dualeye_core::quips::QuipLevel;
 use dualeye_core::timers::{self, Timers};
 use dualeye_core::voice::{self, VoiceConfig};
+use dualeye_core::wifi;
 use dualeye_core::{
     Agent, Board, BoardFirmware, ClaudeUsage, Collector, Face, Faces, Hub, Memory, Rotation, Rotations, Snapshot, Source, Sources, Tool, Toolbox, intents, mcp, media,
     serial,
@@ -59,9 +60,14 @@ use serde_json::{Map, Value, json};
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Serial port (default: the only attached Espressif USB device)
+    /// Serial port, or `wifi` for the board set up with `dualeye wifi set`
+    /// (default: as --transport says)
     #[arg(long, env = "DUALEYE_PORT")]
     port: Option<String>,
+    /// Without --port: auto (USB when the board is plugged in, otherwise
+    /// WiFi), usb or wifi
+    #[arg(long, default_value = "auto", value_parser = parse_transport)]
+    transport: Transport,
     /// Milliseconds between snapshots
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(200..))]
     interval_ms: u64,
@@ -285,6 +291,17 @@ enum Command {
     Music {
         action: Option<String>,
     },
+    /// The board's WiFi (firmware 1.4.3): `wifi` shows it, `wifi scan` lists
+    /// the networks it sees, `wifi set SSID` joins one and pairs this
+    /// computer (over USB; the password is read from stdin), `wifi on|off`,
+    /// `wifi pair` pairs this computer with a board set up from another one,
+    /// `wifi forget`. Then `dualeye --transport wifi` streams over it
+    Wifi {
+        #[arg(long, env = "DUALEYE_PORT")]
+        port: Option<String>,
+        #[command(subcommand)]
+        action: Option<WifiAction>,
+    },
     /// Speak through the board's speaker. Needs the app with spoken replies
     /// on, or `dualeye --tts`, running
     Say {
@@ -293,6 +310,32 @@ enum Command {
         #[arg(long)]
         language: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum WifiAction {
+    /// The networks the board sees, strongest first
+    Scan,
+    /// Join network SSID and pair this computer; the password comes from
+    /// stdin (an empty line for an open network)
+    Set { ssid: String },
+    /// Turn the board's WiFi on, on the network it has
+    On,
+    /// Turn the board's WiFi off, keeping its network
+    Off,
+    /// Pair this computer with a board whose WiFi is set up already
+    Pair,
+    /// The board forgets its network and its key
+    Forget,
+}
+
+fn parse_transport(s: &str) -> Result<Transport, String> {
+    match s {
+        "auto" => Ok(Transport::Auto),
+        "usb" => Ok(Transport::Usb),
+        "wifi" => Ok(Transport::Wifi),
+        _ => Err("auto, usb or wifi".into()),
+    }
 }
 
 #[derive(Subcommand)]
@@ -353,6 +396,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Timer { language, args }) => return timer(language.as_deref(), &args),
         Some(Command::Music { action }) => return music(action.as_deref()),
+        Some(Command::Wifi { port, action }) => return wifi_command(port, action),
         Some(Command::Mcp { port }) => {
             return match mcp::serve_stdio(port) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -426,6 +470,7 @@ fn main() -> ExitCode {
     let hub = Hub::start().inspect_err(|e| eprintln!("not sharing the board with other processes: {e}")).ok();
     let config = BridgeConfig {
         port: args.port,
+        transport: args.transport,
         interval: Duration::from_millis(args.interval_ms),
         faces: Arc::new(Mutex::new(Faces {
             cpu: args.cpu_face.unwrap_or_default(),
@@ -1089,6 +1134,97 @@ fn models_command(action: Option<ModelsAction>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn wifi_command(port: Option<String>, action: Option<WifiAction>) -> ExitCode {
+    let board = board(port);
+    let wifi_call = |method: &str, params: Value, timeout: Duration| {
+        board.session(|call| call(method, params.clone(), timeout)).map_err(|e| match e {
+            dualeye_core::CallError::Rpc { code: -32001, .. } => "that takes USB: plug the board in, and stream over USB meanwhile".to_string(),
+            dualeye_core::CallError::Rpc { code: -32601, .. } => "the board's firmware has no WiFi: update it to 1.4.3 or newer".to_string(),
+            other => other.to_string(),
+        })
+    };
+    let wait = Duration::from_secs(3);
+    let keep = |reply: &Value, ssid: Option<&str>| -> Result<(), String> {
+        match (reply["id"].as_str(), reply["key"].as_str()) {
+            (Some(id), Some(key)) => wifi::remember(id, key, ssid.or(reply["ssid"].as_str())).map_err(|e| format!("couldn't keep the pairing key: {e}")),
+            _ => Ok(()),
+        }
+    };
+    let result = match action {
+        None => wifi_call("wifi/status", serde_json::json!({}), wait).map(|status| {
+            print_wifi(&status);
+            let paired = wifi::load_paired();
+            let here = status["id"].as_str().is_some_and(|id| paired.iter().any(|p| p.id == id));
+            println!("this computer: {}", if here { "paired" } else { "not paired (dualeye wifi pair, over USB)" });
+        }),
+        Some(WifiAction::Scan) => wifi_call("wifi/scan", serde_json::json!({}), dualeye_core::hub::SCAN_TIMEOUT).map(|r| {
+            for n in r["networks"].as_array().into_iter().flatten() {
+                let lock = if n["secure"].as_bool() == Some(false) { "open" } else { "" };
+                println!("{:>4} dBm  {} {lock}", n["rssi"], n["ssid"].as_str().unwrap_or(""));
+            }
+        }),
+        Some(WifiAction::Set { ssid }) => {
+            eprint!("Password for \"{ssid}\" (empty for an open network): ");
+            let mut password = String::new();
+            let _ = std::io::stdin().read_line(&mut password);
+            let password = password.trim_end_matches(['\r', '\n']).to_string();
+            wifi_call("wifi/set", serde_json::json!({"ssid": ssid, "password": password}), wait).and_then(|reply| {
+                keep(&reply, Some(&ssid))?;
+                // Joining takes a few seconds: say how it went.
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                let mut status = reply;
+                while status["state"] == "connecting" && std::time::Instant::now() < deadline {
+                    thread::sleep(Duration::from_secs(1));
+                    status = wifi_call("wifi/status", serde_json::json!({}), wait)?;
+                }
+                print_wifi(&status);
+                Ok(())
+            })
+        }
+        Some(WifiAction::On | WifiAction::Off) => {
+            let on = matches!(action, Some(WifiAction::On));
+            wifi_call("wifi/set", serde_json::json!({"enabled": on}), wait).and_then(|reply| {
+                keep(&reply, None)?;
+                print_wifi(&reply);
+                Ok(())
+            })
+        }
+        Some(WifiAction::Pair) => wifi_call("wifi/pair", serde_json::json!({}), wait).and_then(|reply| {
+            let ssid = wifi_call("wifi/status", serde_json::json!({}), wait).ok().and_then(|s| s["ssid"].as_str().map(str::to_string));
+            keep(&reply, ssid.as_deref())?;
+            println!("paired with board {}", reply["id"].as_str().unwrap_or("?"));
+            Ok(())
+        }),
+        Some(WifiAction::Forget) => wifi_call("wifi/forget", serde_json::json!({}), wait).and_then(|reply| {
+            if let Some(id) = reply["id"].as_str() {
+                wifi::forget(id).map_err(|e| e.to_string())?;
+            }
+            println!("the board forgot its network");
+            Ok(())
+        }),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_wifi(status: &Value) {
+    let ssid = status["ssid"].as_str().unwrap_or("-");
+    let state = status["state"].as_str().unwrap_or("?");
+    print!("wifi: {state}, network {ssid}");
+    if let Some(ip) = status["ip"].as_str() {
+        print!(", {ip} ({}:{})", status["host"].as_str().unwrap_or(""), status["port"]);
+    }
+    if let Some(rssi) = status["rssi"].as_i64() {
+        print!(", {rssi} dBm");
+    }
+    println!();
 }
 
 fn board(port: Option<String>) -> Board {

@@ -46,9 +46,10 @@ pub mod stt;
 pub mod timers;
 pub mod tts;
 pub mod voice;
+pub mod wifi;
 
 pub use agent::{Agent, Toolbox, Turn};
-pub use bridge::{Bridge, BridgeConfig, BridgeEvent};
+pub use bridge::{Bridge, BridgeConfig, BridgeEvent, Transport};
 pub use claude::{ClaudeMetrics, ClaudeState, ClaudeUsage};
 pub use firmware::{BoardFirmware, ImageInfo};
 pub use flasher::{ChipInfo, Esptool, FlashEvent};

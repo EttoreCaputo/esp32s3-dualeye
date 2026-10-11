@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "link.h"
 #include "media.h"
+#include "net.h"
 #include "playback.h"
 #include "ui_eyes.h"
 #include "voice.h"
@@ -92,6 +93,10 @@ static cJSON *identity(void)
     cJSON_AddStringToObject(id, "firmware", app->version);
     cJSON_AddStringToObject(id, "idf", app->idf_ver);
     cJSON_AddStringToObject(id, "board", "dualeye");
+    // Firmware 1.4.3: which board this is, so a host finds it again on WiFi,
+    // and which way this host reaches it.
+    cJSON_AddStringToObject(id, "id", net_board_id());
+    cJSON_AddStringToObject(id, "transport", link_transport_name(link_active()));
     cJSON_AddNumberToObject(id, "max_payload", LINK_MAX_PAYLOAD);
     cJSON *channels = cJSON_AddArrayToObject(id, "channels");
     cJSON *caps = cJSON_AddArrayToObject(id, "capabilities");
@@ -104,6 +109,7 @@ static cJSON *identity(void)
     // Firmware 1.3: the music face's cover art, and eyes that follow the host's pointer.
     cJSON_AddItemToArray(caps, cJSON_CreateString("music"));
     cJSON_AddItemToArray(caps, cJSON_CreateString("gaze"));
+    cJSON_AddItemToArray(caps, cJSON_CreateString("wifi"));
     if (voice_available()) {
         cJSON_AddItemToArray(channels, cJSON_CreateString("audio_up"));
         cJSON_AddItemToArray(caps, cJSON_CreateString("voice"));
@@ -220,6 +226,9 @@ void rpc_handle(uint8_t *payload, size_t len)
         if (result == NULL && strcmp(message, "method not found") == 0) {
             code = RPC_METHOD_NOT_FOUND;
         }
+    } else if (strncmp(name, "wifi/", 5) == 0) {
+        // Joining a network, and pairing hosts with the board for it.
+        result = net_rpc(name, params, link_rx_transport() == LINK_USB, &code, &message);
     } else if (strcmp(name, "eyes/gaze") == 0) {
         // Where the host's pointer is, -1..1 each way; sent as a notification
         // many times a second while it moves.

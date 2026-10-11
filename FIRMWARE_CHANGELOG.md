@@ -7,6 +7,10 @@ update, so write them for the person plugging the DualEye in.
 Keep one `## <version>` section per release, newest first; the version is the
 one in `version.txt`, which ESP-IDF builds into the image.
 
+## 1.4.3
+
+- **WiFi.** The board can join your WiFi, and the app talks to it over the network instead of the USB cable: the board can sit away from the computer, on any USB charger. Set it up once with the board plugged in, in Settings → **Device** → **WiFi**: pick your network, type the password, done. Only computers paired with the board this way can reach it, and everything between them is encrypted. **Automatic** (the default) uses the cable when it's plugged in and WiFi otherwise, switching by itself; or pick **USB only** or **WiFi only**. The WiFi stays off, and takes no memory, until you set it up.
+
 ## 1.4.2
 
 - **It hears the room.** Between conversations the pet listens for a few sounds: it jumps at a slammed door or something falling (and gets cross if it keeps happening), answers two claps with a smile and three with a dance, perks up when people talk nearby and gets drowsy when the room has been quiet for half an hour. It all happens on the board: nothing is recorded or sent, and muting the mic stops it. Turn it off with **Listen to the room** in the Pet tab.

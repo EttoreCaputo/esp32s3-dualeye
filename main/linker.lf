@@ -5,3 +5,19 @@
 archive: liblvgl__lvgl.a
 entries:
     * (extram_bss)
+
+# mDNS's packet buffer (firmware 1.4.3): nothing of it runs with the cache
+# off, and internal RAM is short. Not the rest of its .bss: its task's TCB
+# is there, and that must be internal.
+[mapping:mdns_extram]
+archive: libespressif__mdns.a
+entries:
+    mdns_send (extram_bss)
+
+# ESP-SR's noise suppression (nsnet3) keeps 19 KB of tables in .bss; the AFE
+# here doesn't run it (voice.c), so they wait in PSRAM and leave internal RAM
+# to the WiFi (firmware 1.4.3).
+[mapping:nsnet3_extram]
+archive: libnsnet3.a
+entries:
+    * (extram_bss)

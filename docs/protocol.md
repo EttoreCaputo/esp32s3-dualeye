@@ -1,6 +1,6 @@
-# USB protocol v2
+# Protocol v2
 
-The board and the host talk over the ESP32-S3's USB Serial/JTAG port (`303a:1001`). Since firmware 0.4.0 the link carries **framed, multiplexed, binary-safe** messages in both directions. Firmware up to 0.3 spoke protocol 1 (newline JSON, host → board only) and must be reflashed.
+The board and the host talk over the ESP32-S3's USB Serial/JTAG port (`303a:1001`) or, from firmware 1.4.3, over WiFi: the same frames on a TCP connection, sealed (see [WiFi](#wifi)). Since firmware 0.4.0 the link carries **framed, multiplexed, binary-safe** messages in both directions. Firmware up to 0.3 spoke protocol 1 (newline JSON, host → board only) and must be reflashed.
 
 Implementations: `main/link.c` and `main/link_frame.c` (board), `host/dualeye-core/src/protocol.rs` and `link.rs` (host), `tools/dualeye_link.py` (test scripts).
 
@@ -60,9 +60,14 @@ Receivers ignore channels they don't know.
 | `music/info` | none | `{"size":240,"chunk":2880,"art":n}` (firmware 1.3): the cover's side, the most it takes per `music/art`, the id of the cover it has (0: none) |
 | `music/art` | `{"id":n,"offset":n,"data":base64}` | `{"received":n}`, plus `"done":true` with the last chunk; the cover of what's playing, for the `music` face (firmware 1.3): 240 × 240 RGB565, little-endian, raw (115200 bytes), at most `chunk` bytes at a time and in order from offset 0. `id` (1 to 2^30) names it: the last chunk puts it on screen wherever the snapshot's `music.art` says that id. Kept in PSRAM, not across a reboot |
 | `eyes/gaze` | `{"x":-0.42,"y":0.1}` | Sent as a notification (no `id`, no answer), up to 20 times a second while the host's mouse pointer moves (firmware 1.3): where it is, -1 (left, top) to 1 (right, bottom) of all the host's screens. The `eyes` face looks there for 6 s after the last one, then about on its own; once the host has sent any, a minute without one (nor a conversation) and the eyes doze off, until the next |
+| `wifi/status` | none | The board's WiFi (firmware 1.4.3): `{"enabled":true,"ssid":"Casa","state":"connected","ip":"192.168.1.42","rssi":-54,"paired":true,"host":"dualeye-c3d4e5.local","port":7340,"id":"a1b2c3d4e5f6"}`. `state`: `off` · `connecting` · `connected` · `no_network` · `wrong_password` · `disconnected` (lost, retrying); `ip` and `rssi` only while connected; `paired`: it has a pairing key. See [WiFi](#wifi) |
+| `wifi/scan` | none | `{"networks":[{"ssid":"Casa","rssi":-48,"secure":true},…]}`: the 2.4 GHz networks it sees, strongest first, each once (at most 20). Takes 2–4 s, during which the board answers nothing else; a link that's trying to join is stopped for it |
+| `wifi/set` | `{"ssid":"Casa","password":"…"}`, or `{"enabled":false}`, or both | USB only. Join `ssid` (password empty or absent for an open network, otherwise 8–63 characters or 64 hex digits) and turn the WiFi on; or turn it on or off, keeping the network. Answers at once with the `wifi/status` result plus `key`, the pairing key (64 hex digits, made the first time); the host polls `wifi/status` to see it join. Kept in NVS |
+| `wifi/pair` | none | USB only. `{"id":"a1b2c3d4e5f6","key":"…"}`: the pairing key again, for another computer. `-32602` when the WiFi was never set up |
+| `wifi/forget` | none | USB only. Forget the network and the pairing key and turn the WiFi off: no host reaches the board on WiFi until it's set up again (with a new key). Answers with `wifi/status` |
 | `debug/audio` | `{"cmd":"tone 440 500"}` | `{}`; the M0 audio self-test, its output comes as `log` lines (see `main/audio_selftest.h`) |
 
-`Tool` and `CallToolResult` have the shapes of the [MCP](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) `tools/list` and `tools/call` results (`name`, `description`, `inputSchema`; `content`, `structuredContent`, `isError`), so the host's MCP server (M2) can pass them through unchanged. A tool that runs but fails (bad argument, out of range) returns `isError: true` with the reason as text. Protocol errors use the standard JSON-RPC codes: `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params (including an unknown tool), `-32603` a reply too long for a frame (firmware 1.3.1; earlier ones sent nothing).
+`Tool` and `CallToolResult` have the shapes of the [MCP](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) `tools/list` and `tools/call` results (`name`, `description`, `inputSchema`; `content`, `structuredContent`, `isError`), so the host's MCP server (M2) can pass them through unchanged. A tool that runs but fails (bad argument, out of range) returns `isError: true` with the reason as text. Protocol errors use the standard JSON-RPC codes: `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid params (including an unknown tool), `-32603` a reply too long for a frame (firmware 1.3.1; earlier ones sent nothing), and `-32001` for a `wifi/...` request that only USB may make (firmware 1.4.3).
 
 Notifications from the board:
 
@@ -132,11 +137,35 @@ Every `ESP_LOG*` line after the link starts, one line per frame. The level lette
    {"protocol":2,"firmware":"1.0.0","idf":"v6.1","board":"dualeye","max_payload":4096,"channels":["ctrl","metrics","log","audio_up","audio_down"],"capabilities":["tools","voice","speaker"]}
    ```
 
-   Firmware 1.3 adds the capabilities `music` (`music/art`) and `gaze` (`eyes/gaze`). `voice` (and `audio_up`) are there when the wake word runs (ESP-SR models found in the `model` partition), `speaker` (and `audio_down`) when the board can play speech.
+   Firmware 1.3 adds the capabilities `music` (`music/art`) and `gaze` (`eyes/gaze`). Firmware 1.4.3 adds `wifi`, and the fields `id` (the board's WiFi MAC, 12 hex digits: the same board on USB and WiFi) and `transport` (`usb` or `wifi`: how this host reaches it). `voice` (and `audio_up`) are there when the wake word runs (ESP-SR models found in the `model` partition), `speaker` (and `audio_down`) when the board can play speech.
 
 3. The host reads faces and rotation with `get_state` and adopts them (the CLI pushes its own with `set_face` / `set_rotation` when given on the command line), then streams `metrics`. Later changes on the host are pushed with `tools/call`.
 
 When the host sees `ready` it repeats step 3. A board that never answers `hello` but prints protocol 1's version line (`{"dualeye":"0.3.0",…}`, in answer to the text line `?version`) is reported as that version, so the app can offer to update it.
+
+## WiFi
+
+From firmware 1.4.3 the board can join a WiFi network, and a host reaches it there instead of on USB. Implementation: `main/net.c` (WiFi, mDNS, TCP), `main/link.c` and `main/link_crypto.c` (the session); `host/dualeye-core/src/wifi.rs`.
+
+**Set-up, over USB.** The host sends `wifi/set` with the network's name and password, and keeps the `key` in the answer: the **pairing key**, 32 random bytes the board makes the first time and keeps in NVS. Only hosts holding it can talk to the board on WiFi; `wifi/pair` hands it to another computer, over USB again, and `wifi/forget` throws it away. The app keeps it in `wifi-boards.json` in DualEye's data folder (mode 0600). The WiFi is off until set up: then nothing of it runs and it takes no memory.
+
+**Finding the board.** On the network the board is `dualeye-<last 6 hex digits of id>.local`, and announces the mDNS service `_dualeye._tcp` with the TXT records `id`, `fw` (firmware version) and `proto` (`2`). It listens on TCP port **7340**, one host at a time: a new connection replaces the old one.
+
+**Handshake.** As soon as a host connects, the board sends a plain (unsealed) notification:
+
+```json
+← {"jsonrpc":"2.0","method":"auth/challenge","params":{"nonce":"<16 bytes, hex>","id":"a1b2c3d4e5f6","protocol":2,"firmware":"1.4.3"}}
+→ {"jsonrpc":"2.0","id":0,"method":"auth","params":{"nonce":"<16 bytes, hex>","proof":"<32 bytes, hex>"}}
+← {"jsonrpc":"2.0","id":0,"result":{"proof":"<32 bytes, hex>"}}
+```
+
+With `K` the pairing key, `nb` the board's nonce and `nh` the host's, and `H(label)` = HMAC-SHA256(`K`, `label` ‖ `nb` ‖ `nh`) (the label as ASCII, the nonces as bytes): the host's proof is `H("dualeye host")`, the board's `H("dualeye board")`. A wrong proof gets error `-32001` and the board hangs up; so does a host that hasn't sent `auth` within 5 s. The host checks the board's proof too, and the `id` against the board it wants.
+
+**Sealed frames.** From the next frame on, both ways, every payload is encrypted with AES-256-GCM: key `H("dualeye h2b")` from host to board, `H("dualeye b2h")` from board to host; nonce 4 zero bytes then a 64-bit little-endian frame counter, from 0 in each direction; the channel byte as associated data. The frame's `len` and CRC cover the sealed payload, ciphertext then the 16-byte tag, so a payload of 4096 bytes is 4112 on the wire. A frame that doesn't open, or one out of order, ends the connection. There's no raw text on WiFi, and `ready` (sent at boot) only goes to USB.
+
+**Which host the board answers.** The board takes frames from USB and WiFi at once, but answers one host: the last one to send `hello`, on either. Answers, notifications, `log` lines and `audio_up` go to it only; what the other one sends is dropped (counted in `get_state` as `link.rx_ignored`), except its `hello`, which makes it the host. A `hello` on USB also closes the WiFi connection, and when the host on WiFi goes, the board goes back to USB. A host on WiFi can't change the WiFi (`wifi/set`, `wifi/pair`, `wifi/forget`: `-32001`). TCP's own flow control holds the host back, so on WiFi nothing is dropped for want of room; the board waits up to 200 ms to send a frame, as on USB, then drops it.
+
+The app chooses with **Settings → Device → Connection**: **Automatic** (USB when the board is plugged in, otherwise the board paired last on WiFi, and back to USB as soon as it's plugged in again; checked every 3 s), **USB only** or **WiFi only**. The CLI has `--transport auto|usb|wifi`, `--port wifi` and `dualeye wifi` (`scan`, `set SSID`, `on`, `off`, `pair`, `forget`).
 
 ## Board tools
 
@@ -156,7 +185,7 @@ Screens are named `left` (the CPU screen) and `right` (the GPU screen); `both` i
 | `play_sound` | `name` (firmware 1.4): the earcons `wake` · `error` · `alarm` · `volume`, and the pet's `boot` · `hello` · `mute` · `unmute` · `think` · `chirp` · `happy` · `giggle` · `excited` · `yawn` · `sneeze` · `snore` · `purr` · `sigh` · `gasp` · `startle` · `boing` · `aww` · `grumble` · `heartbeat` · `smooch` · `hmm` · `confused` · `uh_oh` · `tada` · `yes` · `nope` · `sing` · `beat` · `scan` · `lock` · `hiccup` · `whistle` · `wink` · `boop` · `pfft` · `eep` · `flutter` · `mischief` · `whimper` · `boo` · `glitch` · `pant` · `phew` · `drain` · `charge` | Play one of the board's own sounds, made on the board (after those queued before it; dropped while the host's speech plays). Refused for a pet sound while they're off |
 | `set_pet` | `sounds`: boolean; `react`: boolean (firmware 1.4); `hear`: boolean (firmware 1.4.2); at least one | The board as a pet. `sounds`: whether it makes its pet sounds (`true`, the default): in the eyes' scenes, `boot` and `hello` (the host connecting), `mute`/`unmute`, `think` (heard you), `startle` and a few `snore`s on the eyes face; the earcons play either way, and `set_volume` plays `volume` at the new level. `react`: whether it reacts to what the snapshots tell (`true`, the default): `hot` over 88 °C and `relieved` under 75 °C, `dance` to music, `focus` and `proud` as Claude starts and finishes, `tired` on a low battery and `charged` when plugged in, `yawn` at bedtime, a greeting when you come back. `hear`: whether it listens to the room between conversations (`true`, the default; nothing while the mic is muted, nothing recorded or sent): `surprised` (or `scared` when tired) at a bang, `angry` after three in five minutes, `happy`, `love`, `yawn` or, for three or more, `dance` at claps; people talking a while make it livelier and not bored, and half an hour of quiet makes it drowsy. Bangs and claps are ignored while music plays. Its mood (energy, happiness, affection, kept in NVS) picks the idle scenes and how often they come, tints the eyes face and pitches its sounds; `get_state` has it as `pet` (`mood`, `energy`, `happiness`, `affection`, `away`, `sounds`, `reactions`, `hearing`) |
 | `get_pet` | none (firmware 1.4) | The pet's mood as `structuredContent`: `mood` (`content` · `happy` · `excited` · `loving` · `bored` · `grumpy` · `sad` · `sleepy` · `hot`), `energy`, `happiness`, `affection` (0–1), `away`, `now` (what's moving it: `hot` · `music` · `claude` · `battery_low` · `charging` · `night` · `away` · `bored` · `quiet` · `chatter`), `minute` and `idle_s` as the host last sent them, `lonely_s` (since someone last talked or played with it, or music played), `pitch` (its voice, 1 as written), `pace` (the idle scenes come every 30–120 s times this), `recent` (its last six reactions, newest first: `what` it reacted to, the `scene`, `ago_s`; from 1.4.2 also `bang`, `claps`, `noisy`), the settings `sounds`, `reactions`, `idle_scenes`, `hearing` (1.4.2), and while it listens `room`: `floor_db` and `level_db` (the room's background and current level, dBFS), `quiet_s` (since the last sound worth noticing) and `chatter` |
-| `get_state` | none | Firmware, uptime, metrics state, each screen's face, source (firmware 1.1), whether it has a picture (`image`, firmware 1.1), rotation and brightness, voice (`available`, `wake_word`, `wake_word_id`, `model`, `wake_words` the board has models for, `muted`, `state`), audio (`speaker`, `volume`, `playing`), the pet (firmware 1.4: `mood`, `energy`, `happiness`, `affection`, `away`, `sounds`, `reactions`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (as `structuredContent`) |
+| `get_state` | none | Firmware, uptime, metrics state, each screen's face, source (firmware 1.1), whether it has a picture (`image`, firmware 1.1), rotation and brightness, voice (`available`, `wake_word`, `wake_word_id`, `model`, `wake_words` the board has models for, `muted`, `state`), audio (`speaker`, `volume`, `playing`), the pet (firmware 1.4: `mood`, `energy`, `happiness`, `affection`, `away`, `sounds`, `reactions`), UI load (`busy_pct` and `max_frame_ms` of `lv_timer_handler` over the last 5 s), free memory, link counters (firmware 1.4.3: also `rx_ignored` and `transport`), the WiFi (firmware 1.4.3: `wifi`, as `wifi/status` says) (as `structuredContent`) |
 
 Example:
 
@@ -169,7 +198,7 @@ From the CLI: `dualeye tools`, `dualeye call set_face --screen left --face rings
 
 ## Sharing the board between host processes
 
-Only one process can hold the port. The bridge (in the app, or `dualeye` streaming) runs a **hub**: a TCP server on `127.0.0.1`, on a port the OS picks, announced with a random token in `hub.json` in DualEye's data folder (mode 0600). Other processes (`dualeye mcp`, `dualeye call`) use the board through it; when there is no hub, they open the port for one call and close it. Implementation: `host/dualeye-core/src/hub.rs`.
+Only one process can hold the port (or the board's WiFi connection). The bridge (in the app, or `dualeye` streaming) runs a **hub**: a TCP server on `127.0.0.1`, on a port the OS picks, announced with a random token in `hub.json` in DualEye's data folder (mode 0600). Other processes (`dualeye mcp`, `dualeye call`) use the board through it; when there is no hub, they open the port for one call and close it. Implementation: `host/dualeye-core/src/hub.rs`.
 
 One JSON-RPC 2.0 message per line, one request at a time. The first request must be `hello` with the token; otherwise the hub answers `-32001` and closes the connection.
 

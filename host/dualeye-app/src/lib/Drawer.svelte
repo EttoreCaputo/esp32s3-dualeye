@@ -15,6 +15,10 @@
     type Hardware,
     type McpInfo,
     type PortInfo,
+    type Transport,
+    type WifiInfo,
+    type WifiNetwork,
+    type WifiStatus,
     type PowerHelper,
     type Personality,
     type QuipLevel,
@@ -70,6 +74,88 @@
     const id = setInterval(load, 2000);
     return () => clearInterval(id);
   });
+
+  // The Device tab's connection: USB, WiFi or both, and the board's WiFi.
+  const TRANSPORTS: [Transport, string, string][] = [
+    ["auto", "Automatic", "USB, else WiFi"],
+    ["usb", "USB only", "cable"],
+    ["wifi", "WiFi only", "network"],
+  ];
+  let wifi = $state<WifiInfo | null>(null);
+  let wifiBusy = $state<"" | "scan" | "join" | "toggle" | "forget" | "pair" | "transport">("");
+  let wifiError = $state("");
+  let wifiForm = $state(false);
+  let networks = $state<WifiNetwork[] | null>(null);
+  let wifiSsid = $state("");
+  let wifiPassword = $state("");
+  let forgetting = $state(false);
+
+  const loadWifi = () =>
+    monitor
+      .wifiInfo()
+      .then((w) => (wifi = w))
+      .catch(() => {});
+
+  $effect(() => {
+    if (!open || tab !== "device") return;
+    loadWifi();
+    const id = setInterval(loadWifi, 3000);
+    return () => clearInterval(id);
+  });
+
+  const transport = $derived(wifi?.transport ?? "auto");
+  const onWifi = $derived(monitor.link === "connected" && !!monitor.port?.startsWith("WiFi"));
+  const pairedHere = $derived(!!wifi?.board && wifi.paired.some((p) => p.id === wifi?.board?.id));
+
+  function wifiLabel(b: WifiStatus): string {
+    const net = b.ssid ? `“${b.ssid}”` : "";
+    switch (b.state) {
+      case "off":
+        return b.ssid ? `Off · ${net}` : "Not set up";
+      case "connecting":
+        return `Joining ${net}…`;
+      case "connected":
+        return `On ${net}`;
+      case "no_network":
+        return `${net} not found, retrying`;
+      case "wrong_password":
+        return `Wrong password for ${net}`;
+      default:
+        return `Reconnecting to ${net}…`;
+    }
+  }
+
+  /** 0 to 3 bars from the board's signal strength. */
+  const bars = (rssi?: number) => (rssi === undefined ? "" : rssi > -60 ? "▂▄▆" : rssi > -70 ? "▂▄" : "▂");
+
+  async function wifiDo(what: typeof wifiBusy, job: () => Promise<unknown>) {
+    wifiBusy = what;
+    wifiError = "";
+    try {
+      await job();
+      await loadWifi();
+    } catch (e) {
+      wifiError = String(e);
+    } finally {
+      wifiBusy = "";
+    }
+  }
+
+  const setTransport = (t: Transport) => wifiDo("transport", () => monitor.setTransport(t));
+
+  const scanWifi = () =>
+    wifiDo("scan", async () => {
+      networks = await monitor.wifiScan();
+      if (!wifiSsid && networks.length) wifiSsid = networks[0].ssid;
+    });
+
+  const joinWifi = () =>
+    wifiDo("join", async () => {
+      await monitor.wifiSetup(wifiSsid.trim(), wifiPassword);
+      wifiPassword = "";
+      wifiForm = false;
+      networks = null;
+    });
 
   // The Timers tab: read every second while it's open, so the times run.
   let timerError = $state("");
@@ -1437,6 +1523,119 @@
         </section>
       {:else if tab === "device"}
         <section>
+          <h3>Connection</h3>
+          <p class="hint">
+            How the app reaches the board. WiFi needs firmware 1.4.3 or newer, set up once over USB below. The cable still powers the board, and
+            flashing it always takes USB.
+          </p>
+          <div class="ports">
+            {#each TRANSPORTS as [key, name, note] (key)}
+              <label class="port" class:checked={transport === key}>
+                <input type="radio" name="transport" checked={transport === key} disabled={wifiBusy === "transport"} onchange={() => setTransport(key)} />
+                <span class="radio"></span>
+                <span class="pname">{name}</span>
+                <span class="pmeta">{note}</span>
+              </label>
+            {/each}
+          </div>
+          {#if monitor.link === "connected" && monitor.port}
+            <p class="hint conn">Connected {onWifi ? `on ${monitor.port}` : `on USB · ${monitor.port}`}</p>
+          {/if}
+          {#if transport !== "usb" && wifi && !wifi.paired.length}
+            <p class="hint">No board is set up for WiFi on this computer yet.</p>
+          {/if}
+        </section>
+
+        <section class="wifi">
+          <h3>WiFi</h3>
+          {#if !wifi}
+            <p class="empty">Asking the board…</p>
+          {:else if !wifi.board}
+            <p class="empty">{wifi.error ?? "The board doesn't answer."}</p>
+          {:else}
+            {@const b = wifi.board}
+            <div class="wstatus">
+              <span class="wdot {b.state}"></span>
+              <span class="pname">{wifiLabel(b)}</span>
+              <span class="pmeta">{b.ip ? `${b.ip} ${bars(b.rssi)}` : b.host}</span>
+            </div>
+            {#if b.ssid}
+              <label class="switch">
+                <input type="checkbox" checked={b.enabled} disabled={!!wifiBusy || onWifi} onchange={(e) => wifiDo("toggle", () => monitor.wifiEnable(e.currentTarget.checked))} />
+                <span class="track"><span class="knob"></span></span>
+                <span class="slabel">WiFi on the board</span>
+              </label>
+            {/if}
+            {#if b.paired && !pairedHere}
+              <p class="hint">The board's WiFi was set up from another computer: pair this one to reach it too.</p>
+              <div class="actions">
+                <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => wifiDo("pair", () => monitor.wifiPair())}>
+                  {wifiBusy === "pair" ? "Pairing…" : "Pair this computer"}
+                </button>
+              </div>
+            {/if}
+            {#if wifiForm || !b.ssid}
+              <p class="hint">
+                The board joins a 2.4 GHz network. This goes over USB and pairs this computer with the board: only paired computers reach it on
+                WiFi, and everything between them is encrypted.
+              </p>
+              {#if onWifi}
+                <p class="hint error">Plug the board in with the USB cable and pick Automatic or USB only to change its WiFi.</p>
+              {:else}
+                <div class="actions">
+                  <button class="btn" disabled={!!wifiBusy} onclick={scanWifi}>{wifiBusy === "scan" ? "Looking…" : networks ? "Look again" : "Find networks"}</button>
+                  {#if b.ssid}<button class="btn" onclick={() => ((wifiForm = false), (networks = null))}>Cancel</button>{/if}
+                </div>
+                {#if networks}
+                  <div class="ports nets">
+                    {#each networks as n (n.ssid)}
+                      <label class="port" class:checked={wifiSsid === n.ssid}>
+                        <input type="radio" name="ssid" checked={wifiSsid === n.ssid} onchange={() => (wifiSsid = n.ssid)} />
+                        <span class="radio"></span>
+                        <span class="pname">{n.ssid}</span>
+                        <span class="pmeta">{n.secure ? "🔒 " : ""}{bars(n.rssi)}</span>
+                      </label>
+                    {:else}
+                      <p class="empty">No network found. Is a 2.4 GHz one in range?</p>
+                    {/each}
+                  </div>
+                {/if}
+                <div class="tform">
+                  <input class="ttext" type="text" maxlength="32" spellcheck="false" placeholder="Network name" aria-label="Network name" bind:value={wifiSsid} />
+                  <input
+                    class="ttext"
+                    type="password"
+                    maxlength="64"
+                    autocomplete="off"
+                    placeholder="Password (empty for an open network)"
+                    aria-label="WiFi password"
+                    bind:value={wifiPassword}
+                  />
+                  <button
+                    class="btn small primary"
+                    disabled={!!wifiBusy || !wifiSsid.trim() || (wifiPassword.length > 0 && wifiPassword.length < 8)}
+                    onclick={joinWifi}>{wifiBusy === "join" ? "Sending…" : "Connect"}</button
+                  >
+                </div>
+              {/if}
+            {:else if forgetting}
+              <p class="hint">The board forgets “{b.ssid}” and its key: no computer reaches it on WiFi until it's set up again.</p>
+              <div class="actions">
+                <button class="btn primary" onclick={() => ((forgetting = false), wifiDo("forget", () => monitor.wifiForget()))}>Forget</button>
+                <button class="btn" onclick={() => (forgetting = false)}>Cancel</button>
+              </div>
+            {:else}
+              <div class="actions">
+                <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => (wifiForm = true)}>Change network</button>
+                <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => (forgetting = true)}>Forget network</button>
+              </div>
+            {/if}
+          {/if}
+          {#if wifiError}<p class="hint error">{wifiError}</p>{/if}
+        </section>
+
+        {#if transport !== "wifi"}
+        <section>
           <h3>Serial port</h3>
           <p class="hint">The board is found automatically by its Espressif USB ID. Pin a port only if you have more than one.</p>
           <div class="ports">
@@ -1458,6 +1657,7 @@
             {/each}
           </div>
         </section>
+        {/if}
 
         {#if monitor.message && monitor.link !== "connected"}
           <section class="alert" class:error={monitor.link === "offline"}>
@@ -1898,6 +2098,50 @@
     user-select: text;
   }
 
+  .wstatus {
+    display: grid;
+    grid-template-columns: 10px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 12px;
+    margin-bottom: 10px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .wdot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--faint);
+  }
+  .wdot.connected {
+    background: #5ee38a;
+    box-shadow: 0 0 6px #5ee38a;
+  }
+  .wdot.connecting,
+  .wdot.disconnected {
+    background: var(--warm);
+    animation: blink 1s ease-in-out infinite;
+  }
+  .wdot.no_network,
+  .wdot.wrong_password {
+    background: var(--hot);
+  }
+  .wifi .switch {
+    margin-bottom: 10px;
+  }
+  .wifi .tform {
+    margin-top: 10px;
+  }
+  .ports.nets {
+    margin-top: 10px;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .hint.conn {
+    margin-top: 8px;
+  }
   .ports {
     display: flex;
     flex-direction: column;

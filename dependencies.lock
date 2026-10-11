@@ -20,7 +20,7 @@ dependencies:
       type: service
     version: 0.5.3
   espressif/dl_fft:
-    component_hash: 3e8f7d34e04bfa6333f289a6d126745bebe0cee9311b81a6a5d106047f63ef65
+    component_hash: 965be7152132b365061abf5fc5fc7b85e525f73b94a204cdda61cfe9572c0d77
     dependencies:
     - name: idf
       require: private
@@ -28,14 +28,14 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 0.7.0
+    version: 0.8.0
   espressif/esp-dl:
-    component_hash: d792e72ab3858d805d8918d1215a862541344625f62134597866834de666fd04
+    component_hash: 3148b2692a2943d7e35401dc10a181b6ba83515ec70ef51499ac5d2593eef3e2
     dependencies:
     - name: espressif/dl_fft
       registry_url: https://components.espressif.com
       require: private
-      version: '>=0.6.0'
+      version: '>=0.8.0'
     - name: espressif/esp_new_jpeg
       registry_url: https://components.espressif.com
       require: private
@@ -56,7 +56,7 @@ dependencies:
     - esp32s2
     - esp32s3
     - esp32s31
-    version: 3.3.12
+    version: 3.3.13
   espressif/esp-sr:
     component_hash: 698154c0a94f6c8ac3e1ac669ec3ea741e6f848022b0f89030eddb23f3a31e14
     dependencies:
@@ -128,6 +128,16 @@ dependencies:
     - esp32c61
     - esp32h4
     version: 1.0.2
+  espressif/mdns:
+    component_hash: b5b30022c46302eab89c1d2e3b6fb5918a627563a7462f0ee284b22b9a934967
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.14.0
   idf:
     source:
       type: idf
@@ -144,8 +154,9 @@ direct_dependencies:
 - espressif/esp-sr
 - espressif/esp_codec_dev
 - espressif/esp_lcd_gc9a01
+- espressif/mdns
 - idf
 - lvgl/lvgl
-manifest_hash: 73cec209af931b278ef2e86722c5fad0bc5b0ec152c45a909d8bb6dcaedca820
+manifest_hash: 182829d9ee20ca1fdacc8d6aa96dda2d4fc520396e5fd5a884fc3ab2e46127a6
 target: esp32s3
 version: 3.0.0

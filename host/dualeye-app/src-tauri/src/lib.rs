@@ -68,7 +68,7 @@ use dualeye_core::timers::{self, Pomodoro, ShowOn, TimerInfo, Timers};
 use dualeye_core::voice::{self, Spoken, VoiceConfig};
 use dualeye_core::{
     Agent, Board, BoardFirmware, Bridge, BridgeConfig, BridgeEvent, ChipInfo, Collector, Esptool, Faces, FlashEvent, Hub, HubStatus, ImageInfo, PortInfo, Reading, Rotations, Snapshot, firmware,
-    keep_warm, mcp, media, serial,
+    Transport, keep_warm, mcp, media, serial, wifi,
 };
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -85,6 +85,9 @@ const FIRMWARE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../
 struct Settings {
     /// `None` auto-detects the board.
     port: Option<String>,
+    /// USB, WiFi, or USB when plugged in and WiFi otherwise.
+    #[serde(default)]
+    transport: Transport,
     #[serde(default)]
     faces: Faces,
     #[serde(default)]
@@ -937,15 +940,148 @@ async fn set_port(app: AppHandle, port: Option<String>) -> Result<(), String> {
             // The bridge comes back with the new setting once esptool is done.
             return;
         }
-        // Dropping the old bridge joins its thread and releases the port.
-        let old = state.bridge.lock().unwrap().take();
-        drop(old);
-        *state.link.lock().unwrap() = Link { kind: "searching", ..Default::default() };
-        let bridge = start_bridge(&app, port);
-        *state.bridge.lock().unwrap() = Some(bridge);
+        restart_bridge(&app, port);
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Stop the bridge and start it again, with `port`.
+fn restart_bridge(app: &AppHandle, port: Option<String>) {
+    let state = app.state::<AppState>();
+    // Dropping the old bridge joins its thread and releases the port.
+    let old = state.bridge.lock().unwrap().take();
+    drop(old);
+    *state.link.lock().unwrap() = Link { kind: "searching", ..Default::default() };
+    let bridge = start_bridge(app, port);
+    *state.bridge.lock().unwrap() = Some(bridge);
+}
+
+/// USB, WiFi or both (`auto`): the bridge starts again the new way.
+#[tauri::command]
+async fn set_transport(app: AppHandle, transport: Transport) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let port = {
+            let mut settings = state.settings.lock().unwrap();
+            settings.transport = transport;
+            settings.port.clone()
+        };
+        state.save_settings();
+        if !state.device_busy.load(Ordering::SeqCst) {
+            restart_bridge(&app, port);
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// A board this computer can reach on WiFi, without its key.
+#[derive(Serialize)]
+struct PairedBoard {
+    id: String,
+    ssid: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WifiInfo {
+    transport: Transport,
+    paired: Vec<PairedBoard>,
+    /// What the board says about its WiFi (`wifi/status`); `None` when it
+    /// doesn't answer, or its firmware predates WiFi (1.4.3), with `error`.
+    board: Option<serde_json::Value>,
+    error: Option<String>,
+}
+
+/// One `wifi/...` request to the board: through the bridge, or over USB.
+fn wifi_call(method: &str, params: serde_json::Value, timeout: std::time::Duration) -> Result<serde_json::Value, String> {
+    board().session(|call| call(method, params.clone(), timeout)).map_err(|e| match e {
+        dualeye_core::CallError::Rpc { code: -32001, .. } => "plug the board in with the USB cable to change its WiFi".to_string(),
+        dualeye_core::CallError::Rpc { code: -32601, .. } => "the board's firmware has no WiFi: update it to 1.4.3 or newer".to_string(),
+        other => other.to_string(),
+    })
+}
+
+const WIFI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[tauri::command]
+async fn wifi_info(app: AppHandle) -> Result<WifiInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let transport = state.settings.lock().unwrap().transport;
+        let paired = wifi::load_paired().into_iter().map(|b| PairedBoard { id: b.id, ssid: b.ssid }).collect();
+        let (board, error) = match wifi_call("wifi/status", serde_json::json!({}), WIFI_TIMEOUT) {
+            Ok(status) => (Some(status), None),
+            Err(e) => (None, Some(e)),
+        };
+        WifiInfo { transport, paired, board, error }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The networks the board sees, strongest first.
+#[tauri::command]
+async fn wifi_scan() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| wifi_call("wifi/scan", serde_json::json!({}), dualeye_core::hub::SCAN_TIMEOUT))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Keep the pairing key a `wifi/set` or `wifi/pair` answer carries.
+fn keep_key(reply: &serde_json::Value, ssid: Option<&str>) -> Result<(), String> {
+    let (Some(id), Some(key)) = (reply["id"].as_str(), reply["key"].as_str()) else { return Ok(()) };
+    wifi::remember(id, key, ssid.or(reply["ssid"].as_str())).map_err(|e| format!("couldn't keep the pairing key: {e}"))
+}
+
+/// Put the board on network `ssid` (over USB) and pair this computer with it.
+#[tauri::command]
+async fn wifi_setup(ssid: String, password: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let reply = wifi_call("wifi/set", serde_json::json!({"ssid": ssid, "password": password}), WIFI_TIMEOUT)?;
+        keep_key(&reply, Some(&ssid))?;
+        Ok(reply)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Turn the board's WiFi on or off, keeping its network.
+#[tauri::command]
+async fn wifi_enable(on: bool) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let reply = wifi_call("wifi/set", serde_json::json!({"enabled": on}), WIFI_TIMEOUT)?;
+        keep_key(&reply, None)?;
+        Ok(reply)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Make the board forget its network and its key: no computer reaches it on WiFi any more.
+#[tauri::command]
+async fn wifi_forget() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let reply = wifi_call("wifi/forget", serde_json::json!({}), WIFI_TIMEOUT)?;
+        if let Some(id) = reply["id"].as_str() {
+            wifi::forget(id).map_err(|e| e.to_string())?;
+        }
+        Ok(reply)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Pair this computer with a board whose WiFi is set up already (by another computer).
+#[tauri::command]
+async fn wifi_pair() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let reply = wifi_call("wifi/pair", serde_json::json!({}), WIFI_TIMEOUT)?;
+        let status = wifi_call("wifi/status", serde_json::json!({}), WIFI_TIMEOUT).unwrap_or_default();
+        keep_key(&reply, status["ssid"].as_str())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1253,7 +1389,8 @@ fn start_bridge(app: &AppHandle, port: Option<String>) -> Bridge {
     let (claude_alerts, timers) = (state.claude_alerts.clone(), state.timers.clone());
     let (music, follow_pointer) = (state.music.clone(), state.follow_pointer.clone());
     let quips = state.quips.clone();
-    let config = BridgeConfig { port, faces, rotation, hub, voice, claude_alerts, timers, music, follow_pointer, quips, ..Default::default() };
+    let transport = state.settings.lock().unwrap().transport;
+    let config = BridgeConfig { port, transport, faces, rotation, hub, voice, claude_alerts, timers, music, follow_pointer, quips, ..Default::default() };
     Bridge::spawn(config, move |event| {
         if let Some(state) = handle.try_state::<AppState>() {
             state.link.lock().unwrap().record(&event);
@@ -1411,7 +1548,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, quips_info, set_quips, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_transport, wifi_info, wifi_scan, wifi_setup, wifi_enable, wifi_forget, wifi_pair, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, quips_info, set_quips, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

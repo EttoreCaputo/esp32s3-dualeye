@@ -12,6 +12,8 @@ extern "C" {
 #endif
 
 #define LINK_MAX_PAYLOAD 4096
+/* On WiFi each payload carries a 16-byte tag (link_crypto.h). */
+#define LINK_MAX_WIRE_PAYLOAD (LINK_MAX_PAYLOAD + 16)
 /* Channel byte, u16 length, CRC. */
 #define LINK_FRAME_OVERHEAD 5
 /* COBS adds one byte per 254, plus one; then a delimiter on each side. */
@@ -35,7 +37,8 @@ size_t link_frame_encode(uint8_t chan, const uint8_t *payload, size_t len, uint8
 
 /** Decode one piece of the stream between two 0x00 delimiters, in place.
  * On success `*chan`, `*payload` (pointing into `buf`) and `*len` are set.
- * Fails on bad COBS, a length mismatch or a CRC mismatch. */
+ * Fails on bad COBS, a length mismatch, more than LINK_MAX_WIRE_PAYLOAD or a
+ * CRC mismatch. */
 bool link_frame_decode(uint8_t *buf, size_t n, uint8_t *chan, uint8_t **payload, size_t *len);
 
 #ifdef __cplusplus

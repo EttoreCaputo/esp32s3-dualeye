@@ -8,7 +8,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define LVGL_DRAW_BUF_LINES 40
+/* Two buffers per screen, in internal DMA RAM: 30 lines (eight strips a
+ * frame) leave room for the WiFi (firmware 1.4.3). */
+#define LVGL_DRAW_BUF_LINES 30
 #define LVGL_TICK_PERIOD_MS 2
 /* 6 KB left about 1 KB free (M0); the toast and later overlays need more. */
 #define LVGL_TASK_STACK_SIZE (8 * 1024)

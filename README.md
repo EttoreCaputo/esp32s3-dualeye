@@ -47,6 +47,12 @@ Then plug the board in by USB and open the app. It finds the board on its own, a
 
 Closing the window keeps the app running in the tray, so the screens stay live.
 
+### On WiFi
+
+From firmware 1.4.3 the board can join your WiFi, and the app talks to it over the network instead of the cable: handy when the board sits away from the computer, on a phone charger. It still needs USB once, to set it up. In Settings → **Device** → **WiFi**, with the board plugged in, press **Find networks**, pick yours (2.4 GHz), type the password and **Connect**. That also pairs this computer with the board: only paired computers can reach it on WiFi, and everything between them is encrypted. To use it from another computer too, plug it in there once and press **Pair this computer**.
+
+Under **Connection**, **Automatic** (the default) uses USB when the board is plugged in and WiFi otherwise, and goes back to USB as soon as you plug it in again; **USB only** and **WiFi only** stick to one. **WiFi on the board** turns its WiFi off without forgetting the network, and **Forget network** makes it forget the network and the pairing. Flashing a new firmware always takes USB. On the command line: `dualeye wifi set "My network"` (over USB), then `dualeye --transport wifi`.
+
 ## Watch faces
 
 Each screen shows one of thirteen faces: click a screen in the app's window to pick its face, turn it, or put the same face on the other screen too. Any face goes on either screen:
@@ -199,7 +205,7 @@ Paste the two, generate, listen to the three voices, save the one you like, then
 Unless you pick a [cloud model](#cloud-models), nothing you say leaves your computer. There is no account and no telemetry.
 
 - **The board** only listens for the wake word on its own; before it, nothing is sent. Muting the mic stops even that.
-- **Audio** goes over USB to the app, is kept in memory until it is transcribed, then dropped. It is written to disk only if you turn on **Keep recordings** (for debugging).
+- **Audio** goes over USB to the app (or over WiFi, encrypted with a key only the paired computers have, from firmware 1.4.3), is kept in memory until it is transcribed, then dropped. It is written to disk only if you turn on **Keep recordings** (for debugging).
 - **Transcripts and answers** are shown in the Voice tab (the last 50) and forgotten when the app quits.
 - **Speech recognition, the language model and the voice** run as local programs reachable from this computer only (`127.0.0.1`). A cloud model gets what it works on instead: the recording for speech, the transcript, the board's state and the conversation's last few exchanges for the language model, the answer for the voice (Groq or ElevenLabs).
 - **The network** is used only to reach the cloud models you pick and to download what you ask for: models from Hugging Face (checked against a SHA-256), Piper from PyPI, and Python the first time the app flashes the board.
@@ -495,7 +501,7 @@ cd host/dualeye-app && npm run check
 
 ## Wire format
 
-Since firmware 0.4.0 the board and the host speak **protocol v2**: COBS frames with a channel byte and a CRC, carrying JSON-RPC (`hello`, `tools/list`, `tools/call`), sensor snapshots, audio and the board's log on one USB link. The full spec, with the board tools, is in [docs/protocol.md](docs/protocol.md). Firmware 0.3 and older spoke newline JSON and must be updated (the app offers it).
+Since firmware 0.4.0 the board and the host speak **protocol v2**: COBS frames with a channel byte and a CRC, carrying JSON-RPC (`hello`, `tools/list`, `tools/call`), sensor snapshots, audio and the board's log on one USB link; from firmware 1.4.3 also on a TCP connection over WiFi, paired over USB and encrypted with AES-256-GCM. The full spec, with the board tools, is in [docs/protocol.md](docs/protocol.md). Firmware 0.3 and older spoke newline JSON and must be updated (the app offers it).
 
 A `metrics` frame carries one snapshot:
 

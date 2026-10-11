@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "lvgl_port.h"
 #include "mbedtls/base64.h"
@@ -56,7 +57,8 @@ uint32_t art_generation(void)
 
 static cJSON *write_chunk(const cJSON *params, const char **message)
 {
-    static uint8_t buf[ART_CHUNK];
+    // In PSRAM: internal RAM is short since the WiFi came (firmware 1.4.3).
+    EXT_RAM_BSS_ATTR static uint8_t buf[ART_CHUNK];
     const cJSON *id = cJSON_GetObjectItemCaseSensitive(params, "id");
     const cJSON *offset = cJSON_GetObjectItemCaseSensitive(params, "offset");
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(params, "data");

@@ -13,7 +13,7 @@
 //! | Method | Result |
 //! |--------|--------|
 //! | `hello` `{"token","client"}` | `{"bridge", "board": Hello or null, "port"}` |
-//! | `tools/list`, `tools/call`, `media/...` | Passed to the board as they are |
+//! | `tools/list`, `tools/call`, `media/...`, `wifi/...` | Passed to the board as they are |
 //! | `host/snapshot` | `{"snapshot": Snapshot or null, "age_ms"}`: the bridge's latest sample |
 //! | `host/say` `{"text","language"?}` | How it was spoken, once played |
 //! | `host/claude_hook` (a Claude Code hook's JSON) | `{"taken"}`: whether a bridge takes alerts |
@@ -47,6 +47,8 @@ const SAY_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// How long the board gets for one tool call.
 pub const TOOL_TIMEOUT: Duration = Duration::from_secs(3);
+/// A WiFi scan (`wifi/scan`) goes over every channel.
+pub const SCAN_TIMEOUT: Duration = Duration::from_secs(12);
 /// A client waits this long for the hub, which waits [`TOOL_TIMEOUT`] for the board.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(100);
@@ -315,8 +317,9 @@ pub(crate) type HookFn = Arc<dyn Fn(Value) + Send + Sync>;
 fn handle(shared: &Shared, method: &str, params: Value) -> Result<Value, (i64, String)> {
     match method {
         "tools/list" | "tools/call" => {}
-        // Image uploads (firmware 1.1); writes take a moment when the flash erases.
-        m if m.starts_with("media/") => {}
+        // Image uploads (firmware 1.1), writes taking a moment when the flash
+        // erases; the WiFi set-up (firmware 1.4.3), a scan taking seconds.
+        m if m.starts_with("media/") || m.starts_with("wifi/") => {}
         "host/say" => {
             let text = params.get("text").and_then(Value::as_str).filter(|t| !t.trim().is_empty());
             let Some(text) = text else { return Err((INVALID_PARAMS, "expected {\"text\": string, \"language\"?: \"it\" | \"en\"}".into())) };
@@ -361,7 +364,8 @@ fn handle(shared: &Shared, method: &str, params: Value) -> Result<Value, (i64, S
     let tool = (method == "tools/call").then(|| params.get("name").and_then(Value::as_str).unwrap_or("").to_string());
     let reply = {
         let _one = shared.one_at_a_time.lock().unwrap();
-        link.call(method, params, TOOL_TIMEOUT)
+        let timeout = if method == "wifi/scan" { SCAN_TIMEOUT } else { TOOL_TIMEOUT };
+        link.call(method, params, timeout)
     };
     if let Some(tool) = tool {
         shared.calls.fetch_add(1, Ordering::Relaxed);
@@ -624,7 +628,12 @@ impl Board {
     }
 
     fn open_direct(&self) -> Result<Link, CallError> {
-        let port = self.port.clone().or_else(serial::detect_board).ok_or_else(|| CallError::Unavailable("board not found on USB".into()))?;
+        let port = self
+            .port
+            .clone()
+            .or_else(serial::detect_board)
+            .or_else(crate::wifi::default_target)
+            .ok_or_else(|| CallError::Unavailable("board not found on USB".into()))?;
         let link = Link::open(&port, |_| {}).map_err(|e| CallError::Unavailable(format!("{port}: {e}")))?;
         link.handshake(Duration::from_secs(3)).map_err(|e| match e {
             CallError::Timeout => CallError::Unavailable(format!("{port}: the board does not answer (firmware 0.4 or later needed)")),

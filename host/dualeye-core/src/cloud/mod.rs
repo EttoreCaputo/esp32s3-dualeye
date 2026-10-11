@@ -279,7 +279,7 @@ pub fn set_api_key(provider: &Provider, key: Option<&str>) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
@@ -287,7 +287,7 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     fs::write(path, bytes)
 }
 

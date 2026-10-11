@@ -16,6 +16,7 @@
 #include "playback.h"
 #include "ui_eyes.h"
 #include "media.h"
+#include "net.h"
 #include "ui_toast.h"
 #include "ui_voice.h"
 #include "voice.h"
@@ -548,6 +549,9 @@ static bool tool_get_state(const cJSON *args, char *text, cJSON **structured)
     cJSON_AddNumberToObject(l, "rx_bad", link.rx_bad);
     cJSON_AddNumberToObject(l, "tx_frames", link.tx_frames);
     cJSON_AddNumberToObject(l, "tx_dropped", link.tx_dropped);
+    cJSON_AddNumberToObject(l, "rx_ignored", link.rx_ignored);
+    cJSON_AddStringToObject(l, "transport", link_transport_name(link_active()));
+    cJSON_AddItemToObject(st, "wifi", net_status());
     *structured = st;
     // The text is filled in by the caller from `structured`.
     text[0] = '\0';

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "board_display.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_rom_crc.h"
@@ -275,7 +276,8 @@ static cJSON *begin(const cJSON *params, const char **message)
 
 static cJSON *write_chunk(const cJSON *params, const char **message)
 {
-    static uint8_t buf[MAX_CHUNK];
+    // In PSRAM: internal RAM is short since the WiFi came (firmware 1.4.3).
+    EXT_RAM_BSS_ATTR static uint8_t buf[MAX_CHUNK];
     const cJSON *offset = cJSON_GetObjectItemCaseSensitive(params, "offset");
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(params, "data");
     if (!s_upload.active) {
