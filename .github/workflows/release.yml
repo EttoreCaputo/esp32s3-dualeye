@@ -220,13 +220,37 @@ jobs:
         run: npm ci
         working-directory: host/dualeye-app
 
+      # The AppImage bundler downloads linuxdeploy and AppRun from GitHub on
+      # every build; keep them so a dropped connection there can't fail the job.
+      - name: Cache the AppImage tools
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tauri
+          key: tauri-appimage-tools-${{ runner.os }}
+
       - uses: tauri-apps/tauri-action@v0
+        id: bundle
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           projectPath: host/dualeye-app
           releaseId: ${{ needs.release.outputs.id }}
           # e.g. DualEye_1.0.0_macos-apple-silicon.dmg, DualEye_1.0.0_windows-x64-setup.exe
+          assetNamePattern: "[name]_[version]_${{ matrix.platform }}[setup][ext]"
+          args: ${{ matrix.args }} --config src-tauri/${{ matrix.sidecars || 'tauri.sidecars.conf.json' }}
+
+      # One more try when the first fails, usually a download that timed out
+      # or was reset (linuxdeploy, WiX, NSIS). The compile is cached by then.
+      - name: Retry the bundle
+        if: steps.bundle.outcome == 'failure'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          projectPath: host/dualeye-app
+          releaseId: ${{ needs.release.outputs.id }}
           assetNamePattern: "[name]_[version]_${{ matrix.platform }}[setup][ext]"
           args: ${{ matrix.args }} --config src-tauri/${{ matrix.sidecars || 'tauri.sidecars.conf.json' }}
 

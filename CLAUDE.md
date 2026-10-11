@@ -15,4 +15,19 @@ Whenever you change the firmware (`main/`, `sdkconfig*`, `partitions.csv`) or an
    - app UI: `npm run check` in `host/dualeye-app`
 5. Run the tests: `cargo test --workspace` in `host/`.
 
-Report the new version and the build results when done.
+## Rule: the app (software) version goes up too
+
+The desktop app has its own version, separate from the firmware's. CI publishes the GitHub release as `v<app version>`, so if the app version stays the same, every merge just overwrites the same release. Whenever you change anything under `host/` or the firmware the app embeds, or anything else that ends up in a new build of the app:
+
+1. **Bump the app version** (patch by default, e.g. 2.0.0 → 2.0.1), keeping all of these identical:
+   - `host/dualeye-app/src-tauri/tauri.conf.json` (`version`: this names the release)
+   - `host/dualeye-app/package.json`
+   - `host/dualeye-app/src-tauri/Cargo.toml` (the package `version`, and the `version` on its `dualeye-core` dependency)
+   - `host/dualeye-core/Cargo.toml`, `host/dualeye-cli/Cargo.toml`, `host/dualeye-power-helper/Cargo.toml`
+
+   Check `git log` first. If the current app version is already committed, it must go up. Bump it once per piece of work.
+2. **Rebuild** so the lock files pick up the new version: `cargo build --workspace` in `host/` (`Cargo.lock`) and `npm install` in `host/dualeye-app` (`package-lock.json`). Then run `npm run check` and `cargo test --workspace`.
+
+A firmware change therefore bumps both versions: `version.txt` and the app version.
+
+Report the new version(s) and the build results when done.
