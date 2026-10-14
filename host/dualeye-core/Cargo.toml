@@ -1,6 +1,6 @@
 [package]
 name = "dualeye-core"
-version = "2.0.2"
+version = "2.0.3"
 edition = "2024"
 description = "Reads CPU/GPU/fan sensors and streams them to the ESP32-S3 DualEye board"
 authors = ["Ettore Caputo <ettore.caputo27@gmail.com>"]

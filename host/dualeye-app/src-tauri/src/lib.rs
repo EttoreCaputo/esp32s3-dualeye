@@ -53,11 +53,12 @@ use dualeye_core::agent;
 use dualeye_core::claude::alerts::AlertSettings;
 use dualeye_core::quips::QuipLevel;
 use dualeye_core::claude::hooks::{self, HooksStatus};
+use dualeye_core::claude::mcpconfig;
 use dualeye_core::claude::statusline::{self, LinkStatus};
 use dualeye_core::flasher::setup;
 use dualeye_core::hardware::{self, Hardware, Recommendation};
 use dualeye_core::cloud::elevenlabs::{self, AccountVoice};
-use dualeye_core::cloud::{self, CloudRef, KeySource, Provider};
+use dualeye_core::cloud::{self, CloudError, CloudRef, KeySource, Provider};
 use dualeye_core::llm::{self, Llm, LlmConfig, LocalLlm};
 use dualeye_core::models::{self, Kind, Model};
 use dualeye_core::music::{self, Music};
@@ -600,6 +601,49 @@ async fn set_api_key(app: AppHandle, provider: String, key: Option<String>) -> R
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Whether a provider's key works: `valid`, `invalid` (refused or missing) or
+/// `unknown` (it couldn't be asked), with why.
+#[derive(Serialize)]
+struct KeyCheck {
+    state: &'static str,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn check_api_key(provider: String) -> Result<KeyCheck, String> {
+    let p = Provider::by_id(&provider).ok_or_else(|| format!("unknown provider {provider}"))?;
+    tauri::async_runtime::spawn_blocking(move || match p.check_key() {
+        // A limit reached still means the key was taken.
+        Ok(()) | Err(CloudError::RateLimited { .. }) => KeyCheck { state: "valid", error: None },
+        Err(e @ (CloudError::BadKey { .. } | CloudError::NoKey { .. })) => KeyCheck { state: "invalid", error: Some(e.to_string()) },
+        Err(e) => KeyCheck { state: "unknown", error: Some(e.to_string()) },
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Open the page where a provider gives out API keys, in the browser.
+#[tauri::command]
+fn open_key_page(provider: String) -> Result<(), String> {
+    let p = Provider::by_id(&provider).ok_or_else(|| format!("unknown provider {provider}"))?;
+    open_in_browser(p.keys_url)
+}
+
+/// Only the app's own fixed addresses come here, never one from outside.
+fn open_in_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url).spawn().map(drop).map_err(|e| e.to_string())
 }
 
 /// The voices the ElevenLabs account can speak with: its own, then ElevenLabs'.
@@ -1230,16 +1274,38 @@ struct McpInfo {
     args: Vec<&'static str>,
     hub: Option<HubStatus>,
     hub_error: Option<String>,
+    /// Claude Code has it among its MCP servers.
+    registered: bool,
+    config_path: Option<PathBuf>,
 }
 
-#[tauri::command]
-fn mcp_info(state: State<AppState>) -> McpInfo {
+fn mcp_info_of(state: &AppState) -> McpInfo {
+    let config = mcpconfig::status();
     McpInfo {
         command: std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()),
         args: vec![mcp::FLAG],
         hub: state.hub.as_ref().map(|h| h.status()),
         hub_error: state.hub_error.clone(),
+        registered: config.registered,
+        config_path: config.config_path,
     }
+}
+
+#[tauri::command]
+fn mcp_info(state: State<AppState>) -> McpInfo {
+    mcp_info_of(&state)
+}
+
+/// Add this app to Claude Code's MCP servers, or take it out.
+#[tauri::command]
+fn claude_mcp(state: State<AppState>, connect: bool) -> Result<McpInfo, String> {
+    if connect {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        mcpconfig::connect(&exe).map_err(|e| e.to_string())?;
+    } else {
+        mcpconfig::disconnect().map_err(|e| e.to_string())?;
+    }
+    Ok(mcp_info_of(&state))
 }
 
 #[tauri::command]
@@ -1587,7 +1653,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_transport, wifi_info, wifi_scan, wifi_setup, wifi_enable, wifi_forget, wifi_pair, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, quips_info, set_quips, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, ui_language, set_ui_language, pointer_gaze, music_cover, music_control])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_transport, wifi_info, wifi_scan, wifi_setup, wifi_enable, wifi_forget, wifi_pair, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, claude_mcp, voice_info, set_voice, set_api_key, check_api_key, open_key_page, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, quips_info, set_quips, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, ui_language, set_ui_language, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

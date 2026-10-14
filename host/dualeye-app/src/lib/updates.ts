@@ -13,6 +13,11 @@ export type Update = {
   changes: Release[];
 };
 
+/** A changelog line in pieces, `**bold**` ones marked. */
+export function boldParts(line: string): { text: string; bold: boolean }[] {
+  return line.split(/\*\*(.+?)\*\*/).map((text, i) => ({ text, bold: i % 2 === 1 })).filter((p) => p.text);
+}
+
 /** `## 0.2.0` headings, each followed by `- ` bullets. */
 export function parseChangelog(text: string): Release[] {
   const releases: Release[] = [];

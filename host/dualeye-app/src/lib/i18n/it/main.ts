@@ -34,6 +34,7 @@ const it: typeof en = {
     mood: "L'umore del pet: apri la scheda Pet",
     resting: "Riposa",
     settings: "Impostazioni",
+    settingsNeeds: "Impostazioni: qualcosa da sistemare",
     minimize: "Riduci a icona",
     maximize: "Ingrandisci",
     hide: "Nascondi nella tray",

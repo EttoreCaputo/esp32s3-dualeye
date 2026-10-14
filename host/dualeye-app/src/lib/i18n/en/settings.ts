@@ -30,12 +30,63 @@ export default {
     offline: "offline",
     ago: (s: number): string => (s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`),
     needsFirmware: (v: string): string => `Needs the board connected, with firmware ${v} or newer`,
+    advanced: "Advanced",
+    enable: "Turn on",
+    configure: "Set up",
+    search: "Search settings",
+    searchNone: "Nothing found",
+  },
+
+  /** What a setting needs from another one, with a button that fixes it. */
+  need: {
+    speak: "Needs spoken replies",
+    llm: "Needs the language model",
+    statusline: "Needs the status line",
+    hooks: "Needs Claude Code connected",
+    board: "Needs the board connected",
+    key: (name: string): string => `Needs a working ${name} key`,
+  },
+
+  /** Why a tab has a dot: orange when something's missing, red when it fails. */
+  issues: {
+    keyRefused: (name: string): string => `${name} key refused`,
+    notWorking: (part: string): string => `${part} isn't working`,
+    missing: (part: string): string => `${part}: model to set up`,
+    quipsSilent: "The pet's comments can't be heard",
+    hub: "MCP clients can't reach the board",
+    claudePartly: "Claude Code is only partly connected",
+    alertsSilent: "The alerts can't be said out loud",
+    offline: "Board not connected",
+    firmware: (v: string): string => `Firmware v${v} to install`,
+  },
+
+  /** An online service's API key. */
+  keys: {
+    apiKey: (name: string): string => `${name} API key`,
+    state: { valid: "Works", invalid: "Refused", unknown: "Not checked", checking: "Checking…", missing: "No key" },
+    why: "Why",
+    env: (env: string): string => `From the ${env} environment variable, which wins over a saved key.`,
+    placeholder: "Paste the key here",
+    saved: "Saved · paste to replace it",
+    aria: (name: string): string => `${name} API key`,
+    show: "Show the key",
+    hide: "Hide the key",
+    paste: "Paste",
+    get: "Get a key",
+    check: "Check",
+    forget: "Forget",
+    tips: {
+      groq: "Groq can hear, understand and speak instead of this computer: nothing to download. Free, with daily limits (about 2,000 transcriptions and 100 spoken sentences a day). What you say is sent to Groq. The key: console.groq.com → API Keys → Create API Key.",
+      elevenlabs:
+        "ElevenLabs speaks the answers with a voice of your account, in Italian and English. The free plan has 10,000 credits a month, about 20 minutes of answers. The key: elevenlabs.io → Developers → API Keys → Create key, with the Text to Speech permission and Voices with read access.",
+    } as Record<string, string>,
   },
   tabs: { voice: "Voice", pet: "Pet", timers: "Timers", claude: "Claude", device: "Device", diagnostics: "Diagnostics" },
 
   voice: {
     assistant: "Voice assistant",
     assistantTip: "Say “Alexa”, then a command: “metti la faccia rings a sinistra”, “what's the temperature?”",
+    statusCard: "Status",
     hearing: "Hearing",
     understanding: "Understanding",
     speaking: "Speaking",
@@ -63,7 +114,6 @@ export default {
       custom: ["Your own", "Describe it yourself"],
     },
     personalityTip: "Changes how DualEye talks, from the next command. It still does what you ask the same way.",
-    personalityNeedsLlm: "Needs “Use a language model” (Behaviour, below): the fixed phrases have no personality.",
     promptAria: (name: string): string => `A prompt for a ${name} voice on ElevenLabs`,
     promptTitle: "A prompt to design this voice on ElevenLabs (click to keep it open)",
     promptHead: (name: string): string => `A “${name}” voice on ElevenLabs`,
@@ -76,8 +126,6 @@ export default {
     eleven: "ElevenLabs voices",
     elevenTip:
       "Answer with a voice of your ElevenLabs account, in both languages. The free plan has 10,000 credits a month, about 20 minutes of answers. Design a voice on elevenlabs.io: the wave on each personality above has a prompt for it.",
-    elevenAdd: "Add an ElevenLabs key",
-    elevenKeyTip: "Give the key the Text to Speech permission, and Voices with read access.",
     elevenReading: "Reading your account…",
     elevenNone: "None of your own yet: design one on elevenlabs.io with the prompt on a personality above. ElevenLabs' own voices are in the lists under Models.",
     speakingNow: "Speaking",
@@ -88,6 +136,7 @@ export default {
 
     behaviour: "Behaviour",
     speak: "Answer out loud",
+    speakTip: "Answers through the board's speaker. The pet's comments, the Claude alerts and the timers' labels are said with it too.",
     followUp: "Keep listening after an answer",
     followUpTip: "After a spoken answer it listens a few seconds more, so you can go on without saying “Alexa” again.",
     pauseMusic: "Pause music while listening",
@@ -108,6 +157,15 @@ export default {
     testTitle: "Say a sentence through the board",
     testing: "Speaking…",
     test: "Test",
+    tests: {
+      title: "Say “Alexa” and a sentence, to check it",
+      sayHearing: "Say “Alexa”, then any sentence…",
+      sayUnderstanding: "Say “Alexa”, then “what time is it?”…",
+      heard: (text: string): string => `Heard: “${text}”`,
+      answered: (text: string): string => `Understood. Answer: “${text}”`,
+      rules: "Heard, but a fixed phrase answered: the language model isn't working.",
+      nothing: "Nothing heard in 25 seconds. Is the board connected and its mic on?",
+    },
     choose: "Choose…",
     onComputer: "On this computer",
     onlineGroup: (name: string): string => `${name}, online`,
@@ -117,23 +175,15 @@ export default {
     download: (size: string): string => `Download · ${size}`,
     installEngine: (name: string): string => `Install ${name}`,
     needsKey: (name: string): string => ` · needs a ${name} key`,
-    downloaded: " · downloaded",
+    downloaded: " ✓",
     recommended: " · recommended",
 
     services: "Online services",
-    keySaved: "key saved",
-    noKey: "no key",
     servicesTip:
       "Instead of this computer, an online service can hear, understand and speak: nothing to download, but what you say leaves this computer, and free plans have daily limits. With a key, its models show up in the lists above.",
-    envKey: (env: string): string => `Key from ${env}`,
-    envTitle: "Its environment variable wins over a saved key",
-    forgetKey: "Forget key",
-    replaceKey: "Replace the API key",
-    keyFrom: (url: string): string => `API key, from ${url}`,
-    keyAria: (name: string): string => `${name} API key`,
-    checking: "Checking…",
 
-    advanced: "Downloads and advanced",
+    downloads: "Downloads and engines",
+    modelsSearch: "Whisper llama Piper download recommended",
     notFound: "not found",
     gpuApple: "Apple silicon GPU",
     gpuNone: "no GPU the models can use",
@@ -165,24 +215,35 @@ export default {
     codeTip: "The Claude faces count tokens from Claude Code's transcripts on this computer.",
     usage: (tok: string, today: string): string => `This 5-hour window: ${tok} · today: ${today}.`,
     noUsage: "No Claude Code use found yet.",
-    statusLine: "Status line",
-    lastUpdate: "Last update",
     chained: "Also shows your status line",
     limitsLater: "Limits show up after Claude Code's next reply. They're only reported on Pro and Max plans.",
-    connectTip: (path: string): string =>
-      `Adds your plan's 5-hour and weekly limits. This sets statusLine in ${path}, keeps a backup, and your current status line keeps working through it.`,
-    connect: "Connect status line",
+    why: "Connect it: the Claude faces show your plan's limits, the board tells you when Claude needs you, and Claude can use the board.",
+    connect: "Connect to Claude Code",
+    connecting: "Connecting…",
+    repair: "Connect the rest",
+    notConnected: "Not connected",
+    pieces: {
+      statusline: "Usage and limits",
+      statuslineTip: "Claude Code's status line gives the Claude faces your plan's 5-hour and weekly limits. Your own status line keeps working through it.",
+      hooks: "Alerts",
+      hooksTip: "Hooks tell the board when Claude needs you or finishes. They run in the background and never slow Claude down.",
+      mcp: "Board tools",
+      mcpTip: "The DualEye MCP server: Claude can change the faces, show messages, set timers and read this computer's metrics.",
+    },
+    waitingReply: "Waiting for Claude Code's next reply",
+    updated: (ago: string): string => `Last seen ${ago}`,
+    restart: "Restart Claude Code to use them",
+    connectTip: (settings: string, config: string): string =>
+      `Sets up the status line and the hooks in ${settings}, and the MCP server in ${config}, with a backup of each. Everything else in them stays as it is.`,
+    manualLabel: "What this changes, and how to do it by hand",
+    manual: "The MCP server by hand, in a terminal:",
+    copyCommand: "Copy command",
 
     alerts: "Claude alerts",
     alertsTip:
       "The board tells you when Claude Code needs you (a permission or a question), when it finishes a long task and when your plan's limits pass 80 % and 95 %: the eyes react, a message shows over the watch face and, with spoken replies on, it says so out loud.",
-    hooks: "Hooks",
-    lastEvent: "Last event",
     lastAlert: (ago: string): string => `Last alert, ${ago}`,
     notGiven: (err: string): string => ` (not given: ${err})`,
-    restart: "Claude Code sessions that were already open may need a restart to pick the hooks up.",
-    hooksTip: (path: string): string =>
-      `Adds hooks to ${path} that run in the background and never slow Claude down; yours stay as they are. The limit alerts need the status line above.`,
     needsYou: "When Claude needs you",
     done: "When a long task ends",
     usageAlert: "When a limit passes 80 % or 95 %",
@@ -191,8 +252,6 @@ export default {
     longTaskTitle: "Tell me when a task took at least this long",
     language: "Language",
     languageAria: "Language of the alerts",
-    cantSpeak: "Speaking needs “Answer out loud” and a voice in the Voice tab; until then they're only shown.",
-    connectHooks: "Connect hooks",
 
     mcp: "MCP server",
     mcpTip:
@@ -202,7 +261,6 @@ export default {
     lastCall: "Last tool call",
     noneYet: "None yet",
     hubError: (e: string): string => `MCP clients can't reach the board through the app: ${e}`,
-    forCode: "Claude Code: run this once in a terminal.",
     forDesktop: ["Claude Desktop: add this to ", " (Settings → Developer → Edit Config), then restart it."],
   },
 
@@ -230,7 +288,6 @@ export default {
     },
     last: (at: string, text: string): string => `Last time, at ${at}: “${text}”`,
     notSaid: (err: string): string => ` (not said: ${err})`,
-    needsSpeak: "To hear it, turn on “Answer out loud” in the Voice tab.",
   },
 
   timers: {
@@ -268,7 +325,7 @@ export default {
     showOn: { left: "Left", right: "Right", none: "Neither" },
     takesOverTip:
       "While a timer runs, that screen shows it instead of its face, and goes back when it's done. The Timer face (click a screen on the main window) shows it on any screen you put it on.",
-    needsSpeak: "To hear what each timer was for, turn on “Answer out loud” in the Voice tab.",
+    spokenLabel: "Out loud, the board also says what each timer was for.",
   },
 
   device: {
@@ -306,7 +363,7 @@ export default {
     find: "Find networks",
     noNetwork: "No network found. Is a 2.4 GHz one in range?",
     networkName: "Network name",
-    password: "Password (empty for an open network)",
+    password: "Password (empty if open)",
     passwordAria: "WiFi password",
     sending: "Sending…",
     connect: "Connect",

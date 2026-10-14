@@ -107,7 +107,7 @@ In the same tab you can turn each screen by 0°, 90°, 180° or 270° if the boa
 
 ### Claude Code faces
 
-The Claude faces work out of the box: the app counts the tokens in Claude Code's transcripts on this computer (`~/.claude/projects`) and notices when Claude is working. To see your plan's 5-hour and weekly limits too (Pro and Max), press **Connect status line** in Settings → **Claude**. It points Claude Code's status line at the app, keeping a backup of your settings (`settings.json.dualeye-backup`) and still printing your previous status line; **Disconnect** puts it back.
+The Claude faces work out of the box: the app counts the tokens in Claude Code's transcripts on this computer (`~/.claude/projects`) and notices when Claude is working. To see your plan's 5-hour and weekly limits too (Pro and Max), press **Connect to Claude Code** in Settings → **Claude**. That one button sets up the three things the app uses: the status line (the limits), the hooks (the [alerts](#claude-alerts)) and the [MCP server](#control-it-from-claude), and then shows each with a ✓ and when Claude Code last used it. The status line points at the app, keeping a backup of your settings (`settings.json.dualeye-backup`) and still printing your previous status line; **Disconnect** puts everything back.
 
 ### Claude alerts
 
@@ -115,11 +115,11 @@ The board can also tell you what Claude Code is up to, so you can leave it worki
 
 - **Claude needs you**: it's waiting for a permission or has asked you a question.
 - **Claude is done**: it finished a task that took at least 30 s (or 1, 2, 5 min).
-- **Limits**: your 5-hour or weekly limit passed 80 % or 95 % (needs the status line above). The 5-hour one also says when it resets.
+- **Limits**: your 5-hour or weekly limit passed 80 % or 95 %. The 5-hour one also says when it resets.
 
 The eyes react (surprised, happy, suspicious), the message shows over the watch face for 10 s and, with voice on and **Answer out loud**, the board says it in Italian or English. An alert waits for a voice conversation to end before it plays.
 
-Press **Connect hooks** in Settings → **Claude** → **Claude alerts**. It adds the app to Claude Code's hooks (`UserPromptSubmit`, `Stop` and `Notification`) in `~/.claude/settings.json`, keeping your own hooks and a backup. The hooks run in the background, so Claude never waits on them, and they do nothing while the app is closed. **Try it** plays a sample alert; **Disconnect** removes only DualEye's hooks. Claude Code sessions that were already open may need a restart to pick the hooks up.
+**Connect to Claude Code** in Settings → **Claude** sets them up: it adds the app to Claude Code's hooks (`UserPromptSubmit`, `Stop` and `Notification`) in `~/.claude/settings.json`, keeping your own hooks and a backup. The hooks run in the background, so Claude never waits on them, and they do nothing while the app is closed. **Try it** under **Claude alerts** plays a sample alert; **Disconnect** removes only DualEye's hooks. Claude Code sessions that were already open may need a restart to pick the hooks up. If an alert can't be said out loud, a line under **Say them out loud** tells you what's missing, with a button to fix it.
 
 ## Voice assistant
 
@@ -173,7 +173,7 @@ The language model stays loaded while voice is on: about 3 GB of memory for `qwe
 
 ### Cloud models
 
-A computer too slow for the local models can have an online service run them instead. [Groq](https://console.groq.com) does all three for free, within daily limits: paste an API key from [console.groq.com/keys](https://console.groq.com/keys) under **Models** → **Online services** in the Voice tab (or set `GROQ_API_KEY`), then pick its models next to the local ones. Cloud and local mix freely: Groq's Whisper with a local voice, for example.
+A computer too slow for the local models can have an online service run them instead. [Groq](https://console.groq.com) does all three for free, within daily limits: paste an API key under **Online services** in the Voice tab (**Get a key** opens [console.groq.com/keys](https://console.groq.com/keys); or set `GROQ_API_KEY`). The app checks it as soon as it's pasted and shows ✓ when it works, ✗ with the reason when it's refused, then pick its models next to the local ones. Cloud and local mix freely: Groq's Whisper with a local voice, for example.
 
 | What | Groq models | Free plan, roughly |
 |------|-------------|--------------------|
@@ -227,13 +227,13 @@ Unless you pick a [cloud model](#cloud-models), nothing you say leaves your comp
 
 The app includes an [MCP](https://modelcontextprotocol.io) server, so Claude Code or Claude Desktop can use the board: ask Claude to "put the rings face on the left", "show *build done* on the board" or "say the tests passed".
 
-Settings → **Display** → **MCP server** shows the command for this computer, with Copy buttons, and how many clients are connected. On macOS:
+In Claude Code it takes one click: **Connect to Claude Code** in Settings → **Claude** adds `dualeye` to the MCP servers in `~/.claude.json` (with a backup, `~/.claude.json.dualeye-backup`) and shows how many clients are connected; restart Claude Code to use it. To do it by hand instead, the ⓘ next to the button has the command for this computer, with a **Copy command** button. On macOS:
 
 ```bash
 claude mcp add --scope user dualeye -- /Applications/DualEye.app/Contents/MacOS/dualeye-app --mcp
 ```
 
-For Claude Desktop, add the same command to `claude_desktop_config.json` (Settings → Developer → Edit Config) and restart it:
+For Claude Desktop, add the same command to `claude_desktop_config.json` (Settings → Developer → Edit Config) and restart it; Settings → **Claude** → **Advanced** has it ready to copy:
 
 ```json
 { "mcpServers": { "dualeye": { "command": "/Applications/DualEye.app/Contents/MacOS/dualeye-app", "args": ["--mcp"] } } }

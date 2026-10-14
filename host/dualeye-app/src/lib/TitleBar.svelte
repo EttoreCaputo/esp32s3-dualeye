@@ -3,6 +3,8 @@
   import { monitor } from "./monitor.svelte";
   import { MOODS } from "./petMood";
   import { i18n } from "./i18n/index.svelte";
+  import { TABS } from "./settings/nav.svelte";
+  import { issues, level } from "./settings/requirements";
 
   let { onSettings, onPet }: { onSettings: () => void; onPet: () => void } = $props();
 
@@ -35,6 +37,13 @@
   // Restarting the ping animation on every frame written makes the dot "beat" with the data.
   const beat = $derived(monitor.sentAt);
 
+  // What the settings still need, on the settings icon: the worst as its dot, all of them on hover.
+  const needs = $derived(TABS.flatMap((tab) => issues(tab).map((i) => ({ ...i, tab }))));
+  const needsLevel = $derived(level(needs));
+  const settingsTitle = $derived(
+    needs.length ? [t.bar.settingsNeeds, ...needs.map((i) => `• ${i18n.t.settings.tabs[i.tab]}: ${i.text}`)].join("\n") : t.bar.settings,
+  );
+
   const win = monitor.preview ? null : getCurrentWindow();
 </script>
 
@@ -63,8 +72,9 @@
         <span>{pet.away ? t.bar.resting : pet.label}</span>
       </button>
     {/if}
-    <button class="icon" onclick={onSettings} aria-label={t.bar.settings} title={t.bar.settings}>
+    <button class="icon settings" onclick={onSettings} aria-label={settingsTitle} title={settingsTitle}>
       <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
+      {#if needsLevel}<span class="ndot {needsLevel}"></span>{/if}
     </button>
     {#if win}
       <span class="sep"></span>
@@ -265,6 +275,24 @@
     transition:
       background 160ms,
       color 160ms;
+  }
+  .icon.settings {
+    position: relative;
+  }
+  .ndot {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px var(--bg);
+  }
+  .ndot.warn {
+    background: var(--warm);
+  }
+  .ndot.error {
+    background: var(--hot);
   }
   .icon:hover {
     background: rgba(255, 255, 255, 0.06);

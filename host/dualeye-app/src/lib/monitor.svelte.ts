@@ -28,7 +28,17 @@ export type ClaudeMetrics = {
 /** `HubStatus` in dualeye-core: MCP servers using the board through the app. */
 export type HubStatus = { clients: number; calls: number; last_tool: string | null; last_call_age_ms: number | null };
 /** How MCP clients start the server (this app with `--mcp`), and who is using it. */
-export type McpInfo = { command: string | null; args: string[]; hub: HubStatus | null; hub_error: string | null };
+export type McpInfo = {
+  command: string | null;
+  args: string[];
+  hub: HubStatus | null;
+  hub_error: string | null;
+  /** Claude Code has it among its MCP servers. */
+  registered: boolean;
+  config_path: string | null;
+};
+/** `check_api_key`: whether a service took its key. */
+export type KeyCheck = { state: "valid" | "invalid" | "unknown"; error: string | null };
 export type ClaudeLink = { connected: boolean; chained: string | null; last_update_s: number | null; settings_path: string | null };
 /** `AlertSettings` in dualeye-core: which Claude Code alerts the board gives. */
 export type ClaudeAlertSettings = {
@@ -801,6 +811,32 @@ class Monitor {
     return invoke<McpInfo>("mcp_info");
   }
 
+  /** Add the app to Claude Code's MCP servers, or take it out. */
+  async claudeMcp(connect: boolean): Promise<McpInfo> {
+    if (this.preview) return (previewMcp = { ...previewMcp, registered: connect });
+    return invoke<McpInfo>("claude_mcp", { connect });
+  }
+
+  /** Ask the service whether its saved key works. */
+  async checkApiKey(provider: string): Promise<KeyCheck> {
+    if (this.preview) {
+      await new Promise((r) => setTimeout(r, 600));
+      const p = previewVoice.providers.find((p) => p.id === provider);
+      return p?.key ? { state: "valid", error: null } : { state: "invalid", error: `${p?.name}: no API key` };
+    }
+    return invoke<KeyCheck>("check_api_key", { provider });
+  }
+
+  /** The service's page for API keys, in the browser. */
+  async openKeyPage(provider: string) {
+    if (this.preview) {
+      const p = previewVoice.providers.find((p) => p.id === provider);
+      if (p) window.open(p.keys_url, "_blank", "noopener");
+      return;
+    }
+    await invoke("open_key_page", { provider });
+  }
+
   async voiceInfo(): Promise<VoiceInfo> {
     if (this.preview) return { ...previewVoice, settings: { ...previewVoice.settings } };
     return invoke<VoiceInfo>("voice_info");
@@ -995,11 +1031,13 @@ export function fanRpm(s: Snapshot | null, id: string): number | undefined {
 
 // ── Preview feed ────────────────────────────────────────────────────────────
 
-const previewMcp: McpInfo = {
+let previewMcp: McpInfo = {
   command: "/Applications/DualEye.app/Contents/MacOS/dualeye-app",
   args: ["--mcp"],
   hub: { clients: 1, calls: 3, last_tool: "set_face", last_call_age_ms: 42000 },
   hub_error: null,
+  registered: false,
+  config_path: "~/.claude.json",
 };
 
 let previewClaudeLink: ClaudeLink = { connected: false, chained: null, last_update_s: null, settings_path: "~/.claude/settings.json" };

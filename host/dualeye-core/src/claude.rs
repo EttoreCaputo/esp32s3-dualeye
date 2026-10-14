@@ -14,6 +14,7 @@
 
 pub mod alerts;
 pub mod hooks;
+pub mod mcpconfig;
 pub mod statusline;
 
 use std::collections::{HashMap, HashSet};

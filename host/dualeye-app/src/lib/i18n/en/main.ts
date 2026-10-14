@@ -33,6 +33,7 @@ export default {
     mood: "The pet's mood: open the Pet tab",
     resting: "Resting",
     settings: "Settings",
+    settingsNeeds: "Settings: something needs a look",
     minimize: "Minimize",
     maximize: "Maximize",
     hide: "Hide to tray",

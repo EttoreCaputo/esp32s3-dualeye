@@ -1,6 +1,6 @@
 <script lang="ts">
   import Board from "./lib/Board.svelte";
-  import Drawer, { type Tab } from "./lib/Drawer.svelte";
+  import Drawer from "./lib/Drawer.svelte";
   import FacePicker from "./lib/FacePicker.svelte";
   import Telemetry from "./lib/Telemetry.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
@@ -8,13 +8,14 @@
   import { heatColor, screenFor, type DeviceId } from "./lib/firmware";
   import { fanRpm, monitor } from "./lib/monitor.svelte";
   import { i18n } from "./lib/i18n/index.svelte";
+  import { settingsData } from "./lib/settings/data.svelte";
+  import { settingsNav } from "./lib/settings/nav.svelte";
 
   monitor.start();
   i18n.start();
+  settingsData.start();
   const t = $derived(i18n.t.main);
 
-  let settings = $state(false);
-  let drawerTab = $state<Tab>("voice");
   /** The screen whose faces are open, and where it is. */
   let picking = $state<{ id: DeviceId; anchor: { x: number; y: number } } | null>(null);
   const openPicker = (id: DeviceId, rect: DOMRect) =>
@@ -92,19 +93,15 @@
   <TitleBar
     onSettings={() => {
       picking = null;
-      settings = true;
+      settingsNav.show();
     }}
     onPet={() => {
       picking = null;
-      drawerTab = "pet";
-      settings = true;
+      settingsNav.show("pet");
     }}
   />
   <UpdateBanner
-    onUpdate={() => {
-      drawerTab = "device";
-      settings = true;
-    }}
+    onUpdate={() => settingsNav.go({ tab: "device", id: "firmware" })}
   />
 
   <section class="hero" bind:clientWidth={heroW}>
@@ -118,10 +115,7 @@
       {#if board === "off"}
         <button
           class="link"
-          onclick={() => {
-            drawerTab = "device";
-            settings = true;
-          }}>{t.caption.connection}</button
+          onclick={() => settingsNav.go({ tab: "device", id: "connection" })}>{t.caption.connection}</button
         >
       {/if}
     </div>
@@ -145,7 +139,7 @@
   {#if picking}
     <FacePicker id={picking.id} anchor={picking.anchor} onclose={() => (picking = null)} />
   {/if}
-  <Drawer bind:open={settings} bind:tab={drawerTab} />
+  <Drawer />
 </div>
 
 <style>

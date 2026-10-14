@@ -3,6 +3,7 @@
   import { cubicOut } from "svelte/easing";
   import { monitor } from "./monitor.svelte";
   import { i18n } from "./i18n/index.svelte";
+  import { boldParts } from "./updates";
 
   let { onUpdate }: { onUpdate: () => void } = $props();
 
@@ -41,7 +42,7 @@
             <div class="release">
               <span class="ver">v{release.version}</span>
               <ul>
-                {#each release.notes as note, i (i)}<li>{note}</li>{/each}
+                {#each release.notes as note, i (i)}<li>{#each boldParts(note) as p, j (j)}{#if p.bold}<b>{p.text}</b>{:else}{p.text}{/if}{/each}</li>{/each}
               </ul>
             </div>
           {/each}
