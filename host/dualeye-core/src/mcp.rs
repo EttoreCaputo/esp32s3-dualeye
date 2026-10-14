@@ -47,7 +47,7 @@ or a pair of eyes that follow the mouse (eyes). \
 The board's tools change what the screens show; show_text puts a short ASCII message on them. \
 get_metrics and get_claude_usage read this computer, and work without the board. \
 speak says a short sentence out loud through the board's speaker, in Italian or English. \
-set_timer, set_reminder, pomodoro, control_timer and get_timers run timers on the host: the board counts the first one down on a screen \
+set_timer, set_reminder, pomodoro, control_timer, update_timer and get_timers run timers on the host: the board counts the first one down on a screen \
 and rings when it's up (they need the DualEye app or `dualeye` running to ring). \
 media_control and now_playing play, pause or skip the music on this computer and say what's playing.";
 

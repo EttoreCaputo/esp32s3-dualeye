@@ -477,10 +477,67 @@ fn timer_label(w: &[String], it: bool) -> Option<String> {
             return Some(rest.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
         }
     }
-    // Before the word only in English: "pasta timer".
-    let t = w.iter().position(|x| x == "timer").filter(|_| !it)?;
+    let t = w.iter().position(|x| x == "timer")?;
+    // After it in Italian: "il timer della pasta".
+    if it {
+        let after = w[t + 1..].iter().skip_while(|x| matches!(x.as_str(), "del" | "della" | "dello" | "dei" | "delle" | "di")).next()?;
+        return (w[t + 1..].first() != Some(after) && !not_label(after)).then(|| after.clone());
+    }
+    // Before it in English: "pasta timer".
     let before = w.get(t.checked_sub(1)?)?;
     (!not_label(before)).then(|| before.clone())
+}
+
+/// "Aggiungi 5 minuti al timer", "altri 5 minuti", "togli 2 minuti",
+/// "sposta il promemoria alle 18", "rimanda di 10 minuti", "cambia il timer
+/// a 10 minuti", "5 more minutes", "move the reminder to 6 pm": the
+/// `update_timer` arguments, without `which`, and the reply.
+fn timer_change(w: &[String], it: bool, reminder: bool) -> Option<(Value, String)> {
+    let moved = has(w, &["sposta*", "rimand*", "posticip*", "anticip*", "move", "moved", "postpone*", "push", "delay*", "reschedule*", "snooze*"]);
+    let changed = has(w, &["cambia*", "modifica*", "reimposta*", "change", "make", "reset"]);
+    // "Aggiungi un timer" is a new one.
+    let new_one = has_pair(w, &[("un", "timer"), ("una", "sveglia"), ("a", "timer"), ("another", "timer"), ("new", "timer"), ("nuovo", "timer"), ("altro", "timer")]);
+    if new_one {
+        return None;
+    }
+    // "Move it to 6 pm" too.
+    let to_at: Vec<String> = w.iter().map(|x| if x == "to" { "at".into() } else { x.clone() }).collect();
+    if (moved || changed) && let Some(at) = clock_time(w).or_else(|| clock_time(&to_at)) {
+        let at = timers::clock_text(at);
+        let reply = match (it, reminder) {
+            (true, true) => format!("Promemoria spostato alle {at}."),
+            (true, false) => format!("Fatto: il timer finisce alle {at}."),
+            (false, true) => format!("Reminder moved to {at}."),
+            (false, false) => format!("Done: the timer ends at {at}."),
+        };
+        return Some((json!({"at": at}), reply));
+    }
+    // "Five more minutes": the length without the "more".
+    let plain: Vec<String> = w.iter().filter(|x| !matches!(x.as_str(), "more" | "extra")).cloned().collect();
+    let (secs, from, _) = duration(&plain)?;
+    let span = timers::span_words(secs, it);
+    let before = from.checked_sub(1).map(|i| plain[i].as_str());
+    let less = has(w, &["togli*", "leva*", "riduci*", "accorci*", "anticip*", "meno", "shorten", "subtract", "off", "less", "earlier"]);
+    let more = has(w, &["altri", "altre", "ancora", "prolung*", "allung*", "rimand*", "posticip*", "more", "extra", "extend*", "postpone*", "delay*", "snooze*", "push"])
+        || (has(w, &["aggiung*", "add"]) && has(w, &["al", "alla", "allo", "ai", "to", "on"]));
+    let minutes = secs as f64 / 60.0;
+    if moved && matches!(before, Some("tra" | "fra" | "in" | "entro")) {
+        let reply = if it { format!("Fatto: tra {span}.") } else { format!("Done: in {span}.") };
+        return Some((json!({"in_minutes": minutes}), reply));
+    }
+    if less {
+        let reply = if it { format!("Fatto: {span} in meno.") } else { format!("Done: {span} less.") };
+        return Some((json!({"add_minutes": -minutes}), reply));
+    }
+    if more {
+        let reply = if it { format!("Fatto: {span} in più.") } else { format!("Done: {span} more.") };
+        return Some((json!({"add_minutes": minutes}), reply));
+    }
+    if changed && !reminder {
+        let reply = if it { format!("Timer reimpostato a {span}.") } else { format!("Timer set to {span}.") };
+        return Some((json!({"seconds": secs}), reply));
+    }
+    None
 }
 
 fn is_stop(w: &[String]) -> bool {
@@ -542,6 +599,12 @@ fn timer_plan(text: &str, w: &[String], it: bool, ctx: &Context) -> Option<Plan>
             let reply = if it { "Promemoria annullato." } else { "Reminder cancelled." };
             return Some(with_failure(plan(vec![tool("control_timer", json!({"action": "cancel", "which": which}))], it, reply.into())));
         }
+        if !has(w, &["ricordami", "ricordarmi", "remind"])
+            && let Some((mut args, reply)) = timer_change(w, it, true)
+        {
+            args["which"] = json!("reminder");
+            return Some(with_failure(plan(vec![tool("update_timer", args)], it, reply)));
+        }
         let what = reminder_text(text);
         let in_time = duration(w).filter(|&(_, from, _)| from > 0 && matches!(w[from - 1].as_str(), "tra" | "fra" | "in" | "entro"));
         let at = clock_time(w);
@@ -572,6 +635,15 @@ fn timer_plan(text: &str, w: &[String], it: bool, ctx: &Context) -> Option<Plan>
     let how_long = has_pair(w, &[("quanto", "manca"), ("quanto", "tempo"), ("how", "long"), ("how", "much"), ("time", "left")]) || has(w, &["mancano", "manca"]);
     if how_long && (said_timer || !ctx.timers.is_empty()) && !has_pair(w, &[("che", "or")]) {
         return Some(plan(vec![], it, time_left(&ctx.timers, it)));
+    }
+    // Changing one: by name, or while one rings (or just rang), or while some run.
+    if (said_timer || ctx.alarm || !ctx.timers.is_empty())
+        && let Some((mut args, reply)) = timer_change(w, it, false)
+    {
+        if let Some(l) = timer_label(w, it) {
+            args["which"] = json!(l);
+        }
+        return Some(with_failure(plan(vec![tool("update_timer", args)], it, reply)));
     }
     if !said_timer {
         return None;
@@ -857,6 +929,33 @@ mod tests {
         let ringing = Context { alarm: true, ..Default::default() };
         assert_eq!(understand("Stop!", "en", &ringing).calls, [tool("control_timer", json!({"action": "cancel"}))]);
         assert!(understand("Stop!", "en", &Context::default()).calls.is_empty());
+    }
+
+    #[test]
+    fn timers_changed_by_rules() {
+        assert_eq!(calls("Aggiungi 5 minuti al timer della pasta", "it"), [tool("update_timer", json!({"add_minutes": 5.0, "which": "pasta"}))]);
+        assert_eq!(calls("Add 2 minutes to the timer", "en"), [tool("update_timer", json!({"add_minutes": 2.0}))]);
+        assert_eq!(calls("Togli 2 minuti al timer", "it"), [tool("update_timer", json!({"add_minutes": -2.0}))]);
+        assert_eq!(calls("Take 30 seconds off the tea timer", "en"), [tool("update_timer", json!({"add_minutes": -0.5, "which": "tea"}))]);
+        assert_eq!(calls("Cambia il timer a 10 minuti", "it"), [tool("update_timer", json!({"seconds": 600}))]);
+        let c = calls("Sposta il promemoria alle 18", "it");
+        assert_eq!(c, [tool("update_timer", json!({"at": "18:00", "which": "reminder"}))]);
+        let c = calls("Rimanda il promemoria di 10 minuti", "it");
+        assert_eq!(c, [tool("update_timer", json!({"add_minutes": 10.0, "which": "reminder"}))]);
+        let c = calls("Move the reminder to 6 pm", "en");
+        assert_eq!(c, [tool("update_timer", json!({"at": "18:00", "which": "reminder"}))]);
+        let c = calls("Sposta il promemoria tra mezz'ora", "it");
+        assert_eq!(c, [tool("update_timer", json!({"in_minutes": 30.0, "which": "reminder"}))]);
+        // While one rings, or just rang: a snooze.
+        let ringing = Context { alarm: true, ..Default::default() };
+        assert_eq!(understand("Altri 5 minuti", "it", &ringing).calls, [tool("update_timer", json!({"add_minutes": 5.0}))]);
+        assert_eq!(understand("Five more minutes", "en", &ringing).reply, "Done: 5 minutes more.");
+        // New ones stay new; "togli il timer" still cancels.
+        assert_eq!(calls("Aggiungi un timer di 5 minuti", "it"), [tool("set_timer", json!({"seconds": 300}))]);
+        assert_eq!(calls("Set another timer for 5 minutes", "en"), [tool("set_timer", json!({"seconds": 300}))]);
+        assert_eq!(calls("Togli il timer", "it"), [tool("control_timer", json!({"action": "cancel"}))]);
+        assert_eq!(calls("Ricordami tra 20 minuti di chiamare Marco", "it")[0].0, "set_reminder");
+        assert!(understand("Altri 5 minuti", "it", &Context::default()).calls.is_empty());
     }
 
     #[test]

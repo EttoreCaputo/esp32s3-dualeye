@@ -32,6 +32,8 @@ const PHASE_RING_MS: i64 = 6_000;
 /// A reminder missed while the app was closed still comes this late.
 const LATE_REMINDER_MS: i64 = 12 * 3600 * 1000;
 const MAX_TIMERS: usize = 12;
+/// A timer that rang this long ago can still be brought back ("5 more minutes").
+const SNOOZE_MS: i64 = 60_000;
 const MAX_SECS: u64 = 24 * 3600;
 /// The board's bold font: ASCII capitals, digits and punctuation.
 const BOARD_LABEL_MAX: usize = 27;
@@ -259,6 +261,20 @@ pub enum When {
     At(NaiveTime),
 }
 
+/// What [`Timers::update`] changes; what's left out stays. Give at most one
+/// of the times.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Update {
+    /// Seconds to add to the time left; negative takes them off.
+    pub add_s: Option<i64>,
+    /// A new length, counted from now.
+    pub length_s: Option<u64>,
+    /// A new end: the next time the clock says it.
+    pub at: Option<NaiveTime>,
+    /// A new name, or a reminder's new text.
+    pub label: Option<String>,
+}
+
 /// What [`Timers::control`] does to the timers it picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -278,6 +294,10 @@ struct State {
     pomodoro: Option<Pomodoro>,
     #[serde(default)]
     next_id: u32,
+    /// Timers that rang and are gone, and when they went: [`Timers::update`]
+    /// brings one back for a while.
+    #[serde(skip)]
+    ended: Vec<(i64, Timer)>,
 }
 
 impl State {
@@ -408,10 +428,11 @@ impl Timers {
 
     fn remind_at(&self, now: i64, text: &str, when: When, language: &str) -> Result<Timer, String> {
         let label = clean_label(Some(text)).ok_or("a reminder needs its text")?;
-        let secs = match when {
-            When::In(secs) => secs,
-            When::At(time) => secs_until(now, time),
+        let ms = match when {
+            When::In(secs) => secs as i64 * 1000,
+            When::At(time) => ms_until(now, time),
         };
+        let secs = ((ms + 999) / 1000) as u64;
         if secs == 0 || secs > MAX_SECS {
             return Err("a reminder is due within 24 hours".into());
         }
@@ -419,7 +440,7 @@ impl Timers {
             if s.timers.len() >= MAX_TIMERS {
                 return Err(format!("there are {MAX_TIMERS} timers already"));
             }
-            Ok(s.add(Kind::Reminder, Some(label), secs, now + secs as i64 * 1000, language))
+            Ok(s.add(Kind::Reminder, Some(label), secs, now + ms, language))
         })
     }
 
@@ -501,6 +522,7 @@ impl Timers {
                 out.push(t.clone());
             }
             if action == Action::Cancel {
+                s.ended.extend(out.iter().filter(|t| t.is_ringing()).map(|t| (now, t.clone())));
                 let mut i = 0;
                 s.timers.retain(|_| {
                     i += 1;
@@ -515,12 +537,97 @@ impl Timers {
         })
     }
 
+    /// Change the timer or reminder `which` names (as [`Timers::control`]
+    /// takes it, `all` aside), keeping it: its time left, end, length or
+    /// name. With `None`, the one ringing, else the one that rang a moment
+    /// ago, else the one ending first. A change of time silences one that
+    /// rings and brings back one that just rang (a snooze); a paused one stays
+    /// paused. Not for the pomodoro's timers.
+    pub fn update(&self, which: Option<&str>, change: &Update) -> Result<Timer, String> {
+        self.update_at(now_ms(), which, change)
+    }
+
+    fn update_at(&self, now: i64, which: Option<&str>, change: &Update) -> Result<Timer, String> {
+        const POMODORO: &str = "the pomodoro can't be changed: stop it and start a new one";
+        let times = [change.add_s.is_some(), change.length_s.is_some(), change.at.is_some()].into_iter().filter(|&x| x).count();
+        if times > 1 {
+            return Err("give only one of add_minutes, a new length, in_minutes or at".into());
+        }
+        if times == 0 && change.label.is_none() {
+            return Err("nothing to change: give add_minutes, a new length, in_minutes, at, or a new label or text".into());
+        }
+        let which = which.map(str::trim).filter(|w| !w.is_empty() && !matches!(*w, "next" | "first" | "current" | "last"));
+        if which.is_some_and(|w| w.to_lowercase().starts_with("pomodor")) {
+            return Err(POMODORO.into());
+        }
+        self.change(|s| {
+            s.ended.retain(|(at, _)| now - at < SNOOZE_MS);
+            let fits = |t: &Timer| !t.kind.is_pomodoro() && which.is_none_or(|w| t.matches(w));
+            let live = (0..s.timers.len()).filter(|&i| fits(&s.timers[i]));
+            let ringing = live.clone().find(|&i| s.timers[i].is_ringing());
+            let ended = if times > 0 { s.ended.iter().rposition(|(_, t)| fits(t)) } else { None };
+            let (index, mut timer) = match (ringing, ended) {
+                (Some(i), _) => (Some(i), s.timers[i].clone()),
+                (None, Some(e)) => (None, s.ended[e].1.clone()),
+                (None, None) => match live.min_by_key(|&i| s.timers[i].left_ms(now)) {
+                    Some(i) => (Some(i), s.timers[i].clone()),
+                    None if s.timers.iter().any(|t| t.kind.is_pomodoro()) && s.timers.iter().all(|t| t.kind.is_pomodoro()) => return Err(POMODORO.into()),
+                    None if s.timers.is_empty() => return Err("no timer is running".into()),
+                    None => return Err("no timer like that".into()),
+                },
+            };
+            if index.is_none() && s.timers.len() >= MAX_TIMERS {
+                return Err(format!("there are {MAX_TIMERS} timers already"));
+            }
+            let done = index.is_none() || timer.is_ringing();
+            let left_ms = if done { 0 } else { timer.left_ms(now) };
+            let new_left = match (change.add_s, change.length_s, change.at) {
+                (Some(add), ..) => Some(left_ms + add * 1000),
+                (_, Some(secs), _) => Some(secs as i64 * 1000),
+                (.., Some(at)) => Some(ms_until(now, at)),
+                _ => None,
+            };
+            if let Some(new_left) = new_left {
+                if new_left <= 0 {
+                    return Err(format!("that leaves no time on it: it has {} left", span_words(((left_ms + 999) / 1000) as u64, false)));
+                }
+                if new_left > MAX_SECS as i64 * 1000 {
+                    return Err("a timer or reminder ends within 24 hours".into());
+                }
+                let new_s = ((new_left + 999) / 1000) as u64;
+                timer.total_s = match change.add_s {
+                    Some(add) if !done => (timer.total_s as i64 + add).max(new_s as i64) as u64,
+                    _ => new_s,
+                };
+                timer.ringing_since = None;
+                if timer.is_paused() {
+                    timer.paused_left_ms = new_left;
+                } else {
+                    timer.ends_at = Some(now + new_left);
+                }
+            }
+            if let Some(label) = &change.label {
+                timer.label = Some(label.clone());
+            }
+            match index {
+                Some(i) => s.timers[i] = timer.clone(),
+                None => {
+                    s.ended.retain(|(_, t)| t.id != timer.id);
+                    s.timers.push(timer.clone());
+                }
+            }
+            Ok(timer)
+        })
+    }
+
     /// Stop whatever rings; how many did.
     pub fn dismiss(&self) -> usize {
         let mut state = self.state.lock().unwrap();
-        let before = state.timers.len();
+        let now = now_ms();
+        let rung: Vec<Timer> = state.timers.iter().filter(|t| t.is_ringing()).cloned().collect();
         state.timers.retain(|t| !t.is_ringing());
-        let n = before - state.timers.len();
+        let n = rung.len();
+        state.ended.extend(rung.into_iter().map(|t| (now, t)));
         if n > 0 {
             self.save(&state);
             *self.dismissed.lock().unwrap() = Some(Instant::now());
@@ -607,10 +714,13 @@ impl Timers {
             fired.push(Fired { timer, pomodoro });
         }
         let before = state.timers.len();
-        state.timers.retain(|t| {
+        let (rung, kept): (Vec<Timer>, Vec<Timer>) = std::mem::take(&mut state.timers).into_iter().partition(|t| {
             let rung = t.ringing_since.map_or(0, |since| now - since);
-            rung < if t.kind.is_pomodoro() { PHASE_RING_MS } else { RING_MS }
+            rung >= if t.kind.is_pomodoro() { PHASE_RING_MS } else { RING_MS }
         });
+        state.timers = kept;
+        state.ended.extend(rung.into_iter().map(|t| (now, t)));
+        state.ended.retain(|(at, _)| now - at < SNOOZE_MS);
         changed |= state.timers.len() != before;
         if changed {
             self.save(&state);
@@ -692,6 +802,23 @@ impl Timers {
                     "which": {"type": "string", "description": "A timer's label, \"pomodoro\", \"reminder\" or \"all\"; leave out for the next one"},
                 }, "required": ["action"]}),
             ),
+            tool(
+                "update_timer",
+                "Change a timer or reminder already set, keeping it: add or take off time (\"5 more minutes\", also a snooze for one \
+                 ringing or that rang a moment ago), give it a new length or end, rename it or change a reminder's text. \
+                 Give one of add_minutes, hours/minutes/seconds, in_minutes or at. Not for the pomodoro.",
+                json!({"type": "object", "properties": {
+                    "which": {"type": "string", "description": "A timer's label, \"reminder\", or an id from get_timers; leave out for the one ringing or ending first"},
+                    "add_minutes": {"type": "number", "description": "Minutes to add to the time left; negative takes them off"},
+                    "hours": {"type": "number", "description": "New length, counted from now"},
+                    "minutes": {"type": "number", "description": "New length, counted from now"},
+                    "seconds": {"type": "number", "description": "New length, counted from now"},
+                    "in_minutes": {"type": "number", "description": "New end, minutes from now"},
+                    "at": {"type": "string", "description": "New end, time of day, 24-hour HH:MM (today, or tomorrow if it has passed)"},
+                    "label": {"type": "string", "description": "New name for a timer, one or two words"},
+                    "text": {"type": "string", "description": "New text for a reminder"},
+                }}),
+            ),
             tool("get_timers", "The timers, pomodoro and reminders running, with the time left on each.", json!({"type": "object", "properties": {}})),
         ]
     }
@@ -744,6 +871,36 @@ impl Timers {
                     format!("{done}: {}", names.join(", "))
                 })
             }
+            "update_timer" => (|| {
+                let signed = |k: &str| args.get(k).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())));
+                let given = |k: &str| args.get(k).is_some_and(|v| !v.is_null());
+                let length = ["hours", "minutes", "seconds"].iter().any(|k| given(k)).then(|| num("hours").unwrap_or(0.0) * 3600.0 + num("minutes").unwrap_or(0.0) * 60.0 + num("seconds").unwrap_or(0.0));
+                let in_minutes = given("in_minutes").then(|| num("in_minutes").unwrap_or(0.0) * 60.0);
+                if length.is_some() && in_minutes.is_some() {
+                    return Err("give only one of add_minutes, a new length, in_minutes or at".to_string());
+                }
+                let at = match text("at") {
+                    Some(at) => Some(parse_clock(at).ok_or("at must be HH:MM")?),
+                    None => None,
+                };
+                let change = Update {
+                    add_s: given("add_minutes").then(|| signed("add_minutes").map(|m| (m * 60.0).round() as i64).ok_or("add_minutes must be a number")).transpose()?,
+                    length_s: length.or(in_minutes).map(|s| s.round() as u64),
+                    at,
+                    label: clean_label(text("text").or(text("label"))),
+                };
+                let t = self.update(text("which"), &change)?;
+                let name = match (&t.label, t.kind) {
+                    (Some(l), Kind::Reminder) => format!("reminder \"{l}\""),
+                    (Some(l), _) => format!("timer {l}"),
+                    (None, kind) => kind.name().to_string(),
+                };
+                let left = span_words(((t.left_ms(now_ms()) + 999) / 1000) as u64, false);
+                Ok(match t.ends_at.and_then(|e| Local.timestamp_millis_opt(e).single()) {
+                    Some(end) => format!("{name} updated: {left} left, ends at {}", end.format("%H:%M")),
+                    None => format!("{name} updated: paused with {left} left"),
+                })
+            })(),
             "get_timers" => Ok(serde_json::to_string(&json!({"timers": self.list(), "pomodoro": self.pomodoro(), "now": Local::now().format("%H:%M").to_string()})).unwrap_or_default()),
             _ => return None,
         };
@@ -751,15 +908,15 @@ impl Timers {
     }
 }
 
-/// Seconds from `now` until the clock next says `time`.
-fn secs_until(now: i64, time: NaiveTime) -> u64 {
+/// Milliseconds from `now` until the clock next says `time`.
+fn ms_until(now: i64, time: NaiveTime) -> i64 {
     let Some(now) = Local.timestamp_millis_opt(now).single() else { return 0 };
     let today = now.date_naive().and_time(time);
     let mut at = Local.from_local_datetime(&today).earliest().unwrap_or(now);
     if at <= now {
         at = Local.from_local_datetime(&(today + chrono::Duration::days(1))).earliest().unwrap_or(now);
     }
-    (at - now).num_seconds().max(0) as u64
+    (at - now).num_milliseconds().max(0)
 }
 
 /// "17:30", "17.30", "5:30", "17".
@@ -861,6 +1018,61 @@ mod tests {
     }
 
     #[test]
+    fn changed_in_place() {
+        let timers = Timers::default();
+        let pasta = timers.start_at(T0, 600, Some("pasta"), "it").unwrap();
+        timers.start_at(T0, 900, Some("tea"), "it").unwrap();
+        let add = |m: i64| Update { add_s: Some(m * 60), ..Update::default() };
+        // Ending first, and the same timer after.
+        let t = timers.update_at(T0 + 60_000, None, &add(5)).unwrap();
+        assert_eq!((t.id, t.label.as_deref(), t.total_s), (pasta.id, Some("pasta"), 900));
+        assert_eq!(timers.list_at(T0 + 60_000).iter().find(|t| t.id == pasta.id).unwrap().left_s, 840);
+        let t = timers.update_at(T0 + 60_000, Some("tea"), &Update { length_s: Some(120), label: Some("green tea".into()), ..Update::default() }).unwrap();
+        assert_eq!((t.total_s, t.left_ms(T0 + 60_000), t.label.as_deref()), (120, 120_000, Some("green tea")));
+        assert!(timers.update_at(T0, Some("tea"), &add(-10)).is_err());
+        assert!(timers.update_at(T0, Some("coffee"), &add(1)).is_err());
+        assert!(timers.update_at(T0, None, &Update::default()).is_err());
+        assert!(timers.update_at(T0, None, &Update { add_s: Some(60), length_s: Some(60), ..Update::default() }).is_err());
+        // Paused, it stays paused.
+        timers.control_at(T0 + 60_000, Action::Pause, Some("pasta")).unwrap();
+        let t = timers.update_at(T0 + 100_000, Some("pasta"), &add(-4)).unwrap();
+        assert_eq!((t.is_paused(), t.paused_left_ms), (true, 600_000));
+        timers.control_at(T0, Action::Cancel, Some("all")).unwrap();
+
+        // Ringing, or rung and dismissed: more minutes bring it back.
+        let t = timers.start_at(T0, 60, Some("eggs"), "en").unwrap();
+        timers.tick_at(T0 + 60_000);
+        let snoozed = timers.update_at(T0 + 61_000, None, &add(2)).unwrap();
+        assert_eq!((snoozed.id, snoozed.is_ringing(), snoozed.total_s, snoozed.ends_at), (t.id, false, 120, Some(T0 + 181_000)));
+        timers.tick_at(T0 + 181_000);
+        assert_eq!(timers.dismiss(), 1);
+        assert!(timers.list().is_empty());
+        let back = timers.update(Some("eggs"), &add(1)).unwrap();
+        assert_eq!((back.id, back.total_s), (t.id, 60));
+        assert_eq!(timers.list().len(), 1);
+
+        // A reminder moved.
+        let r = timers.remind_at(T0, "stretch", When::In(600), "en").unwrap();
+        let moved = timers.update_at(T0, Some("reminder"), &Update { length_s: Some(1800), ..Update::default() }).unwrap();
+        assert_eq!((moved.id, moved.ends_at), (r.id, Some(T0 + 1_800_000)));
+        timers.start_pomodoro_at(T0, 25, 5, 4, "en").unwrap();
+        assert!(timers.update_at(T0, Some("pomodoro"), &add(5)).unwrap_err().contains("pomodoro"));
+    }
+
+    #[test]
+    fn update_by_tool() {
+        let timers = Timers::default();
+        timers.call_tool("set_reminder", &json!({"text": "call Marco", "in_minutes": 10}), "en").unwrap().unwrap();
+        let out = timers.call_tool("update_timer", &json!({"which": "Marco", "at": "23:59", "text": "call Marco back"}), "en").unwrap().unwrap();
+        assert!(out.starts_with("reminder \"call Marco back\" updated:") && out.ends_with("ends at 23:59"), "{out}");
+        let out = timers.call_tool("update_timer", &json!({"add_minutes": "-1"}), "en").unwrap();
+        assert!(out.is_ok(), "{out:?}");
+        assert!(timers.call_tool("update_timer", &json!({"at": "25:00"}), "en").unwrap().is_err());
+        assert!(timers.call_tool("update_timer", &json!({"minutes": 5, "in_minutes": 5}), "en").unwrap().is_err());
+        assert!(Timers::tools().iter().any(|t| t.name == "update_timer"));
+    }
+
+    #[test]
     fn words_and_labels() {
         assert_eq!(span_words(600, true), "10 minuti");
         assert_eq!(span_words(5400, true), "1 ora e 30 minuti");
@@ -869,8 +1081,8 @@ mod tests {
         assert_eq!(parse_clock("17.30"), NaiveTime::from_hms_opt(17, 30, 0));
         assert_eq!(parse_clock("25:00"), None);
         let now = Local.with_ymd_and_hms(2026, 10, 2, 16, 0, 0).unwrap().timestamp_millis();
-        assert_eq!(secs_until(now, NaiveTime::from_hms_opt(17, 0, 0).unwrap()), 3600);
-        assert_eq!(secs_until(now, NaiveTime::from_hms_opt(15, 0, 0).unwrap()), 23 * 3600);
+        assert_eq!(ms_until(now, NaiveTime::from_hms_opt(17, 0, 0).unwrap()), 3600_000);
+        assert_eq!(ms_until(now, NaiveTime::from_hms_opt(15, 0, 0).unwrap()), 23 * 3600_000);
     }
 
     #[test]

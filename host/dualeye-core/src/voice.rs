@@ -376,9 +376,9 @@ enum Next {
 /// Act on the words and answer.
 fn respond(link: &Link, session: &Session, config: &VoiceConfig, sink: &EventSink, id: u8, text: &str, language: &str) -> Next {
     let started = Instant::now();
-    // "Stop" for an alarm needs no language model: the rules, at once.
+    // "Stop" or "5 more minutes" for an alarm needs no language model: the rules, at once.
     let alarm = session.timers.is_ringing() || session.timers.dismissed_within(ALARM_FOLLOW_UP);
-    let quick = alarm && intents::understand(text, language, &Context { alarm, ..Context::default() }).calls.iter().any(|(t, _)| t == "control_timer");
+    let quick = alarm && intents::understand(text, language, &Context { alarm, ..Context::default() }).calls.iter().any(|(t, _)| matches!(t.as_str(), "control_timer" | "update_timer"));
     let agent = config.agent.as_ref().filter(|_| !quick);
     let answer = agent.and_then(|agent| match agent.respond(text, language, &BoardToolbox { link, session, language }) {
         Ok(turn) => Some((turn.reply, turn.actions.iter().map(action_line).collect(), true, "llm")),

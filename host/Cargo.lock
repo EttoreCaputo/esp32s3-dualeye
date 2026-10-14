@@ -1144,7 +1144,7 @@ checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 
 [[package]]
 name = "dualeye-app"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "ctrlc",
  "dualeye-core",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "dualeye-cli"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "dualeye-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "dualeye-power-helper"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "core-foundation",
  "libc",

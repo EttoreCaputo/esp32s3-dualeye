@@ -1315,7 +1315,7 @@ fn timers_info(state: State<AppState>) -> TimersInfo {
     timers_info_of(&state)
 }
 
-/// Run one of `Timers::tools` (`set_timer`, `control_timer`...), in the alerts' language.
+/// Run one of `Timers::tools` (`set_timer`, `control_timer`, `update_timer`...), in the alerts' language.
 #[tauri::command]
 fn timer_tool(state: State<AppState>, name: String, arguments: serde_json::Value) -> Result<TimersInfo, String> {
     let language = state.claude_alerts.lock().unwrap().language.clone();

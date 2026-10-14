@@ -1,6 +1,6 @@
 [package]
 name = "dualeye-power-helper"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 description = "Root LaunchDaemon for the DualEye app on macOS: CPU and GPU power from powermetrics, served on a Unix socket"
 authors = ["Ettore Caputo <ettore.caputo27@gmail.com>"]

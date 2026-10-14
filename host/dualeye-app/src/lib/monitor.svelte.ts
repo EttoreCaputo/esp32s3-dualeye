@@ -770,7 +770,7 @@ class Monitor {
     return info;
   }
 
-  /** One of the host's timer tools: `set_timer`, `set_reminder`, `pomodoro`, `control_timer`. */
+  /** One of the host's timer tools: `set_timer`, `set_reminder`, `pomodoro`, `control_timer`, `update_timer`. */
   async timerTool(name: string, args: Record<string, unknown>): Promise<TimersInfo> {
     const info = this.preview ? previewTimers.call(name, args) : await invoke<TimersInfo>("timer_tool", { name, arguments: args });
     this.timers = info;

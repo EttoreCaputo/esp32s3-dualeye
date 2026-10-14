@@ -77,7 +77,7 @@ The first four show the CPU or the GPU: by default the CPU on the left screen an
 
 ### Timers, reminders and a pomodoro
 
-"Alexa, timer 10 minuti", "set a pasta timer for 8 minutes", "ricordami alle 17 di chiamare Marco", "remind me in 20 minutes to stretch", "avvia un pomodoro", "quanto manca?", "metti in pausa il timer", "annulla tutti i timer". Or from Settings → **Timers**, or `dualeye timer`.
+"Alexa, timer 10 minuti", "set a pasta timer for 8 minutes", "ricordami alle 17 di chiamare Marco", "remind me in 20 minutes to stretch", "avvia un pomodoro", "quanto manca?", "metti in pausa il timer", "annulla tutti i timer". Change one already set: "aggiungi 5 minuti al timer della pasta", "togli 2 minuti", "sposta il promemoria alle 18", "rimanda il promemoria di 10 minuti", "move the reminder to 6 pm"; right after one rings, "altri 5 minuti" / "5 more minutes" brings it back. Or from Settings → **Timers**, or `dualeye timer`.
 
 While a timer runs, the right screen (or the left, or neither: Settings → **Timers** → **Takes over**) shows it instead of its face: a ring that empties, the time left, its name, and "+1 more" when others are running. Timers are amber, a pomodoro's focus red and its breaks green, reminders cyan. When one is up the board chimes every few seconds for a minute; saying "Alexa" silences it ("Alexa, stop"), and with spoken replies on it says what it was for: *"Il timer pasta è finito"*, *"Promemoria: chiamare Marco."* A pomodoro is 25 minutes of focus and 5 of break, four times, unless you say otherwise; it moves on by itself with a short chime. Put the `timer` face on a screen to keep the timers there all the time.
 
@@ -245,7 +245,7 @@ For Claude Desktop, add the same command to `claude_desktop_config.json` (Settin
 | `get_metrics` | Host | CPU and GPU temperature, load, clock, power, memory, fans |
 | `get_claude_usage` | Host | Claude Code tokens in the 5-hour window and today, plan limits used, time to reset, working or idle |
 | `speak` | Host | Says a short text out loud through the board, in Italian or English; needs the app with spoken replies on, or `dualeye --tts`, running |
-| `set_timer`, `set_reminder`, `pomodoro`, `control_timer`, `get_timers` | Host | [Timers](#timers-reminders-and-a-pomodoro) the board counts down and rings; they ring while the app (or `dualeye`) runs |
+| `set_timer`, `set_reminder`, `pomodoro`, `control_timer`, `update_timer`, `get_timers` | Host | [Timers](#timers-reminders-and-a-pomodoro) the board counts down and rings; they ring while the app (or `dualeye`) runs. `update_timer` changes one already set: time added or taken off, a new length or end, a new name or reminder text |
 | `media_control`, `now_playing` | Host | Play, pause or skip the [music](#music) playing on the computer, and say what it is |
 
 Changes made this way show up in the app. It works with the app closed too: the server then opens the board's port for each call.

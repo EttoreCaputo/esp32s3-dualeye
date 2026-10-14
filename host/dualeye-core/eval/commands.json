@@ -48,6 +48,7 @@
     {"lang": "it", "say": ["Ricordami tra 20 minuti di chiamare Marco."], "expect": {"timers": "~reminder:chiam"}},
     {"lang": "it", "say": ["Avvia un pomodoro."], "expect": {"timers": "work:1500"}},
     {"lang": "it", "say": ["Timer di 10 minuti.", "Annulla il timer."], "expect": {}},
+    {"lang": "it", "say": ["Timer di 10 minuti per la pasta.", "Aggiungi 5 minuti al timer della pasta."], "expect": {"timers": "timer:900"}},
     {"lang": "it", "say": ["Spegni lo schermo destro.", "Riaccendilo."], "expect": {"right.brightness": ">0"}},
 
     {"lang": "en", "say": ["Put rings on the left."], "expect": {"left.face": "rings"}},
@@ -78,6 +79,7 @@
     {"lang": "en", "say": ["Set a timer for five minutes."], "expect": {"timers": "timer:300"}},
     {"lang": "en", "say": ["Remind me to stretch in 45 minutes."], "expect": {"timers": "reminder:stretch"}},
     {"lang": "en", "say": ["Start a pomodoro."], "expect": {"timers": "work:1500"}},
+    {"lang": "en", "say": ["Set a timer for 10 minutes.", "Add 5 minutes to the timer."], "expect": {"timers": "timer:900"}},
     {"lang": "it", "say": ["Apri Spotify."], "expect": {"app": "~spotify"}},
     {"lang": "it", "say": ["Puoi aprire la calcolatrice?"], "expect": {"app": "~calc"}},
     {"lang": "en", "say": ["Open Safari."], "expect": {"app": "~safari"}},

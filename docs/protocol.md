@@ -207,7 +207,7 @@ One JSON-RPC 2.0 message per line, one request at a time. The first request must
 | `hello` | `{"token":"…","client":"dualeye-mcp/0.1.0"}` | `{"bridge":"0.1.0","board":<hello result or null>,"port":"/dev/cu.usbmodem101"}` |
 | `tools/list`, `tools/call`, `media/...` | As on `ctrl` | Passed to the board unchanged, one at a time |
 | `host/snapshot` | none | `{"snapshot":<latest sample or null>,"age_ms":…}` |
-| `host/timers` | `{"name":"set_timer","arguments":{"minutes":10},"language":"it"}`: one of the timer tools (`set_timer`, `set_reminder`, `pomodoro`, `control_timer`, `get_timers`) | `{"text":…,"is_error":false}`, run on the bridge's timers; `-32000` without a bridge (then `Board::timer_tool` uses `timers.json` directly) |
+| `host/timers` | `{"name":"set_timer","arguments":{"minutes":10},"language":"it"}`: one of the timer tools (`set_timer`, `set_reminder`, `pomodoro`, `control_timer`, `update_timer`, `get_timers`) | `{"text":…,"is_error":false}`, run on the bridge's timers; `-32000` without a bridge (then `Board::timer_tool` uses `timers.json` directly) |
 | `host/say` | `{"text":"Ciao!","language":"it"}` (`language` optional: what the text looks like) | Once played: `{"text":…,"first_audio_ms":…,"played_ms":…,"reason":"done","underruns":0,"lost":0}`. `-32000` unless the bridge has text-to-speech (the app with spoken replies on, or `dualeye --tts`) |
 
 While no board is attached (not found, rebooting, esptool flashing it) board methods fail with `-32000` and the reason as the message. After a successful `set_face` or `set_rotation` the bridge reads `get_state` and updates its own settings, so the app shows the change and keeps it.
