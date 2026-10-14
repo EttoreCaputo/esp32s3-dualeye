@@ -2,28 +2,34 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { monitor } from "./monitor.svelte";
   import { MOODS } from "./petMood";
+  import { i18n } from "./i18n/index.svelte";
 
   let { onSettings, onPet }: { onSettings: () => void; onPet: () => void } = $props();
 
-  const pet = $derived(monitor.pet ? { ...(MOODS[monitor.pet.mood] ?? MOODS.content), away: monitor.pet.away } : null);
+  const t = $derived(i18n.t.main);
+  const pet = $derived(
+    monitor.pet
+      ? { color: (MOODS[monitor.pet.mood] ?? MOODS.content).color, label: (i18n.t.pet.moods[monitor.pet.mood] ?? i18n.t.pet.moods.content).label, away: monitor.pet.away }
+      : null,
+  );
 
   const pill = $derived.by(() => {
     const port = monitor.port ?? "";
-    if (monitor.setup) return { tone: "busy", text: "Preparing esptool", detail: monitor.setup.message };
-    if (monitor.job === "flash") return { tone: "busy", text: `Flashing ${Math.round(monitor.flashPercent)}%`, detail: "esptool" };
-    if (monitor.job === "identify") return { tone: "busy", text: "Identifying", detail: "esptool" };
+    if (monitor.setup) return { tone: "busy", text: t.pill.preparing, detail: monitor.setup.message };
+    if (monitor.job === "flash") return { tone: "busy", text: t.pill.flashing(Math.round(monitor.flashPercent)), detail: "esptool" };
+    if (monitor.job === "identify") return { tone: "busy", text: t.pill.identifying, detail: "esptool" };
     switch (monitor.boardState) {
       case "live":
-        return { tone: "live", text: "Live", detail: port };
+        return { tone: "live", text: t.pill.live, detail: port };
       case "stale":
-        return { tone: "stale", text: "Stale", detail: "no data for 3 s" };
+        return { tone: "stale", text: t.pill.stale, detail: t.pill.staleDetail };
       case "waiting":
-        return { tone: "busy", text: "Connected", detail: "waiting for first frame" };
+        return { tone: "busy", text: t.pill.connected, detail: t.pill.connectedDetail };
       case "boot":
-        return { tone: "busy", text: "Board booting", detail: port };
+        return { tone: "busy", text: t.pill.booting, detail: port };
     }
-    if (monitor.link === "offline") return { tone: "error", text: "Disconnected", detail: monitor.message };
-    return { tone: "busy", text: "Searching", detail: "looking for the board on USB" };
+    if (monitor.link === "offline") return { tone: "error", text: t.pill.disconnected, detail: monitor.message };
+    return { tone: "busy", text: t.pill.searching, detail: t.pill.searchingDetail };
   });
 
   // Restarting the ping animation on every frame written makes the dot "beat" with the data.
@@ -41,7 +47,7 @@
       <circle cx="31" cy="10" r="8" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="2.4" />
     </svg>
     <span class="name" data-tauri-drag-region>DualEye</span>
-    {#if monitor.preview}<span class="badge" title="Opened outside Tauri: synthetic data">Preview data</span>{/if}
+    {#if monitor.preview}<span class="badge" title={t.bar.previewTitle}>{t.bar.previewBadge}</span>{/if}
   </div>
 
   <div class="pill {pill.tone}" data-tauri-drag-region>
@@ -52,23 +58,23 @@
 
   <div class="actions">
     {#if pet}
-      <button class="mood" style:--c={pet.color} onclick={onPet} title="The pet's mood: open the Pet tab">
+      <button class="mood" style:--c={pet.color} onclick={onPet} title={t.bar.mood}>
         <span class="face" aria-hidden="true"><i></i><i></i></span>
-        <span>{pet.away ? "Resting" : pet.label}</span>
+        <span>{pet.away ? t.bar.resting : pet.label}</span>
       </button>
     {/if}
-    <button class="icon" onclick={onSettings} aria-label="Settings" title="Settings">
+    <button class="icon" onclick={onSettings} aria-label={t.bar.settings} title={t.bar.settings}>
       <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
     </button>
     {#if win}
       <span class="sep"></span>
-      <button class="icon" onclick={() => win.minimize()} aria-label="Minimize" title="Minimize">
+      <button class="icon" onclick={() => win.minimize()} aria-label={t.bar.minimize} title={t.bar.minimize}>
         <svg viewBox="0 0 24 24"><path d="M6 12h12" /></svg>
       </button>
-      <button class="icon" onclick={() => win.toggleMaximize()} aria-label="Maximize" title="Maximize">
+      <button class="icon" onclick={() => win.toggleMaximize()} aria-label={t.bar.maximize} title={t.bar.maximize}>
         <svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" /></svg>
       </button>
-      <button class="icon close" onclick={() => win.close()} aria-label="Hide to tray" title="Hide to tray (keeps streaming)">
+      <button class="icon close" onclick={() => win.close()} aria-label={t.bar.hide} title={t.bar.hideTitle}>
         <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" /></svg>
       </button>
     {/if}

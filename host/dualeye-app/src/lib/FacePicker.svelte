@@ -6,8 +6,9 @@
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import Eye from "./Eye.svelte";
-  import { DEVICES, FACES, ROTATIONS, hasSource, screenFor, type DeviceId, type Face, type Rotation, type Source } from "./firmware";
+  import { DEVICES, ROTATIONS, hasSource, screenFor, type DeviceId, type Face, type Rotation, type Source } from "./firmware";
   import { fanRpm, monitor, type Side } from "./monitor.svelte";
+  import { i18n } from "./i18n/index.svelte";
 
   let { id, anchor, onclose }: { id: DeviceId; anchor: { x: number; y: number }; onclose: () => void } = $props();
 
@@ -16,12 +17,13 @@
   const current = $derived(monitor.faces[id]);
   const src = $derived(monitor.faces.src[id]);
 
-  const GROUPS: [string, Face[]][] = [
-    ["This computer", ["classic", "rings", "plus", "bar", "net", "disk", "battery"]],
-    ["Claude Code", ["claude", "clawd"]],
-    ["Fun & tools", ["music", "timer", "eyes", "image"]],
+  const t = $derived(i18n.t.faces);
+  const GROUPS: ["computer" | "claude" | "fun", Face[]][] = [
+    ["computer", ["classic", "rings", "plus", "bar", "net", "disk", "battery"]],
+    ["claude", ["claude", "clawd"]],
+    ["fun", ["music", "timer", "eyes", "image"]],
   ];
-  const face = (f: Face) => FACES.find((x) => x.id === f)!;
+  const face = (f: Face) => t.names[f];
 
   // Thumbnails use the host's latest sample, so they have data even with no board attached.
   const preview = (f: Face) => {
@@ -36,7 +38,7 @@
       image: monitor.images[side],
       // A sample one, so the thumbnail shows what the face looks like.
       timer: last?.timer ?? { kind: "timer", state: "run", left_s: 272, total_s: 600 },
-      music: last?.music ?? { state: "play", title: "Nothing playing", pos_s: 70, dur_s: 200 },
+      music: last?.music ?? { state: "play", title: t.nothingPlaying, pos_s: 70, dur_s: 200 },
       cover: monitor.cover,
     });
   };
@@ -59,10 +61,11 @@
     imageNote = "";
     try {
       const sent = await monitor.sendImage(side, file);
+      const kb = Math.round(sent.bytes / 1024);
       imageNote =
         sent.frames === 1
-          ? `Sent, ${Math.round(sent.bytes / 1024)} KB.`
-          : `Sent ${sent.frames} frames${sent.frames < sent.source_frames ? ` of ${sent.source_frames}` : ""}, ${(sent.duration_ms / 1000).toFixed(1)} s a loop, ${Math.round(sent.bytes / 1024)} KB.`;
+          ? t.sentOne(kb)
+          : t.sentFrames(sent.frames, sent.frames < sent.source_frames ? sent.source_frames : null, i18n.number(sent.duration_ms / 1000, { maximumFractionDigits: 1, minimumFractionDigits: 1 }), kb);
     } catch (err) {
       imageError = String(err);
     }
@@ -93,11 +96,11 @@
 
 <svelte:window bind:innerWidth={winW} bind:innerHeight={winH} onkeydown={onKey} />
 
-<button class="catcher" aria-label="Close the faces" onclick={onclose}></button>
+<button class="catcher" aria-label={t.closeAll} onclick={onclose}></button>
 <div
   class="picker"
   role="dialog"
-  aria-label="{side === 'left' ? 'Left' : 'Right'} screen"
+  aria-label={t.screen[side]}
   style:left="{left}px"
   style:top="{top}px"
   style:max-height="{maxH}px"
@@ -107,18 +110,18 @@
 >
   <header>
     <div>
-      <h2>{side === "left" ? "Left" : "Right"} screen</h2>
+      <h2>{t.screen[side]}</h2>
       <p>{face(current).blurb}</p>
     </div>
-    <button class="close" onclick={onclose} aria-label="Close">
+    <button class="close" onclick={onclose} aria-label={t.close}>
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
     </button>
   </header>
 
   <div class="body">
-    {#each GROUPS as [title, faces] (title)}
-      <h3>{title}</h3>
-      <div class="faces" role="radiogroup" aria-label={title}>
+    {#each GROUPS as [group, faces] (group)}
+      <h3>{t.groups[group]}</h3>
+      <div class="faces" role="radiogroup" aria-label={t.groups[group]}>
         {#each faces as f (f)}
           <button class="face" class:checked={current === f} role="radio" aria-checked={current === f} title={face(f).blurb} onclick={() => pick(f)}>
             <span class="thumb"><Eye {id} screen={preview(f)} board="live" size={50} /></span>
@@ -132,8 +135,8 @@
       <div class="options">
         {#if hasSource(current)}
           <div class="row">
-            <span class="label">Shows</span>
-            <div class="seg" role="radiogroup" aria-label="Shows">
+            <span class="label">{t.shows}</span>
+            <div class="seg" role="radiogroup" aria-label={t.shows}>
               {#each ["cpu", "gpu"] as const as s (s)}
                 <button class:checked={src === s} role="radio" aria-checked={src === s} onclick={() => showSource(s)}>{DEVICES[s].title}</button>
               {/each}
@@ -143,17 +146,17 @@
         {#if current === "music"}
           {@const playing = monitor.last?.music}
           <div class="row">
-            <span class="label ellipsis">{playing ? `${playing.title}${playing.artist ? ` · ${playing.artist}` : ""}` : "Nothing playing"}</span>
+            <span class="label ellipsis">{playing ? `${playing.title}${playing.artist ? ` · ${playing.artist}` : ""}` : t.nothingPlaying}</span>
             <div class="seg">
-              <button title="Previous track" onclick={() => monitor.musicControl("previous").catch(() => {})}>⏮</button>
-              <button title="Play or pause" onclick={() => monitor.musicControl("toggle").catch(() => {})}>{playing?.state === "play" ? "Pause" : "Play"}</button>
-              <button title="Next track" onclick={() => monitor.musicControl("next").catch(() => {})}>⏭</button>
+              <button title={t.previous} onclick={() => monitor.musicControl("previous").catch(() => {})}>⏮</button>
+              <button title={t.playPause} onclick={() => monitor.musicControl("toggle").catch(() => {})}>{playing?.state === "play" ? t.pause : t.play}</button>
+              <button title={t.next} onclick={() => monitor.musicControl("next").catch(() => {})}>⏭</button>
             </div>
           </div>
         {/if}
         {#if current === "eyes"}
           <label class="row check">
-            <span class="label">Follow the mouse pointer</span>
+            <span class="label">{t.followPointer}</span>
             <input type="checkbox" checked={monitor.followPointer} onchange={(e) => monitor.setFollowPointer(e.currentTarget.checked)} />
             <span class="track"><span class="knob"></span></span>
           </label>
@@ -162,14 +165,14 @@
           {@const sending = monitor.sending?.side === side ? monitor.sending : null}
           {@const offline = monitor.link !== "connected"}
           <div class="row">
-            <span class="label">{offline ? "Connect the board to send a picture" : "PNG, JPEG, WebP or GIF"}</span>
+            <span class="label">{offline ? t.connectForImage : t.imageTypes}</span>
             <div class="seg">
               <label class="file" class:disabled={monitor.sending !== null || offline}>
-                {sending ? `Sending ${Math.round(sending.progress * 100)}%` : monitor.images[side] ? "Replace…" : "Choose…"}
+                {sending ? t.sending(Math.round(sending.progress * 100)) : monitor.images[side] ? t.replace : t.choose}
                 <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" disabled={monitor.sending !== null || offline} onchange={chooseImage} />
               </label>
               {#if monitor.images[side]}
-                <button disabled={monitor.sending !== null || offline} onclick={removeImage}>Remove</button>
+                <button disabled={monitor.sending !== null || offline} onclick={removeImage}>{t.remove}</button>
               {/if}
             </div>
           </div>
@@ -181,13 +184,13 @@
   </div>
 
   <footer>
-    <div class="seg" role="radiogroup" aria-label="Rotation">
+    <div class="seg" role="radiogroup" aria-label={t.rotation}>
       {#each ROTATIONS as deg (deg)}
         <button
           class:checked={monitor.rotation[id] === deg}
           role="radio"
           aria-checked={monitor.rotation[id] === deg}
-          title={deg === 0 ? "Upright" : `Turned ${deg}° clockwise`}
+          title={deg === 0 ? t.upright : t.turned(deg)}
           onclick={() => turn(deg)}
         >
           <svg viewBox="0 0 16 16" aria-hidden="true" style:rotate="{deg}deg">
@@ -198,7 +201,7 @@
         </button>
       {/each}
     </div>
-    <button class="both" disabled={same} onclick={mirror}>{same ? "Same on both screens" : `Use on the ${side === "left" ? "right" : "left"} too`}</button>
+    <button class="both" disabled={same} onclick={mirror}>{same ? t.same : side === "left" ? t.useOnRight : t.useOnLeft}</button>
   </footer>
 </div>
 

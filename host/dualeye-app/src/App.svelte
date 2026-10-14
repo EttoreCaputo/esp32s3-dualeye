@@ -7,8 +7,11 @@
   import UpdateBanner from "./lib/UpdateBanner.svelte";
   import { heatColor, screenFor, type DeviceId } from "./lib/firmware";
   import { fanRpm, monitor } from "./lib/monitor.svelte";
+  import { i18n } from "./lib/i18n/index.svelte";
 
   monitor.start();
+  i18n.start();
+  const t = $derived(i18n.t.main);
 
   let settings = $state(false);
   let drawerTab = $state<Tab>("voice");
@@ -69,15 +72,15 @@
   const caption = $derived.by(() => {
     switch (board) {
       case "live":
-        return "Mirroring the board in real time";
+        return t.caption.live;
       case "stale":
-        return "The board keeps the last frame and marks it stale";
+        return t.caption.stale;
       case "waiting":
-        return "The board is up and waiting for its first frame";
+        return t.caption.waiting;
       case "boot":
-        return "Opening the port reset the board, it is booting";
+        return t.caption.boot;
       default:
-        return monitor.link === "offline" ? "Lost the board" : "Plug the DualEye into a USB port";
+        return monitor.link === "offline" ? t.caption.lost : t.caption.plug;
     }
   });
 </script>
@@ -118,19 +121,19 @@
           onclick={() => {
             drawerTab = "device";
             settings = true;
-          }}>Connection settings</button
+          }}>{t.caption.connection}</button
         >
       {/if}
     </div>
 
-    <div class="toggle" role="group" aria-label="Screen rendering">
-      <button class:active={!pixels} onclick={() => (pixels = false)}>Glass</button>
-      <button class:active={pixels} onclick={() => (pixels = true)}>Pixels</button>
+    <div class="toggle" role="group" aria-label={t.render.label}>
+      <button class:active={!pixels} onclick={() => (pixels = false)}>{t.render.glass}</button>
+      <button class:active={pixels} onclick={() => (pixels = true)}>{t.render.pixels}</button>
       <span class="thumb" class:right={pixels}></span>
     </div>
     <div class="spec" aria-hidden="true">
       ESP32-S3 · 2 × GC9A01 · 240 × 240
-      <span class="tip">{pixels ? "Hover a screen to inspect its pixels" : "Click a screen to change its face"}</span>
+      <span class="tip">{pixels ? t.tipPixels : t.tipFaces}</span>
     </div>
   </section>
 

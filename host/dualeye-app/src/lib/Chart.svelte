@@ -1,6 +1,7 @@
 <!-- Temperature line over a load area, both on the same 0–100 scale (°C and %). -->
 <script lang="ts">
   import type { Sample } from "./monitor.svelte";
+  import { i18n } from "./i18n/index.svelte";
 
   let { samples, temp, load, color, span = 180_000 }: {
     samples: Sample[];
@@ -10,6 +11,7 @@
     span?: number;
   } = $props();
 
+  const t = $derived(i18n.t.main.telemetry);
   let w = $state(0);
   let h = $state(0);
   let hover = $state<number | null>(null);
@@ -76,7 +78,7 @@
 
 <div class="chart" bind:clientWidth={w} bind:clientHeight={h}>
   {#if w && h}
-    <svg width={w} height={h} role="img" aria-label="Temperature and load history" onpointermove={pointer} onpointerleave={() => (hover = null)}>
+    <svg width={w} height={h} role="img" aria-label={t.chart} onpointermove={pointer} onpointerleave={() => (hover = null)}>
       <defs>
         <linearGradient id="area-{uid}" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stop-color={color} stop-opacity="0.32" />
@@ -100,7 +102,7 @@
       {/each}
       <line class="base" x1={pad.l} x2={w - pad.r} y1={y(0)} y2={y(0)} />
       <text class="axis" x={pad.l} y={h - 4}>{ago(width)}</text>
-      <text class="axis" x={w - pad.r} y={h - 4} text-anchor="end">now</text>
+      <text class="axis" x={w - pad.r} y={h - 4} text-anchor="end">{t.now}</text>
 
       <g mask="url(#mask-{uid})">
         <path d={loadArea} fill="url(#area-{uid})" />
@@ -123,9 +125,9 @@
         {#if lv !== undefined}<circle cx={hx} cy={y(lv)} r="3" fill={color} />{/if}
         <g transform="translate({Math.min(Math.max(hx - 58, 0), w - pad.r - 116)},{pad.t})">
           <rect class="tip" width="116" height="44" rx="8" />
-          <text class="tip-k" x="10" y="17">TEMP</text>
+          <text class="tip-k" x="10" y="17">{t.tipTemp}</text>
           <text class="tip-v" x="106" y="17" text-anchor="end">{tv === undefined ? "—" : `${tv.toFixed(1)} °C`}</text>
-          <text class="tip-k" x="10" y="34">LOAD</text>
+          <text class="tip-k" x="10" y="34">{t.tipLoad}</text>
           <text class="tip-v" x="106" y="34" text-anchor="end" fill={color}>{lv === undefined ? "—" : `${lv.toFixed(0)} %`}</text>
         </g>
       {/if}

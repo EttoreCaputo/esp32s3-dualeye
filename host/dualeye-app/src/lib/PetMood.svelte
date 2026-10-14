@@ -6,11 +6,14 @@
 <script lang="ts">
   import { SCENES, ScenePlayer } from "./scenes";
   import type { PetState } from "./monitor.svelte";
-  import { MOODS, NOW, REACTIONS, ago, clock, duration, scenesEvery, voice } from "./petMood";
+  import { MOODS, NOW_COLORS, clock, scenesEvery } from "./petMood";
+  import { i18n } from "./i18n/index.svelte";
 
   let { pet }: { pet: PetState } = $props();
 
-  const mood = $derived(MOODS[pet.mood] ?? MOODS.content);
+  const t = $derived(i18n.t.pet);
+  const mood = $derived({ ...(MOODS[pet.mood] ?? MOODS.content), ...(t.moods[pet.mood] ?? t.moods.content) });
+  const word = (dict: Record<string, string>, key: string) => dict[key] ?? key;
   let canvas = $state<HTMLCanvasElement>();
   let player: ScenePlayer | null = null;
 
@@ -41,9 +44,9 @@
   });
 
   const levels = $derived([
-    ["Energy", pet.energy, "#ffd040", "Follows the time of day; talking and music lift it"],
-    ["Happiness", pet.happiness, "#40e080", "Up with conversations, music, Claude finishing; down with errors and heat"],
-    ["Affection", pet.affection, "#ff5aa8", "Grows as you talk and play with it; fades slowly when ignored"],
+    [t.levels.energy.name, t.levels.energy.how, pet.energy, "#ffd040"],
+    [t.levels.happiness.name, t.levels.happiness.how, pet.happiness, "#40e080"],
+    [t.levels.affection.name, t.levels.affection.how, pet.affection, "#ff5aa8"],
   ] as const);
 </script>
 
@@ -51,14 +54,14 @@
   <div class="top">
     <canvas bind:this={canvas} aria-hidden="true"></canvas>
     <div class="text">
-      <h3>Mood</h3>
+      <h3>{t.mood}</h3>
       <div class="label">{mood.label}</div>
-      <p>{pet.away ? "You're away: it rests until you're back." : mood.says}</p>
+      <p>{pet.away ? t.away : mood.says}</p>
     </div>
   </div>
 
   <div class="levels">
-    {#each levels as [name, value, color, how] (name)}
+    {#each levels as [name, how, value, color] (name)}
       <div class="level" title={how}>
         <div class="lhead"><span class="name">{name}</span><span class="pct">{Math.round(value * 100)}</span></div>
         <span class="track"><span class="fill" style:width="{value * 100}%" style:background={color}></span></span>
@@ -67,39 +70,39 @@
   </div>
 
   {#if pet.now.length}
-    <div class="now" aria-label="Right now">
+    <div class="now" aria-label={t.rightNow}>
       {#each pet.now as n (n)}
-        <span class="chip" style:--n={NOW[n]?.color ?? "#9a9ea8"}><span class="dot"></span>{NOW[n]?.label ?? n}</span>
+        <span class="chip" style:--n={NOW_COLORS[n] ?? "#9a9ea8"}><span class="dot"></span>{word(t.now, n)}</span>
       {/each}
     </div>
   {/if}
 
   <dl class="facts">
-    <div><dt>Voice</dt><dd>{voice(pet.pitch)} <span class="dim">×{pet.pitch.toFixed(2)}</span></dd></div>
-    <div><dt>Scenes</dt><dd>{pet.away || !pet.idle_scenes ? "paused" : scenesEvery(pet.pace)}</dd></div>
-    <div><dt>Last played with</dt><dd>{ago(pet.lonely_s)}</dd></div>
+    <div><dt>{t.facts.voice}</dt><dd>{t.voice(pet.pitch)} <span class="dim">×{pet.pitch.toFixed(2)}</span></dd></div>
+    <div><dt>{t.facts.scenes}</dt><dd>{pet.away || !pet.idle_scenes ? t.facts.paused : t.scenesEvery(...scenesEvery(pet.pace))}</dd></div>
+    <div><dt>{t.facts.lastPlayed}</dt><dd>{t.ago(pet.lonely_s)}</dd></div>
     {#if pet.idle_s !== undefined}
-      <div><dt>You</dt><dd>{pet.idle_s < 60 ? "at the computer" : `idle for ${duration(pet.idle_s)}`}</dd></div>
+      <div><dt>{t.facts.you}</dt><dd>{pet.idle_s < 60 ? t.facts.atComputer : t.facts.idleFor(pet.idle_s)}</dd></div>
     {/if}
     {#if pet.minute !== undefined}
-      <div><dt>Its clock</dt><dd>{clock(pet.minute)}</dd></div>
+      <div><dt>{t.facts.clock}</dt><dd>{clock(pet.minute)}</dd></div>
     {/if}
   </dl>
 
   <div class="recent">
-    <h4>Recent reactions</h4>
+    <h4>{t.recent}</h4>
     {#if pet.recent.length}
       <ul>
         {#each pet.recent as r, i (i)}
           <li>
-            <span class="what">{REACTIONS[r.what] ?? r.what}</span>
-            <span class="scene">{r.scene.replace(/_/g, " ")}</span>
-            <span class="when">{ago(r.ago_s)}</span>
+            <span class="what">{word(t.reactions, r.what)}</span>
+            <span class="scene">{word(t.scenes, r.scene)}</span>
+            <span class="when">{t.ago(r.ago_s)}</span>
           </li>
         {/each}
       </ul>
     {:else}
-      <p class="none">None since the board started{pet.reactions ? "" : ": reactions are off"}.</p>
+      <p class="none">{t.none(pet.reactions)}</p>
     {/if}
   </div>
 </section>

@@ -4,6 +4,7 @@
   import Chart from "./Chart.svelte";
   import { COLOR, DEVICES, heatColor, type DeviceId } from "./firmware";
   import type { Metrics, Sample } from "./monitor.svelte";
+  import { i18n } from "./i18n/index.svelte";
 
   let { id, metrics, fan, samples, lcd }: {
     id: DeviceId;
@@ -13,6 +14,7 @@
     lcd: number;
   } = $props();
 
+  const t = $derived(i18n.t.main.telemetry);
   const dev = $derived(DEVICES[id]);
   const opts = { duration: 700, easing: cubicOut };
   const temp = new Tween(0, opts);
@@ -51,13 +53,13 @@
     <h2>{dev.title}</h2>
     <span class="lcd">LCD {lcd}</span>
     <div class="legend">
-      <span><i class="l-temp"></i>Temp</span>
-      <span><i class="l-load"></i>Load</span>
+      <span><i class="l-temp"></i>{t.temp}</span>
+      <span><i class="l-load"></i>{t.load}</span>
     </div>
     {#if range}
       <span class="range">
-        <span>min <b>{range.min.toFixed(0)}°</b></span>
-        <span>max <b>{range.max.toFixed(0)}°</b></span>
+        <span>{t.min} <b>{range.min.toFixed(0)}°</b></span>
+        <span>{t.max} <b>{range.max.toFixed(0)}°</b></span>
       </span>
     {/if}
   </header>
@@ -73,20 +75,20 @@
       </div>
       <dl>
         <div>
-          <dt>Load</dt>
+          <dt>{t.load}</dt>
           <dd class="accent">{metrics?.load_pct === undefined ? "—" : `${load.current.toFixed(0)}`}<small>%</small></dd>
         </div>
         <div>
-          <dt>Clock</dt>
+          <dt>{t.clock}</dt>
           <dd>{metrics?.clock_mhz === undefined ? "—" : (clock.current / 1000).toFixed(2)}<small>GHz</small></dd>
         </div>
         <div>
-          <dt>Power</dt>
+          <dt>{t.power}</dt>
           <dd>{metrics?.power_w === undefined ? "—" : power.current.toFixed(1)}<small>W</small></dd>
         </div>
         <div>
-          <dt>Fan</dt>
-          <dd>{fan === undefined ? "—" : Math.round(rpm.current).toLocaleString("en-US")}<small>rpm</small></dd>
+          <dt>{t.fan}</dt>
+          <dd>{fan === undefined ? "—" : i18n.number(Math.round(rpm.current))}<small>rpm</small></dd>
         </div>
         <div class="wide">
           <dt>{dev.memTitle}</dt>

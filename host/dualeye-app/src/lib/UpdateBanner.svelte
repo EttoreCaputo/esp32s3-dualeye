@@ -2,6 +2,7 @@
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { monitor } from "./monitor.svelte";
+  import { i18n } from "./i18n/index.svelte";
 
   let { onUpdate }: { onUpdate: () => void } = $props();
 
@@ -11,7 +12,8 @@
 
   const update = $derived(monitor.update);
   const visible = $derived(!!update && dismissed !== update.to && monitor.job === "idle");
-  const from = $derived(update?.from ? `v${update.from}` : "firmware from before 0.2.0");
+  const t = $derived(i18n.t.main.update);
+  const from = $derived(update?.from ? `v${update.from}` : t.old);
 </script>
 
 <!-- Always present, so the app's grid rows don't shift when the banner comes and goes. -->
@@ -21,17 +23,17 @@
       <div class="row">
         <span class="dot" aria-hidden="true"></span>
         <p>
-          <b>Firmware v{update.to} is available.</b>
-          <span class="dim">The board runs {from}.</span>
+          <b>{t.available(update.to)}</b>
+          <span class="dim">{t.runs(from)}</span>
         </p>
         {#if update.changes.length}
           <button class="link" aria-expanded={expanded} onclick={() => (expanded = !expanded)}>
-            {expanded ? "Hide changes" : "What's new"}
+            {expanded ? t.hide : t.whatsNew}
           </button>
         {/if}
         <span class="grow"></span>
-        <button class="btn" onclick={() => (dismissed = update.to)}>Later</button>
-        <button class="btn primary" onclick={onUpdate}>Update…</button>
+        <button class="btn" onclick={() => (dismissed = update.to)}>{t.later}</button>
+        <button class="btn primary" onclick={onUpdate}>{t.update}</button>
       </div>
       {#if expanded}
         <div class="changes" transition:slide={{ duration: 240, easing: cubicOut }}>

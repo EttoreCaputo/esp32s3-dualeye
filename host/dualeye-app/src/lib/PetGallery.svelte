@@ -7,9 +7,13 @@
   import { MOODS, SCENES, ScenePlayer, type Mood, type Scene } from "./scenes";
   import { SOUND_LIST, playHere } from "./sounds";
   import { monitor } from "./monitor.svelte";
+  import { i18n } from "./i18n/index.svelte";
 
   let { connected, petSounds, oldFirmware }: { connected: boolean; petSounds: boolean; oldFirmware: boolean } = $props();
 
+  const t = $derived(i18n.t.pet);
+  const g = $derived(t.gallery);
+  const label = (s: Scene) => (t.scenes as Record<string, string>)[s.name] ?? s.label;
   let target = $state<"board" | "here">("board");
   const onBoard = $derived(target === "board" && connected);
   let mood = $state<Mood | "all">("all");
@@ -120,30 +124,30 @@
     }
   }
 
-  const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+  const seconds = (ms: number) => `${i18n.number(ms / 1000, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} s`;
 </script>
 
 <section class="pet">
   <div class="head">
-    <h3>Animations</h3>
-    <div class="seg" role="radiogroup" aria-label="Play on">
-      <button role="radio" aria-checked={onBoard} class:on={onBoard} disabled={!connected} onclick={() => (target = "board")} title={connected ? "" : "Connect the board to play on it"}>
+    <h3>{g.animations}</h3>
+    <div class="seg" role="radiogroup" aria-label={g.playOn}>
+      <button role="radio" aria-checked={onBoard} class:on={onBoard} disabled={!connected} onclick={() => (target = "board")} title={connected ? "" : g.connectToPlay}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="8" r="3.2" /><circle cx="11" cy="8" r="3.2" /></svg>
-        Board
+        {g.board}
       </button>
       <button role="radio" aria-checked={!onBoard} class:on={!onBoard} onclick={() => (target = "here")}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8" rx="1.5" /><path d="M6 13.5h4" /></svg>
-        Here
+        {g.here}
       </button>
     </div>
   </div>
 
   <div class="stage" style:--c={picked.color === "rainbow" ? "#ff5aa8" : picked.color}>
-    <canvas bind:this={stageCanvas} class="big" aria-label="{picked.label}, playing"></canvas>
+    <canvas bind:this={stageCanvas} class="big" aria-label={g.playing(label(picked))}></canvas>
     <div class="about">
       <div class="title">
-        <span class="name">{picked.label}</span>
-        <span class="mood" style:--m={moodColor[picked.mood]}>{MOODS.find(([m]) => m === picked.mood)?.[1]}</span>
+        <span class="name">{label(picked)}</span>
+        <span class="mood" style:--m={moodColor[picked.mood]}>{t.sceneMoods[picked.mood]}</span>
       </div>
       <div class="meta">
         <span class="mono">{picked.name}</span>
@@ -159,39 +163,39 @@
       <div class="bar"><span style:width="{progress * 100}%"></span></div>
       <button class="replay" onclick={() => play(picked)} disabled={busy !== null}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9l7.5-4.5z" /></svg>
-        {onBoard ? "Play on the board" : "Play here"}
+        {onBoard ? g.playBoard : g.playHere}
       </button>
     </div>
   </div>
 
   {#if oldFirmware && connected}
-    <p class="hint">The board's firmware only knows the first 16 scenes, with no sounds or moods: update it from the Device tab.</p>
+    <p class="hint">{g.oldFirmware}</p>
   {/if}
   {#if error}<p class="hint error">{error}</p>{/if}
 
-  <div class="moods" role="tablist" aria-label="Mood">
-    <button role="tab" aria-selected={mood === "all"} class:on={mood === "all"} onclick={() => (mood = "all")}>All <span class="n">{SCENES.length}</span></button>
-    {#each MOODS as [key, label] (key)}
+  <div class="moods" role="tablist" aria-label={g.moodFilter}>
+    <button role="tab" aria-selected={mood === "all"} class:on={mood === "all"} onclick={() => (mood = "all")}>{g.all} <span class="n">{SCENES.length}</span></button>
+    {#each MOODS as [key] (key)}
       <button role="tab" aria-selected={mood === key} class:on={mood === key} style:--m={moodColor[key]} onclick={() => (mood = key)}>
-        <span class="dot"></span>{label}
+        <span class="dot"></span>{t.sceneMoods[key]}
       </button>
     {/each}
   </div>
 
   <div class="grid">
     {#each shown as scene (scene.name)}
-      <button class="card" class:picked={picked.name === scene.name} class:busy={busy === scene.name} onclick={() => play(scene)} title="{scene.label} · {seconds(scene.ms)}">
+      <button class="card" class:picked={picked.name === scene.name} class:busy={busy === scene.name} onclick={() => play(scene)} title="{label(scene)} · {seconds(scene.ms)}">
         <canvas use:card={scene.name} aria-hidden="true"></canvas>
-        <span class="label"><span class="dot" style:--m={moodColor[scene.mood]}></span>{scene.label}</span>
+        <span class="label"><span class="dot" style:--m={moodColor[scene.mood]}></span>{label(scene)}</span>
       </button>
     {/each}
   </div>
 </section>
 
 <section class="pet">
-  <h3>Sounds</h3>
+  <h3>{g.sounds}</h3>
   {#if !petSounds && onBoard}
-    <p class="hint">Pet sounds are off on the board: turn them on above to hear these there.</p>
+    <p class="hint">{g.soundsOff}</p>
   {/if}
   <div class="sounds">
     {#each pets as s (s.name)}
@@ -201,7 +205,7 @@
       </button>
     {/each}
   </div>
-  <h4>Chimes</h4>
+  <h4>{g.chimes}</h4>
   <div class="sounds">
     {#each chimes as s (s.name)}
       <button class="snd chime" class:busy={busy === s.name} onclick={() => sound(s.name)} title="{s.name} · {seconds(s.ms)}">

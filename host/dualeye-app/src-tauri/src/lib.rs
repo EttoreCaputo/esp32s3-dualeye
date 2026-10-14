@@ -102,6 +102,9 @@ struct Settings {
     /// How often the pet comments on your day out loud.
     #[serde(default)]
     quips: QuipLevel,
+    /// The app's language (`en`, `it`); `None` follows the system's.
+    #[serde(default)]
+    ui_language: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -1106,6 +1109,37 @@ fn set_follow_pointer(state: State<AppState>, on: bool) {
     state.save_settings();
 }
 
+/// The app's language: `None` follows the system's.
+#[tauri::command]
+fn ui_language(state: State<AppState>) -> Option<String> {
+    state.settings.lock().unwrap().ui_language.clone()
+}
+
+/// The tray menu's items, in the app's language.
+#[derive(Deserialize)]
+struct TrayLabels {
+    show: String,
+    quit: String,
+}
+
+/// Keep the app's language and put the tray menu in it.
+#[tauri::command]
+fn set_ui_language(app: AppHandle, state: State<AppState>, language: Option<String>, tray: TrayLabels) -> Result<(), String> {
+    let changed = {
+        let mut settings = state.settings.lock().unwrap();
+        let changed = settings.ui_language != language;
+        settings.ui_language = language;
+        changed
+    };
+    if changed {
+        state.save_settings();
+    }
+    if let Some(icon) = app.tray_by_id(TRAY_ID) {
+        icon.set_menu(Some(tray_menu(&app, &tray).map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Where the pointer is, as the board gets it: the mirror's eyes look there too.
 #[tauri::command]
 fn pointer_gaze() -> Option<(f32, f32)> {
@@ -1437,10 +1471,15 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+fn tray_menu(app: &AppHandle, labels: &TrayLabels) -> tauri::Result<Menu<tauri::Wry>> {
+    let show = MenuItem::with_id(app, "show", &labels.show, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", &labels.quit, true, None::<&str>)?;
+    Menu::with_items(app, &[&show, &quit])
+}
+
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show DualEye", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    // English until the window loads and sends the app's language.
+    let menu = tray_menu(app, &TrayLabels { show: "Show DualEye".into(), quit: "Quit".into() })?;
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("DualEye")
         .menu(&menu)
@@ -1548,7 +1587,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_transport, wifi_info, wifi_scan, wifi_setup, wifi_enable, wifi_forget, wifi_pair, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, quips_info, set_quips, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, pointer_gaze, music_cover, music_control])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_transport, wifi_info, wifi_scan, wifi_setup, wifi_enable, wifi_forget, wifi_pair, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, voice_info, set_voice, set_api_key, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, quips_info, set_quips, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, ui_language, set_ui_language, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {

@@ -78,21 +78,6 @@ export type Source = DeviceId;
 export type Faces = { cpu: Face; gpu: Face; src: Record<DeviceId, Source> };
 export const DEFAULT_SOURCES: Record<DeviceId, Source> = { cpu: "cpu", gpu: "gpu" };
 export const DEFAULT_FACES: Faces = { cpu: "classic", gpu: "classic", src: { ...DEFAULT_SOURCES } };
-export const FACES: { id: Face; name: string; blurb: string }[] = [
-  { id: "classic", name: "Classic", blurb: "Temperature, clock, power, fan" },
-  { id: "rings", name: "Rings", blurb: "Load, temperature and memory rings" },
-  { id: "plus", name: "Plus", blurb: "Classic with a RAM or VRAM bar" },
-  { id: "bar", name: "Bar", blurb: "Classic with a slim memory bar, no numbers" },
-  { id: "claude", name: "Claude", blurb: "Claude Code's 5-hour and weekly limits, with Clawd" },
-  { id: "clawd", name: "Clawd", blurb: "Clawd shows whether Claude Code is working" },
-  { id: "net", name: "Network", blurb: "Download and upload speed" },
-  { id: "disk", name: "Disk", blurb: "System disk space, reads and writes" },
-  { id: "battery", name: "Battery", blurb: "The laptop's charge and time left" },
-  { id: "image", name: "Image", blurb: "A picture or GIF of your own" },
-  { id: "timer", name: "Timer", blurb: "Timers, reminders and the pomodoro counting down" },
-  { id: "music", name: "Music", blurb: "What's playing, with its cover; Alexa pauses and skips it" },
-  { id: "eyes", name: "Eyes", blurb: "A pair of eyes that follow your mouse pointer" },
-];
 /** Faces that show the CPU's or the GPU's metrics, as the screen's source says. */
 export const hasSource = (face: Face) => face === "classic" || face === "rings" || face === "plus" || face === "bar";
 /** Extra clockwise turn of a screen, in degrees; `rot` on the wire. */

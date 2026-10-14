@@ -37,15 +37,13 @@
   import { VOICE_PROMPTS } from "./voicePrompts";
   import PetGallery from "./PetGallery.svelte";
   import PetMood from "./PetMood.svelte";
+  import InfoTip from "./InfoTip.svelte";
+  import { i18n, LANGUAGES, type Lang } from "./i18n/index.svelte";
 
-  const TABS: [Tab, string][] = [
-    ["voice", "Voice"],
-    ["pet", "Pet"],
-    ["timers", "Timers"],
-    ["claude", "Claude"],
-    ["device", "Device"],
-    ["diagnostics", "Diagnostics"],
-  ];
+  // `tx` and not `t`: timers are `t` here.
+  const tx = $derived(i18n.t.settings);
+  const tc = $derived(tx.common);
+  const TABS: Tab[] = ["voice", "pet", "timers", "claude", "device", "diagnostics"];
 
   let { open = $bindable(false), tab = $bindable("voice") }: { open: boolean; tab?: Tab } = $props();
 
@@ -76,11 +74,7 @@
   });
 
   // The Device tab's connection: USB, WiFi or both, and the board's WiFi.
-  const TRANSPORTS: [Transport, string, string][] = [
-    ["auto", "Automatic", "USB, else WiFi"],
-    ["usb", "USB only", "cable"],
-    ["wifi", "WiFi only", "network"],
-  ];
+  const TRANSPORTS: Transport[] = ["auto", "usb", "wifi"];
   let wifi = $state<WifiInfo | null>(null);
   let wifiBusy = $state<"" | "scan" | "join" | "toggle" | "forget" | "pair" | "transport">("");
   let wifiError = $state("");
@@ -109,19 +103,20 @@
 
   function wifiLabel(b: WifiStatus): string {
     const net = b.ssid ? `“${b.ssid}”` : "";
+    const say = tx.device.state;
     switch (b.state) {
       case "off":
-        return b.ssid ? `Off · ${net}` : "Not set up";
+        return b.ssid ? say.off(net) : say.notSetUp;
       case "connecting":
-        return `Joining ${net}…`;
+        return say.joining(net);
       case "connected":
-        return `On ${net}`;
+        return say.on(net);
       case "no_network":
-        return `${net} not found, retrying`;
+        return say.notFound(net);
       case "wrong_password":
-        return `Wrong password for ${net}`;
+        return say.wrongPassword(net);
       default:
-        return `Reconnecting to ${net}…`;
+        return say.reconnecting(net);
     }
   }
 
@@ -185,26 +180,22 @@
     await timerTool("set_reminder", { text: remindText.trim(), at: remindAt });
     if (!timerError) remindText = "";
   }
-  const TIMER_KINDS: Record<TimerKind, [string, string]> = {
-    timer: ["Timer", "#f8a639"],
-    work: ["Pomodoro: focus", "#ff6347"],
-    break: ["Pomodoro: break", "#40e080"],
-    reminder: ["Reminder", "#3ae7ed"],
+  const TIMER_COLORS: Record<TimerKind, string> = {
+    timer: "#f8a639",
+    work: "#ff6347",
+    break: "#40e080",
+    reminder: "#3ae7ed",
   };
   const clockText = (secs: number) => {
     const two = (n: number) => String(n).padStart(2, "0");
     return secs >= 3600 ? `${Math.trunc(secs / 3600)}:${two(Math.trunc((secs % 3600) / 60))}:${two(secs % 60)}` : `${Math.trunc(secs / 60)}:${two(secs % 60)}`;
   };
   const timerSub = (t: TimerInfo) => {
-    if (t.state === "ring") return "ringing";
-    if (t.state === "pause") return "paused";
-    return t.ends_at ? `until ${t.ends_at}` : "";
+    if (t.state === "ring") return tx.timers.ringing;
+    if (t.state === "pause") return tx.timers.paused;
+    return t.ends_at ? tx.timers.until(t.ends_at) : "";
   };
-  const SHOW_ON: [ShowOn, string][] = [
-    ["left", "Left"],
-    ["right", "Right"],
-    ["none", "Neither"],
-  ];
+  const SHOW_ON: ShowOn[] = ["left", "right", "none"];
 
   $effect(() => {
     if (!open || tab !== "diagnostics" || diag !== "sensors") return;
@@ -256,29 +247,21 @@
   let keysOpen = $state(false);
   let customLength = $state<number | null>(null);
 
-  const PERSONALITIES: [Personality, string, string][] = [
-    ["cute", "Cute", "Mochi: a sweet and cheerful kitten"],
-    ["playful", "Playful", "Birba: jokes, puns, gentle teasing"],
-    ["calm", "Calm", "Fusa: soft and reassuring"],
-    ["sassy", "Sassy", "Sornione: a cat with dry humour"],
-    ["butler", "Butler", "Ambrogio: formal, at your service"],
-    ["minimal", "Minimal", "Punto: a creature of few words"],
-    ["custom", "Your own", "Describe it yourself"],
-  ];
+  const PERSONALITIES: Personality[] = ["cute", "playful", "calm", "sassy", "butler", "minimal", "custom"];
   /** `agent::MAX_PERSONALITY`. */
   const MAX_PERSONALITY = 300;
-  const KIND_NAMES: Record<ModelInfo["kind"], string> = { whisper: "Hearing", llm: "Understanding", voice: "Voice" };
   const ENGINE_NAMES: Record<TtsEngine, string> = { piper: "Piper" };
-  const STATUS = { off: "Off", starting: "Loading…", ready: "Ready", error: "Not working" };
+  /** A note from the backend, in the app's language when there's a translation. */
+  const note = (text: string) => tx.voice.notes[text] ?? text;
 
   /** A model as its list shows it: size and whether it's here, or whether its service has a key. */
   function optionLabel(v: VoiceInfo, m: ModelInfo): string {
     if (m.provider) {
       // ElevenLabs' voices by their names.
       const name = accountVoices?.find((a) => m.id === accountId(a))?.name ?? m.id.slice(m.id.indexOf(":") + 1);
-      return `${name}${m.installed ? "" : ` · needs a ${providerName(v, m.provider)} key`}`;
+      return `${name}${m.installed ? "" : tx.voice.needsKey(providerName(v, m.provider))}`;
     }
-    return `${m.id} · ${mb(m.bytes)}${m.installed ? " · downloaded" : ""}${m.id === v.recommendation.whisper || m.id === v.recommendation.llm ? " · recommended" : ""}`;
+    return `${m.id} · ${mb(m.bytes)}${m.installed ? tx.voice.downloaded : ""}${m.id === v.recommendation.whisper || m.id === v.recommendation.llm ? tx.voice.recommended : ""}`;
   }
 
   let voice = $state<VoiceInfo | null>(null);
@@ -331,7 +314,7 @@
       language: null,
       engine: null,
       bytes: 0,
-      note: a.category === "premade" ? "One of ElevenLabs' own voices" : a.description || "A voice of your ElevenLabs account",
+      note: a.category === "premade" ? tx.voice.elevenOwn : a.description || tx.voice.elevenAccount,
       license: "",
       installed: true,
       provider: "elevenlabs",
@@ -417,15 +400,13 @@
 
   // Its comments on your day, kept by the app.
   let quips = $state<QuipsInfo | null>(null);
-  const QUIP_LEVELS: [QuipLevel, string, string][] = [
-    ["off", "Never", "It keeps its thoughts to itself"],
-    ["rare", "Rarely", "Once a day at most"],
-    ["often", "Sometimes", "Up to three times a day"],
-  ];
+  const QUIP_LEVELS: QuipLevel[] = ["off", "rare", "often"];
 
   $effect(() => {
     if (!open || tab !== "pet") return;
     let alive = true;
+    // Whether it can speak: its comments need spoken replies on.
+    monitor.voiceInfo().then((v) => alive && (voice = v));
     const load = () => monitor.quipsInfo().then((q) => alive && (quips = q));
     load();
     const id = setInterval(load, 5000);
@@ -483,9 +464,7 @@
     }
     voice = await monitor.voiceInfo();
   }
-  const ENGINES: [TtsEngine, string, string][] = [
-    ["piper", "Piper", "Light and quick (GPL-3.0, about 100 MB from PyPI)"],
-  ];
+  const ENGINES: [TtsEngine, string, () => string][] = [["piper", "Piper", () => tx.voice.piperNote]];
 
   let testing = $state<string | null>(null);
   async function testVoice(language: string) {
@@ -523,8 +502,8 @@
 
   const gb = (mbytes: number) => `${Math.round(mbytes / 1024)} GB`;
   function hardwareLine(hw: Hardware): string {
-    const gpu = hw.gpu.kind === "apple" ? "Apple silicon GPU" : hw.gpu.kind === "nvidia" ? `${hw.gpu.name} (${gb(hw.gpu.memory_mb)})` : "no GPU the models can use";
-    return `${hw.cpu}, ${hw.cores} cores, ${gb(hw.memory_mb)}, ${gpu}`;
+    const gpu = hw.gpu.kind === "apple" ? tx.voice.gpuApple : hw.gpu.kind === "nvidia" ? `${hw.gpu.name} (${gb(hw.gpu.memory_mb)})` : tx.voice.gpuNone;
+    return tx.voice.hardware(hw.cpu, hw.cores, gb(hw.memory_mb), gpu);
   }
 
   function usesRecommended(v: VoiceInfo): boolean {
@@ -572,13 +551,13 @@
     }
   }
 
-  const LANGUAGES: [SttLanguage, string][] = [
+  const STT_LANGUAGES: [SttLanguage, string][] = [
     ["auto", "Auto"],
     ["it", "Italiano"],
     ["en", "English"],
   ];
   const mb = (n: number) => `${Math.round(n / 1_000_000)} MB`;
-  const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const clock = (ms: number) => i18n.time(ms, true);
   const newestFirst = $derived([...monitor.transcripts].reverse());
 
   async function linkClaude(connect: boolean) {
@@ -642,7 +621,7 @@
 
   const claudeUsage = $derived(monitor.last?.claude);
   const usesClaude = $derived(isClaudeFace(monitor.faces.cpu) || isClaudeFace(monitor.faces.gpu));
-  const ago = (s: number) => (s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`);
+  const ago = (s: number) => tc.ago(s);
 
   // The port esptool will use: the pinned one, else the only Espressif device plugged in.
   const boards = $derived(ports.filter((p) => p.is_board));
@@ -651,11 +630,12 @@
 
   const onBoard = $derived.by(() => {
     const fw = monitor.boardFirmware;
-    if (monitor.link !== "connected") return { text: "—", note: "offline" };
-    if (!fw) return { text: "—", note: "asking…" };
+    const d = tx.device;
+    if (monitor.link !== "connected") return { text: "—", note: tc.offline };
+    if (!fw) return { text: "—", note: d.asking2 };
     if (fw.state === "version") return { text: `v${fw.version}`, note: fw.idf ? `IDF ${fw.idf}` : "" };
-    if (fw.state === "legacy") return { text: "before 0.2.0", note: "unversioned" };
-    return { text: "none", note: "blank flash" };
+    if (fw.state === "legacy") return { text: d.before020, note: d.unversioned };
+    return { text: d.none, note: d.blank };
   });
 
   async function identify() {
@@ -739,7 +719,13 @@
   }
 
   const hex = (n: number) => n.toString(16).padStart(4, "0");
-  const kb = (n: number) => `${Math.round(n / 1024)} KB`;
+  const kb = (n: number) => `${i18n.number(Math.round(n / 1024))} KB`;
+  const seconds = (ms: number) => `${i18n.number(ms / 1000, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} s`;
+
+  /** The app's language: a language, or `system` to follow the computer's. */
+  const langChoice = $derived(i18n.choice ?? "system");
+  const systemName = $derived(LANGUAGES.find((l) => l.id === i18n.system)?.name ?? "English");
+  const pickLang = (value: string) => i18n.set(value === "system" ? null : (value as Lang));
   const fmt = (r: Reading) => (r.unit === "RPM" || r.unit === "%" || r.unit === "MB" ? r.value.toFixed(0) : r.value.toFixed(1));
 </script>
 
@@ -759,15 +745,15 @@
         <button
           class="btn small"
           disabled={v.tts !== "ready" || testing !== null || monitor.link !== "connected" || !m?.installed}
-          title="Say a sentence through the board"
-          onclick={() => testVoice(lang)}>{testing === lang ? "Speaking…" : "Test"}</button
+          title={tx.voice.testTitle}
+          onclick={() => testVoice(lang)}>{testing === lang ? tx.voice.testing : tx.voice.test}</button
         >
       {/if}
     </div>
     <div class="select">
       <select value={chosen} disabled={off} aria-label={label} onchange={(e) => onpick(e.currentTarget.value)}>
-        {#if !m}<option value={chosen} disabled>Choose…</option>{/if}
-        <optgroup label="On this computer">
+        {#if !m}<option value={chosen} disabled>{tx.voice.choose}</option>{/if}
+        <optgroup label={tx.voice.onComputer}>
           {#each list.filter((o) => !o.provider) as o (o.id)}
             <option value={o.id}>{optionLabel(v, o)}</option>
           {/each}
@@ -775,7 +761,7 @@
         {#each v.providers as p (p.id)}
           {@const cloud = list.filter((o) => o.provider === p.id)}
           {#if cloud.length}
-            <optgroup label="{p.name}, online">
+            <optgroup label={tx.voice.onlineGroup(p.name)}>
               {#each cloud as o (o.id)}
                 <option value={o.id}>{optionLabel(v, o)}</option>
               {/each}
@@ -788,25 +774,25 @@
     {#if m && !off}
       <div class="mstatus">
         <span class="mnote">
-          {m.note}
+          {note(m.note)}
         </span>
         <span class="mside">
           {#if m.provider}
             {#if m.installed}
-              <span class="chip online" title="Runs online: what you say is sent there">Online</span>
+              <span class="chip online" title={tx.voice.onlineTitle}>{tc.online}</span>
             {:else}
-              <button class="btn small primary" onclick={() => (keysOpen = true)}>Add a {providerName(v, m.provider)} key</button>
+              <button class="btn small primary" onclick={() => (keysOpen = true)}>{tx.voice.addKey(providerName(v, m.provider))}</button>
             {/if}
           {:else if downloading}
-            <button class="btn small" onclick={() => monitor.cancelDownload()}>{Math.round(v.download?.[1] ?? 0)}% · Stop</button>
+            <button class="btn small" onclick={() => monitor.cancelDownload()}>{tx.voice.stop(Math.round(v.download?.[1] ?? 0))}</button>
           {:else if !m.installed}
-            <button class="btn small primary" disabled={!!v.download} onclick={() => download(m.id)}>Download · {mb(m.bytes)}</button>
+            <button class="btn small primary" disabled={!!v.download} onclick={() => download(m.id)}>{tx.voice.download(mb(m.bytes))}</button>
           {:else if m.engine && !v[m.engine]}
             <button class="btn small primary" disabled={!!installing} onclick={() => m.engine && installEngine(m.engine)}
-              >{installing ? "Installing…" : `Install ${ENGINE_NAMES[m.engine]}`}</button
+              >{installing ? tc.installing : tx.voice.installEngine(ENGINE_NAMES[m.engine])}</button
             >
           {:else}
-            <span class="chip ready">Ready</span>
+            <span class="chip ready">{tc.ready}</span>
           {/if}
         </span>
       </div>
@@ -823,27 +809,44 @@
 <svelte:window onkeydown={onKey} />
 
 {#if open}
-  <button class="scrim" transition:fade={{ duration: 200 }} onclick={() => (open = false)} aria-label="Close settings"></button>
+  <button class="scrim" transition:fade={{ duration: 200 }} onclick={() => (open = false)} aria-label={tc.close}></button>
   <aside
     class="drawer"
     class:resizing
     style:--w="{width}px"
     transition:fly={{ x: 40, duration: 320, easing: cubicOut, opacity: 0 }}
-    aria-label="Settings"
+    aria-label={tc.title}
   >
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="grip" onpointerdown={startResize} ondblclick={resetWidth} title="Drag to resize, double-click to reset"></div>
+    <div class="grip" onpointerdown={startResize} ondblclick={resetWidth} title={tc.resize}></div>
+    <header class="dhead">
+      <h2>{tc.title}</h2>
+      <label class="lang" title={tc.language}>
+        <svg viewBox="0 0 16 16" aria-hidden="true"
+          ><circle cx="8" cy="8" r="6.3" /><path d="M1.8 8h12.4M8 1.7c-1.9 1.8-2.8 3.9-2.8 6.3s.9 4.5 2.8 6.3M8 1.7c1.9 1.8 2.8 3.9 2.8 6.3s-.9 4.5-2.8 6.3" /></svg
+        >
+        <select value={langChoice} aria-label={tc.language} onchange={(e) => pickLang(e.currentTarget.value)}>
+          <option value="system">{tc.system(systemName)}</option>
+          {#each LANGUAGES as l (l.id)}
+            <option value={l.id}>{l.name}</option>
+          {/each}
+        </select>
+      </label>
+      <button class="dclose" onclick={() => (open = false)} aria-label={tc.close} title={tc.close}>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+      </button>
+    </header>
     <nav>
-      {#each TABS as [key, label] (key)}
-        <button class:active={tab === key} onclick={() => (tab = key)}>{label}</button>
+      {#each TABS as key (key)}
+        <button class:active={tab === key} onclick={() => (tab = key)}>{tx.tabs[key]}</button>
       {/each}
-      <span class="indicator" style:--i={TABS.findIndex(([key]) => key === tab)}></span>
+      <span class="indicator" style:--i={TABS.indexOf(tab)}></span>
     </nav>
 
     <div class="content">
       {#if tab === "voice"}
         {#if !voice}
-          <p class="empty">Loading…</p>
+          <p class="empty">{tc.loading}</p>
         {:else}
           {@const v = voice}
           <section class="voice">
@@ -851,26 +854,25 @@
               <input type="checkbox" checked={v.settings.enabled} onchange={(e) => setVoice({ enabled: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
               <span class="mtext">
-                <span class="slabel">Voice assistant</span>
-                <span class="mnote">Say “Alexa”, then a command: “metti la faccia rings a sinistra”, “what's the temperature?”</span>
+                <span class="slabel">{tx.voice.assistant} <InfoTip text={tx.voice.assistantTip} /></span>
               </span>
             </label>
             {#if v.settings.enabled}
               <div class="pills">
-                {#each [["Hearing", v.stt], ["Understanding", v.settings.llm ? v.llm : "off"], ["Speaking", v.tts]] as [name, state] (name)}
-                  <span class="pill {state}" title={STATUS[state as keyof typeof STATUS]}><span class="dot"></span>{name}</span>
+                {#each [[tx.voice.hearing, v.stt], [tx.voice.understanding, v.settings.llm ? v.llm : "off"], [tx.voice.speaking, v.tts]] as [name, state] (name)}
+                  <span class="pill {state}" title={tx.voice.status[state as keyof typeof tx.voice.status]}><span class="dot"></span>{name}</span>
                 {/each}
-                <span class="pill board" title="The board's voice state">Board: {monitor.link === "connected" ? monitor.voice : "offline"}</span>
+                <span class="pill board" title={tx.voice.boardStateTitle}>{tx.voice.board(monitor.link === "connected" ? monitor.voice : tc.offline)}</span>
               </div>
-              {#each [v.stt === "error" && v.stt_error, v.tts === "error" && v.tts_error, v.settings.llm && v.llm === "error" && v.llm_error && `${v.llm_error}. Meanwhile a few fixed phrases work.`] as err, i (i)}
+              {#each [v.stt === "error" && v.stt_error, v.tts === "error" && v.tts_error, v.settings.llm && v.llm === "error" && v.llm_error && tx.voice.llmFallback(v.llm_error)] as err, i (i)}
                 {#if err}<p class="hint error">{err}</p>{/if}
               {/each}
               {#if v.tts_fallback}
-                <p class="hint">The downloaded voice is answering for now: {v.tts_fallback}. The online voice is tried again in a minute.</p>
+                <p class="hint">{tx.voice.ttsFallback(v.tts_fallback)}</p>
               {/if}
             {/if}
             <div class="volume">
-              <span class="rlabel">Volume</span>
+              <span class="rlabel">{tx.voice.volume}</span>
               <input
                 type="range"
                 min="0"
@@ -878,22 +880,22 @@
                 step="5"
                 value={volume ?? 60}
                 disabled={volume === null}
-                aria-label="Speaker volume"
+                aria-label={tx.voice.volumeAria}
                 onchange={(e) => setVolume(Number(e.currentTarget.value))}
               />
               <span class="pmeta">{volume === null ? "—" : `${volume}%`}</span>
             </div>
             <div class="rotation">
-              <span class="rlabel">Language</span>
-              <div class="rots langs" role="radiogroup" aria-label="Language">
-                {#each LANGUAGES as [id, label] (id)}
+              <span class="rlabel">{tx.voice.language} <InfoTip text={tx.voice.languageTip} /></span>
+              <div class="rots langs" role="radiogroup" aria-label={tx.voice.language}>
+                {#each STT_LANGUAGES as [id, label] (id)}
                   <button
                     class="rot"
                     class:checked={v.settings.language === id}
                     role="radio"
                     aria-checked={v.settings.language === id}
-                    title={id === "auto" ? "Whisper tells Italian from English" : `Always ${label}`}
-                    onclick={() => setVoice({ language: id })}>{label}</button
+                    title={id === "auto" ? tx.voice.autoTitle : tx.voice.always(label)}
+                    onclick={() => setVoice({ language: id })}>{id === "auto" ? tx.voice.auto : label}</button
                   >
                 {/each}
               </div>
@@ -901,9 +903,11 @@
           </section>
 
           <section class="voice" class:dimmed={!v.settings.llm}>
-            <h3>Personality</h3>
-            <div class="persona" role="radiogroup" aria-label="Personality">
-              {#each PERSONALITIES as [id, name, blurb] (id)}
+            <h3>{tx.voice.personality} <InfoTip text={tx.voice.personalityTip} /></h3>
+            {#if !v.settings.llm}<p class="hint need">{tx.voice.personalityNeedsLlm}</p>{/if}
+            <div class="persona" role="radiogroup" aria-label={tx.voice.personality}>
+              {#each PERSONALITIES as id (id)}
+                {@const [name, blurb] = tx.voice.personalities[id]}
                 <div class="pslot">
                   <button class="pcard" class:checked={v.settings.personality === id} role="radio" aria-checked={v.settings.personality === id} onclick={() => setVoice({ personality: id })}>
                     <b>{name}</b>
@@ -913,9 +917,9 @@
                     <button
                       class="vicon"
                       class:on={shownPrompt === id}
-                      aria-label={`A prompt for a ${name} voice on ElevenLabs`}
+                      aria-label={tx.voice.promptAria(name)}
                       aria-expanded={pinnedPrompt === id}
-                      title="A prompt to design this voice on ElevenLabs (click to keep it open)"
+                      title={tx.voice.promptTitle}
                       onmouseenter={() => (hoverPrompt = id)}
                       onmouseleave={() => (hoverPrompt = null)}
                       onfocus={() => (hoverPrompt = id)}
@@ -932,24 +936,21 @@
             </div>
             {#if shownPrompt && VOICE_PROMPTS[shownPrompt]}
               {@const p = VOICE_PROMPTS[shownPrompt]}
-              {@const label = PERSONALITIES.find(([id]) => id === shownPrompt)?.[1]}
+              {@const label = tx.voice.personalities[shownPrompt][0]}
               <div class="vprompt">
                 <div class="vphead">
-                  <b>A “{label}” voice on ElevenLabs</b>
-                  {#if pinnedPrompt}<button class="btn small" onclick={() => (pinnedPrompt = null)}>Close</button>{/if}
+                  <b>{tx.voice.promptHead(label)}</b>
+                  {#if pinnedPrompt}<button class="btn small" onclick={() => (pinnedPrompt = null)}>{tc.closeBtn}</button>{/if}
                 </div>
-                <p class="hint">
-                  On elevenlabs.io: Voices → Create a voice → Voice design. Paste these two, generate, listen, and save the one you like as “{p.name}”.
-                  It then shows up under ElevenLabs voices, below.
-                </p>
+                <p class="hint">{tx.voice.promptSteps(p.name)}</p>
                 <div class="vpfield">
-                  <span class="rlabel">Prompt</span>
-                  <button class="btn small" onclick={() => copyPrompt(p.description, "description")}>{promptCopied === "description" ? "Copied" : "Copy"}</button>
+                  <span class="rlabel">{tx.voice.prompt}</span>
+                  <button class="btn small" onclick={() => copyPrompt(p.description, "description")}>{promptCopied === "description" ? tc.copied : tc.copy}</button>
                 </div>
                 <p class="vptext">{p.description}</p>
                 <div class="vpfield">
-                  <span class="rlabel">Text to preview</span>
-                  <button class="btn small" onclick={() => copyPrompt(p.sample, "sample")}>{promptCopied === "sample" ? "Copied" : "Copy"}</button>
+                  <span class="rlabel">{tx.voice.previewText}</span>
+                  <button class="btn small" onclick={() => copyPrompt(p.sample, "sample")}>{promptCopied === "sample" ? tc.copied : tc.copy}</button>
                 </div>
                 <p class="vptext">{p.sample}</p>
               </div>
@@ -959,7 +960,7 @@
                 <textarea
                   rows="3"
                   maxlength={MAX_PERSONALITY}
-                  placeholder="A grumpy old pirate parrot who loves bad weather and calls me captain"
+                  placeholder={tx.voice.customPlaceholder}
                   value={v.settings.personality_custom}
                   oninput={(e) => (customLength = e.currentTarget.value.length)}
                   onchange={(e) => setVoice({ personality_custom: e.currentTarget.value })}
@@ -967,32 +968,20 @@
                 <span class="pmeta">{customLength ?? v.settings.personality_custom.length}/{MAX_PERSONALITY}</span>
               </div>
             {/if}
-            <p class="hint">
-              {v.settings.llm
-                ? "Changes how DualEye talks, from the next command. It still does what you ask the same way."
-                : "Turn on “Understand with a language model” below: the fixed phrases have no personality."}
-            </p>
           </section>
 
           <section class="voice" class:dimmed={!v.settings.speak}>
-            <h3>ElevenLabs voices</h3>
+            <h3>{tx.voice.eleven} <InfoTip text={tx.voice.elevenTip} /></h3>
             {#if !hasElevenKey}
-              <p class="hint">
-                Answer with a voice of your ElevenLabs account, in both languages. The free plan has 10,000 credits a month, about 20 minutes of
-                answers. Design a voice on elevenlabs.io: the <span class="vinline">wave</span> on each personality above has a prompt for it.
-              </p>
-              <button class="btn small primary" onclick={() => (keysOpen = true)}>Add an ElevenLabs key</button>
-              <p class="hint">
-                Give the key the Text to Speech permission, and Voices with read access. It goes under Online services, below.
-              </p>
+              <div class="actions">
+                <button class="btn small primary" onclick={() => (keysOpen = true)}>{tx.voice.elevenAdd}</button>
+                <InfoTip text={tx.voice.elevenKeyTip} />
+              </div>
             {:else}
               {#if accountVoices === null}
-                <p class="hint small">Reading your account…</p>
+                <p class="hint small">{tx.voice.elevenReading}</p>
               {:else if !ownVoices.length}
-                <p class="hint">
-                  None of your own yet: design one on elevenlabs.io with the prompt on a personality above. ElevenLabs' own voices are in the lists under
-                  Models.
-                </p>
+                <p class="hint">{tx.voice.elevenNone}</p>
               {:else}
                 <div class="ports">
                   {#each ownVoices as a (a.voice_id)}
@@ -1004,9 +993,9 @@
                       </span>
                       <span class="mside">
                         {#if inUse}
-                          <span class="pmeta">Speaking</span>
+                          <span class="pmeta">{tx.voice.speakingNow}</span>
                         {:else}
-                          <button class="btn small" onclick={() => useAccountVoice(accountId(a))}>Use</button>
+                          <button class="btn small" onclick={() => useAccountVoice(accountId(a))}>{tx.voice.use}</button>
                         {/if}
                       </span>
                     </div>
@@ -1014,84 +1003,80 @@
                 </div>
               {/if}
               <div class="vpfield">
-                <p class="hint">A voice speaks both Italian and English. Try it with Test, under Models.</p>
-                <button class="btn small" onclick={loadAccountVoices}>Refresh</button>
+                <p class="hint">{tx.voice.bothLanguages}</p>
+                <button class="btn small" onclick={loadAccountVoices}>{tc.refresh}</button>
               </div>
             {/if}
             {#if elevenError}<p class="hint error">{elevenError}</p>{/if}
           </section>
 
           <section class="voice">
-            <h3>Behaviour</h3>
+            <h3>{tx.voice.behaviour}</h3>
             <label class="switch">
               <input type="checkbox" checked={v.settings.speak} onchange={(e) => setVoice({ speak: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Answer out loud</span>
+              <span class="slabel">{tx.voice.speak}</span>
             </label>
             <label class="switch">
               <input type="checkbox" checked={v.settings.follow_up} disabled={!v.settings.speak} onchange={(e) => setVoice({ follow_up: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Keep listening after an answer, without the wake word</span>
+              <span class="slabel">{tx.voice.followUp} <InfoTip text={tx.voice.followUpTip} /></span>
             </label>
             <label class="switch">
               <input type="checkbox" checked={v.settings.pause_music} onchange={(e) => setVoice({ pause_music: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Pause the music while listening</span>
+              <span class="slabel">{tx.voice.pauseMusic}</span>
             </label>
-            <label class="switch" title="Downloaded models stay loaded, also those standing in for cloud ones when they hit their limits: more memory, no wait">
+            <label class="switch">
               <input type="checkbox" checked={v.settings.keep_warm} onchange={(e) => setVoice({ keep_warm: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Keep local models loaded, ready to answer</span>
+              <span class="slabel">{tx.voice.keepWarm} <InfoTip text={tx.voice.keepWarmTip} /></span>
             </label>
-            <label class="switch" title={wakeSound === null ? "Needs the board connected, with firmware 1.3.3 or newer" : ""}>
+            <label class="switch" title={wakeSound === null ? tc.needsFirmware("1.3.3") : ""}>
               <input type="checkbox" checked={wakeSound ?? true} disabled={wakeSound === null} onchange={(e) => setWakeSound(e.currentTarget.checked)} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Play a sound when the wake word is heard</span>
+              <span class="slabel">{tx.voice.wakeSound}</span>
             </label>
             <label class="switch">
               <input type="checkbox" checked={v.settings.llm} onchange={(e) => setVoice({ llm: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Understand with a language model</span>
+              <span class="slabel">{tx.voice.llm} <InfoTip text={tx.voice.llmTip} /></span>
             </label>
-            <label class="switch" title={eyes === null ? "Needs the board connected, with firmware 1.0.1 or newer" : ""}>
+            <label class="switch" title={eyes === null ? tc.needsFirmware("1.0.1") : ""}>
               <input type="checkbox" checked={eyes ?? true} disabled={eyes === null} onchange={(e) => setEyes(e.currentTarget.checked)} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Show animated eyes while talking, instead of the ring</span>
+              <span class="slabel">{tx.voice.eyes} <InfoTip text={tx.voice.eyesTip} /></span>
             </label>
           </section>
 
           <section class="voice">
-            <h3>Models</h3>
+            <h3>{tx.voice.models}</h3>
             {#if !usesRecommended(v)}
               <div class="recbox">
                 <p class="hint">{v.recommendation.why}</p>
                 <button class="btn small" onclick={useRecommended}>
-                  Use {v.recommendation.whisper}{v.recommendation.llm ? ` + ${v.recommendation.llm}` : " without a language model"}
+                  {tx.voice.useRecommended(v.recommendation.whisper, v.recommendation.llm)}
                 </button>
               </div>
             {/if}
-            {@render picker(v, "Hearing", "Turns what you say into text", "whisper", null, v.settings.model, (id) => setVoice({ model: id }), false)}
-            {@render picker(v, "Understanding", "Works out what to do and what to answer", "llm", null, v.settings.llm_model, (id) => setVoice({ llm_model: id }), !v.settings.llm)}
+            {@render picker(v, tx.voice.hearing, tx.voice.hearingWhat, "whisper", null, v.settings.model, (id) => setVoice({ model: id }), false)}
+            {@render picker(v, tx.voice.understanding, tx.voice.understandingWhat, "llm", null, v.settings.llm_model, (id) => setVoice({ llm_model: id }), !v.settings.llm)}
             {#each VOICE_LANGUAGES as [lang, label] (lang)}
-              {@render picker(v, `Voice · ${label}`, "Speaks the answers", "voice", lang, v.settings.voices[lang] ?? "", (id) => setVoice({ voices: { ...v.settings.voices, [lang]: id } }), !v.settings.speak)}
+              {@render picker(v, tx.voice.voiceFor(label), tx.voice.voiceWhat, "voice", lang, v.settings.voices[lang] ?? "", (id) => setVoice({ voices: { ...v.settings.voices, [lang]: id } }), !v.settings.speak)}
             {/each}
             {#if voiceError}<p class="hint error">{voiceError}</p>{/if}
             {#if engineError}<p class="hint error">{engineError}</p>{/if}
 
             <details class="more" bind:open={keysOpen}>
-              <summary>Online services <span class="pmeta">{v.providers.filter((p) => p.key).length ? "key saved" : "no key"}</span></summary>
-              <p class="hint">
-                Instead of this computer, an online service can hear, understand and speak: nothing to download, but what you say leaves this
-                computer, and free plans have daily limits. With a key, its models show up in the lists above.
-              </p>
+              <summary>{tx.voice.services} <InfoTip text={tx.voice.servicesTip} /> <span class="pmeta">{v.providers.filter((p) => p.key).length ? tx.voice.keySaved : tx.voice.noKey}</span></summary>
               {#each v.providers as p (p.id)}
                 <div class="provider">
                   <div class="phead">
-                    <span class="mtext"><span class="pname">{p.name}</span><span class="mnote">{p.note}</span></span>
+                    <span class="mtext"><span class="pname">{p.name}</span><span class="mnote">{note(p.note)}</span></span>
                     {#if p.key === "env"}
-                      <span class="pmeta" title="Its environment variable wins over a saved key">Key from {p.key_env}</span>
+                      <span class="pmeta" title={tx.voice.envTitle}>{tx.voice.envKey(p.key_env)}</span>
                     {:else if p.key === "saved"}
-                      <button class="btn small" disabled={savingKey === p.id} onclick={() => saveKey(p.id, null)}>Forget key</button>
+                      <button class="btn small" disabled={savingKey === p.id} onclick={() => saveKey(p.id, null)}>{tx.voice.forgetKey}</button>
                     {/if}
                   </div>
                   {#if p.key !== "env"}
@@ -1101,12 +1086,12 @@
                         type="password"
                         autocomplete="off"
                         spellcheck="false"
-                        placeholder={p.key ? "Replace the API key" : `API key, from ${p.keys_url}`}
-                        aria-label={`${p.name} API key`}
+                        placeholder={p.key ? tx.voice.replaceKey : tx.voice.keyFrom(p.keys_url)}
+                        aria-label={tx.voice.keyAria(p.name)}
                         bind:value={keyDrafts[p.id]}
                       />
                       <button class="btn small primary" disabled={!keyDrafts[p.id]?.trim() || savingKey === p.id} onclick={() => saveKey(p.id, keyDrafts[p.id])}
-                        >{savingKey === p.id ? "Checking…" : "Save"}</button
+                        >{savingKey === p.id ? tx.voice.checking : tc.save}</button
                       >
                     </div>
                   {/if}
@@ -1116,21 +1101,17 @@
             </details>
 
             <details class="more">
-              <summary>Downloads and advanced</summary>
+              <summary>{tx.voice.advanced}</summary>
               <p class="hint">
-                {hardwareLine(v.hardware)}. whisper-server: <code>{v.server ?? "not found"}</code> · llama-server: <code>{v.llm_server ?? "not found"}</code>
+                {hardwareLine(v.hardware)}. whisper-server: <code>{v.server ?? tx.voice.notFound}</code> · llama-server: <code>{v.llm_server ?? tx.voice.notFound}</code>
               </p>
               {#if !v.server}
-                <p class="hint error">
-                  whisper-server wasn't found. The app's installer comes with it; for a build of your own, run <code>tools/build_sidecars.sh</code> or
-                  install whisper.cpp (<code>brew install whisper-cpp</code> on macOS).
-                </p>
+                {@const w = tx.voice.whisperMissing}
+                <p class="hint error">{w[0]}<code>tools/build_sidecars.sh</code>{w[1]}<code>brew install whisper-cpp</code>{w[2]}</p>
               {/if}
               {#if !v.llm_server}
-                <p class="hint error">
-                  llama-server wasn't found. The app's installer comes with it; for a build of your own, run <code>tools/build_sidecars.sh</code> or
-                  install llama.cpp (<code>brew install llama.cpp</code> on macOS).
-                </p>
+                {@const w = tx.voice.llamaMissing}
+                <p class="hint error">{w[0]}<code>tools/build_sidecars.sh</code>{w[1]}<code>brew install llama.cpp</code>{w[2]}</p>
               {/if}
               <div class="ports">
                 {#each ENGINES as [engine, name, note] (engine)}
@@ -1138,13 +1119,13 @@
                   <div class="port model" class:checked={!!v[engine]}>
                     <span class="mtext">
                       <span class="pname">{name}</span>
-                      <span class="mnote">{installing ? `Installing… ${installing}` : note}</span>
+                      <span class="mnote">{installing ? tx.voice.installingWith(installing) : note()}</span>
                     </span>
                     <span class="mside">
                       {#if v[engine]}
-                        <span class="pmeta">Installed</span>
+                        <span class="pmeta">{tc.installed}</span>
                       {:else}
-                        <button class="btn small primary" disabled={!!installing} onclick={() => installEngine(engine)}>{installing ? "Installing…" : "Install"}</button>
+                        <button class="btn small primary" disabled={!!installing} onclick={() => installEngine(engine)}>{installing ? tc.installing : tc.install}</button>
                       {/if}
                     </span>
                   </div>
@@ -1154,90 +1135,81 @@
                   <div class="port model">
                     <span class="mtext">
                       <span class="pname">{m.id}</span>
-                      <span class="mnote">{KIND_NAMES[m.kind]} · {mb(m.bytes)}{used ? " · in use" : ""}</span>
+                      <span class="mnote">{tx.voice.kinds[m.kind]} · {mb(m.bytes)}{used ? tx.voice.inUse : ""}</span>
                     </span>
                     <span class="mside">
-                      <button class="btn small" disabled={used && v.settings.enabled} title="Delete the file" onclick={() => removeModel(m.id)}>Delete</button>
+                      <button class="btn small" disabled={used && v.settings.enabled} title={tx.voice.deleteTitle} onclick={() => removeModel(m.id)}>{tc.delete}</button>
                     </span>
                   </div>
                 {/each}
               </div>
               <label class="check">
                 <input type="checkbox" checked={v.settings.keep_recordings} onchange={(e) => setVoice({ keep_recordings: e.currentTarget.checked })} />
-                <span>Keep recordings as WAV files, for debugging</span>
+                <span>{tx.voice.keepRecordings}</span>
               </label>
             </details>
           </section>
 
           <section>
-            <h3>Transcripts</h3>
+            <h3>{tx.voice.transcripts}</h3>
             {#each newestFirst as entry (entry.at + "-" + entry.id)}
               <div class="transcript">
                 <span class="tmeta">{clock(entry.at)}</span>
                 {#if entry.transcript}
                   <span class="tlang">{entry.transcript.language}</span>
                   <span class="ttext">{entry.transcript.text}</span>
-                  <span class="tmeta">{(entry.transcript.elapsed_ms / 1000).toFixed(1)} s</span>
+                  <span class="tmeta">{seconds(entry.transcript.elapsed_ms)}</span>
                   {#if entry.reply}
                     <span class="treply" class:muted={!entry.reply.understood}>
                       → {entry.reply.text}
                       {#if entry.reply.by === "rules" && v.settings.llm}
-                        <span class="taction" title="The language model wasn't available: a fixed phrase answered">fixed phrase</span>
+                        <span class="taction" title={tx.voice.fixedTitle}>{tx.voice.fixedPhrase}</span>
                       {/if}
                       {#each entry.reply.actions as action, i (i)}
                         <span class="taction">{action}</span>
                       {/each}
                       {#if entry.spoken?.reason === "barge_in"}
-                        <span class="taction" title="The wake word was said over the answer">interrupted</span>
+                        <span class="taction" title={tx.voice.interruptedTitle}>{tx.voice.interrupted}</span>
                       {/if}
                     </span>
-                    <span class="tmeta">{entry.spoken ? `${(entry.spoken.first_audio_ms / 1000).toFixed(1)} s` : ""}</span>
+                    <span class="tmeta">{entry.spoken ? seconds(entry.spoken.first_audio_ms) : ""}</span>
                   {/if}
                 {:else}
-                  <span class="ttext muted">No words heard</span>
+                  <span class="ttext muted">{tx.voice.noWords}</span>
                 {/if}
               </div>
             {:else}
-              <p class="empty">{v.settings.enabled ? "Say “Alexa”, then a command." : "Turn the voice assistant on to see what the board hears."}</p>
+              <p class="empty">{v.settings.enabled ? tx.voice.emptyOn : tx.voice.emptyOff}</p>
             {/each}
           </section>
         {/if}
       {:else if tab === "claude"}
         <section class="claude" class:dimmed={!usesClaude}>
-          <h3>Claude Code</h3>
+          <h3>{tx.claude.code} <InfoTip text={tx.claude.codeTip} /></h3>
           <p class="hint">
-            The Claude faces count tokens from Claude Code's transcripts on this computer.
-            {#if claudeUsage}
-              This 5-hour window: {formatTokens(claudeUsage.tok)} · today: {formatTokens(claudeUsage.today)}.
-            {:else}
-              None found yet.
-            {/if}
+            {claudeUsage ? tx.claude.usage(formatTokens(claudeUsage.tok), formatTokens(claudeUsage.today)) : tx.claude.noUsage}
           </p>
           {#if claudeLink?.connected}
             <dl class="facts">
-              <div><dt>Status line</dt><dd>Connected</dd></div>
+              <div><dt>{tx.claude.statusLine}</dt><dd>{tc.connected}</dd></div>
               <div>
-                <dt>Last update</dt>
-                <dd>{claudeLink.last_update_s === null ? "Waiting" : ago(claudeLink.last_update_s)}</dd>
+                <dt>{tx.claude.lastUpdate}</dt>
+                <dd>{claudeLink.last_update_s === null ? tc.waiting : ago(claudeLink.last_update_s)}</dd>
               </div>
               {#if claudeLink.chained}
-                <div class="wide"><dt>Also shows your status line</dt><dd class="small">{claudeLink.chained}</dd></div>
+                <div class="wide"><dt>{tx.claude.chained}</dt><dd class="small">{claudeLink.chained}</dd></div>
               {/if}
             </dl>
             {#if claudeLink.last_update_s === null}
-              <p class="hint">Limits show up after Claude Code's next reply. They're only reported on Pro and Max plans.</p>
+              <p class="hint">{tx.claude.limitsLater}</p>
             {/if}
             <div class="actions">
-              <button class="btn" disabled={claudeBusy} onclick={() => linkClaude(false)}>Disconnect</button>
+              <button class="btn" disabled={claudeBusy} onclick={() => linkClaude(false)}>{tc.disconnect}</button>
             </div>
           {:else}
-            <p class="hint">
-              Connect the status line to add your plan's 5-hour and weekly limits. This sets <code>statusLine</code> in
-              <code>{claudeLink?.settings_path ?? "~/.claude/settings.json"}</code>, keeps a backup, and your current status line keeps
-              working through it.
-            </p>
             <div class="actions">
-              <button class="btn primary" disabled={claudeBusy || !claudeLink} onclick={() => linkClaude(true)}>Connect status line</button>
+              <button class="btn primary" disabled={claudeBusy || !claudeLink} onclick={() => linkClaude(true)}>{tx.claude.connect}</button>
+              <InfoTip text={tx.claude.connectTip(claudeLink?.settings_path ?? "~/.claude/settings.json")} />
             </div>
           {/if}
           {#if claudeError}
@@ -1246,58 +1218,49 @@
         </section>
 
         <section class="alerts">
-          <h3>Claude alerts</h3>
-          <p class="hint">
-            The board tells you when Claude Code needs you (a permission or a question), when it finishes a long task and when your plan's
-            limits pass 80 % and 95 %: the eyes react, a message shows over the watch face and, with spoken replies on, it says so out loud.
-          </p>
+          <h3>{tx.claude.alerts} <InfoTip text={tx.claude.alertsTip} /></h3>
           {#if alerts}
             {#if alerts.hooks.connected}
               <dl class="facts">
-                <div><dt>Hooks</dt><dd>Connected</dd></div>
+                <div><dt>{tx.claude.hooks}</dt><dd>{tc.connected}</dd></div>
                 <div>
-                  <dt>Last event</dt>
-                  <dd>{alerts.hooks.last_event_s === null ? "Waiting" : ago(alerts.hooks.last_event_s)}</dd>
+                  <dt>{tx.claude.lastEvent}</dt>
+                  <dd>{alerts.hooks.last_event_s === null ? tc.waiting : ago(alerts.hooks.last_event_s)}</dd>
                 </div>
                 {#if alerts.last}
                   <div class="wide">
-                    <dt>Last alert, {ago(alerts.last.age_s)}</dt>
-                    <dd class="small">{alerts.last.text}{alerts.last.error ? ` (not given: ${alerts.last.error})` : ""}</dd>
+                    <dt>{tx.claude.lastAlert(ago(alerts.last.age_s))}</dt>
+                    <dd class="small">{alerts.last.text}{alerts.last.error ? tx.claude.notGiven(alerts.last.error) : ""}</dd>
                   </div>
                 {/if}
               </dl>
               {#if alerts.hooks.last_event_s === null}
-                <p class="hint">Claude Code sessions that were already open may need a restart to pick the hooks up.</p>
+                <p class="hint">{tx.claude.restart}</p>
               {/if}
-            {:else}
-              <p class="hint">
-                This adds hooks to <code>{alerts.hooks.settings_path ?? "~/.claude/settings.json"}</code> that run in the background and
-                never slow Claude down; yours stay as they are. The limit alerts need the status line above.
-              </p>
             {/if}
             <label class="switch">
               <input type="checkbox" checked={alerts.settings.needs_you} onchange={(e) => setAlerts({ needs_you: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">When Claude needs you</span>
+              <span class="slabel">{tx.claude.needsYou}</span>
             </label>
             <label class="switch">
               <input type="checkbox" checked={alerts.settings.done} onchange={(e) => setAlerts({ done: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">When Claude finishes a long task</span>
+              <span class="slabel">{tx.claude.done}</span>
             </label>
             <label class="switch">
               <input type="checkbox" checked={alerts.settings.usage} onchange={(e) => setAlerts({ usage: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">When a limit passes 80 % or 95 %</span>
+              <span class="slabel">{tx.claude.usageAlert}</span>
             </label>
             <label class="switch">
               <input type="checkbox" checked={alerts.settings.speak} onchange={(e) => setAlerts({ speak: e.currentTarget.checked })} />
               <span class="track"><span class="knob"></span></span>
-              <span class="slabel">Say them out loud</span>
+              <span class="slabel">{tx.claude.speak}</span>
             </label>
             <div class="rotation">
-              <span class="rlabel">Long task</span>
-              <div class="rots" role="radiogroup" aria-label="Long task">
+              <span class="rlabel">{tx.claude.longTask}</span>
+              <div class="rots" role="radiogroup" aria-label={tx.claude.longTask}>
                 {#each DONE_AFTER as secs (secs)}
                   <button
                     class="rot"
@@ -1305,15 +1268,15 @@
                     role="radio"
                     aria-checked={alerts.settings.done_after_s === secs}
                     disabled={!alerts.settings.done}
-                    title="Tell me when a task took at least this long"
+                    title={tx.claude.longTaskTitle}
                     onclick={() => setAlerts({ done_after_s: secs })}>{secs < 60 ? `${secs} s` : `${secs / 60} min`}</button
                   >
                 {/each}
               </div>
             </div>
             <div class="rotation">
-              <span class="rlabel">Language</span>
-              <div class="rots langs" role="radiogroup" aria-label="Language of the alerts">
+              <span class="rlabel">{tx.claude.language}</span>
+              <div class="rots langs" role="radiogroup" aria-label={tx.claude.languageAria}>
                 {#each VOICE_LANGUAGES as [code, label] (code)}
                   <button
                     class="rot"
@@ -1326,14 +1289,15 @@
               </div>
             </div>
             {#if alerts.settings.speak && !alerts.can_speak}
-              <p class="hint">Speaking needs voice on, with “Answer out loud” and a voice, in the Voice tab; until then they're only shown.</p>
+              <p class="hint need">{tx.claude.cantSpeak}</p>
             {/if}
             <div class="actions">
               {#if alerts.hooks.connected}
-                <button class="btn" disabled={alertsBusy || monitor.link !== "connected"} onclick={testAlert}>Try it</button>
-                <button class="btn" disabled={alertsBusy} onclick={() => linkHooks(false)}>Disconnect</button>
+                <button class="btn" disabled={alertsBusy || monitor.link !== "connected"} onclick={testAlert}>{tc.tryIt}</button>
+                <button class="btn" disabled={alertsBusy} onclick={() => linkHooks(false)}>{tc.disconnect}</button>
               {:else}
-                <button class="btn primary" disabled={alertsBusy} onclick={() => linkHooks(true)}>Connect hooks</button>
+                <button class="btn primary" disabled={alertsBusy} onclick={() => linkHooks(true)}>{tx.claude.connectHooks}</button>
+                <InfoTip text={tx.claude.hooksTip(alerts.hooks.settings_path ?? "~/.claude/settings.json")} />
               {/if}
             </div>
           {/if}
@@ -1343,76 +1307,66 @@
         </section>
 
         <section class="mcp">
-          <h3>MCP server</h3>
-          <p class="hint">
-            Let Claude Code, Claude Desktop or another MCP client change the faces, show messages and read this computer's metrics.
-            While the app runs they go through it, so the board stays connected here.
-          </p>
+          <h3>{tx.claude.mcp} <InfoTip text={tx.claude.mcpTip} /></h3>
           {#if mcp?.hub}
             <dl class="facts">
               <div>
-                <dt>Clients</dt>
-                <dd>{mcp.hub.clients === 0 ? "None connected" : mcp.hub.clients === 1 ? "1 connected" : `${mcp.hub.clients} connected`}</dd>
+                <dt>{tx.claude.clients}</dt>
+                <dd>{tx.claude.clientsN(mcp.hub.clients)}</dd>
               </div>
               <div>
-                <dt>Last tool call</dt>
-                <dd>{mcp.hub.last_tool === null || mcp.hub.last_call_age_ms === null ? "None yet" : `${mcp.hub.last_tool}, ${ago(Math.round(mcp.hub.last_call_age_ms / 1000))}`}</dd>
+                <dt>{tx.claude.lastCall}</dt>
+                <dd>{mcp.hub.last_tool === null || mcp.hub.last_call_age_ms === null ? tx.claude.noneYet : `${mcp.hub.last_tool}, ${ago(Math.round(mcp.hub.last_call_age_ms / 1000))}`}</dd>
               </div>
             </dl>
           {:else if mcp?.hub_error}
-            <p class="hint error">MCP clients can't reach the board through the app: {mcp.hub_error}</p>
+            <p class="hint error">{tx.claude.hubError(mcp.hub_error)}</p>
           {/if}
           {#if mcpCommand}
-            <p class="hint">Claude Code: run this once in a terminal.</p>
+            <p class="hint">{tx.claude.forCode}</p>
             <div class="snippet">
               <pre>{mcpCommand}</pre>
-              <button class="btn" onclick={() => copy("code")}>{copied === "code" ? "Copied" : "Copy"}</button>
+              <button class="btn" onclick={() => copy("code")}>{copied === "code" ? tc.copied : tc.copy}</button>
             </div>
-            <p class="hint">Claude Desktop: add this to <code>claude_desktop_config.json</code> (Settings → Developer → Edit Config), then restart it.</p>
+            <p class="hint">{tx.claude.forDesktop[0]}<code>claude_desktop_config.json</code>{tx.claude.forDesktop[1]}</p>
             <div class="snippet">
               <pre>{mcpDesktop}</pre>
-              <button class="btn" onclick={() => copy("desktop")}>{copied === "desktop" ? "Copied" : "Copy"}</button>
+              <button class="btn" onclick={() => copy("desktop")}>{copied === "desktop" ? tc.copied : tc.copy}</button>
             </div>
           {/if}
         </section>
       {:else if tab === "pet"}
         {#if pet}<PetMood {pet} />{/if}
         <section class="petset">
-          <h3>Behaviour</h3>
-          <p class="hint">The board is a little pet with a mood of its own: lively by day and sleepy at night, glad when you talk to it, play with it or come back to the computer. Its mood picks what it does now and then, colours the eyes face and pitches its voice.</p>
-          <label class="switch" title={idleEyes === null ? "Needs the board connected, with firmware 1.0.2 or newer" : ""}>
+          <h3>{tx.pet.behaviour} <InfoTip text={tx.pet.behaviourTip} /></h3>
+          <label class="switch" title={idleEyes === null ? tc.needsFirmware("1.0.2") : ""}>
             <input type="checkbox" checked={idleEyes ?? true} disabled={idleEyes === null} onchange={(e) => setIdleEyes(e.currentTarget.checked)} />
             <span class="track"><span class="knob"></span></span>
-            <span class="slabel">Let the eyes play now and then while idle</span>
+            <span class="slabel">{tx.pet.idleEyes}</span>
           </label>
-          <label class="switch" title={!pet ? "Needs the board connected, with firmware 1.4.0 or newer" : ""}>
+          <label class="switch" title={!pet ? tc.needsFirmware("1.4.0") : ""}>
             <input type="checkbox" checked={pet?.reactions ?? true} disabled={!pet} onchange={(e) => setPet("reactions", e.currentTarget.checked)} />
             <span class="track"><span class="knob"></span></span>
-            <span class="slabel">React to the computer: heat, music, Claude, the battery, bedtime, you coming back</span>
+            <span class="slabel">{tx.pet.reactions} <InfoTip text={tx.pet.reactionsTip} /></span>
           </label>
-          <label class="switch" title={!pet ? "Needs the board connected, with firmware 1.4.0 or newer" : ""}>
+          <label class="switch" title={!pet ? tc.needsFirmware("1.4.0") : ""}>
             <input type="checkbox" checked={pet?.sounds ?? true} disabled={!pet} onchange={(e) => setPet("sounds", e.currentTarget.checked)} />
             <span class="track"><span class="knob"></span></span>
-            <span class="slabel">Pet sounds: in the scenes, hello, mute, snoring</span>
+            <span class="slabel">{tx.pet.sounds} <InfoTip text={tx.pet.soundsTip} /></span>
           </label>
-          <label class="switch" title={pet?.hearing === undefined ? "Needs the board connected, with firmware 1.4.2 or newer" : ""}>
+          <label class="switch" title={pet?.hearing === undefined ? tc.needsFirmware("1.4.2") : ""}>
             <input type="checkbox" checked={pet?.hearing ?? true} disabled={pet?.hearing === undefined} onchange={(e) => setPet("hearing", e.currentTarget.checked)} />
             <span class="track"><span class="knob"></span></span>
-            <span class="slabel">Listen to the room: it jumps at a bang, answers two or three claps, perks up when people talk and dozes in a quiet room</span>
+            <span class="slabel">{tx.pet.hearing} <InfoTip text={tx.pet.hearingTip} /></span>
           </label>
-          <p class="hint">It only listens for these sounds on the board, between conversations and while the mic is on: nothing is recorded or sent to the computer.</p>
         </section>
         <section class="petset">
-          <h3>Comments on your day</h3>
-          <p class="hint">
-            The pet keeps a diary of your days on this computer (when you start and stop, breaks, Claude, music, pomodoros) and now and then
-            says something about it, in its personality: "ieri hai fatto le 2, eh". Only when there's something worth saying, at a natural
-            moment, never at night or over music.
-          </p>
+          <h3>{tx.pet.quips} <InfoTip text={tx.pet.quipsTip} /></h3>
           <div class="rotation">
-            <span class="rlabel">How often</span>
-            <div class="rots" role="radiogroup" aria-label="How often the pet comments on your day">
-              {#each QUIP_LEVELS as [level, label, title] (level)}
+            <span class="rlabel">{tx.pet.howOften}</span>
+            <div class="rots" role="radiogroup" aria-label={tx.pet.howOftenAria}>
+              {#each QUIP_LEVELS as level (level)}
+                {@const [label, title] = tx.pet.levels[level]}
                 <button class="rot" class:checked={quips?.level === level} role="radio" aria-checked={quips?.level === level} {title} disabled={!quips} onclick={() => setQuips(level)}
                   >{label}</button
                 >
@@ -1420,23 +1374,19 @@
             </div>
           </div>
           {#if quips?.last}
-            <p class="hint">Last time, at {new Date(quips.last.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: “{quips.last.text}”{quips.last.error ? ` (not said: ${quips.last.error})` : ""}</p>
+            <p class="hint">{tx.pet.last(i18n.time(quips.last.at), quips.last.text)}{quips.last.error ? tx.pet.notSaid(quips.last.error) : ""}</p>
           {/if}
-          <p class="hint">It speaks with the voice and language of the Claude alerts; it needs “Answer out loud” on in the Voice tab.</p>
+          {#if quips && quips.level !== "off" && voice && !voice.settings.speak}<p class="hint need">{tx.pet.needsSpeak}</p>{/if}
           {#if petError}<p class="hint error">{petError}</p>{/if}
         </section>
         <PetGallery connected={monitor.link === "connected"} petSounds={pet?.sounds ?? true} oldFirmware={monitor.link === "connected" && pet === null} />
       {:else if tab === "timers"}
         {@const info = monitor.timers}
-        <p class="hint">
-          The board counts the first timer down on a screen and rings when it's up; saying "Alexa" silences it, and with spoken replies
-          on it says what the timer was for. By voice: "Alexa, timer 10 minuti", "ricordami alle 17 di chiamare Marco", "start a pomodoro",
-          "quanto manca?". Timers keep running with the window closed, and reminders even across a restart of the app.
-        </p>
         <section class="timers">
-          <h3>Running</h3>
+          <h3>{tx.timers.running} <InfoTip text={tx.timers.tip} /></h3>
           {#each info?.timers ?? [] as t (t.id)}
-            {@const [kind, color] = TIMER_KINDS[t.kind]}
+            {@const kind = tx.timers.kinds[t.kind]}
+            {@const color = TIMER_COLORS[t.kind]}
             <div class="trow" class:ringing={t.state === "ring"} style:--tcolor={color}>
               <span class="tdot"></span>
               <div class="tname">
@@ -1445,91 +1395,85 @@
               </div>
               <span class="tleft" class:paused={t.state === "pause"}>{clockText(t.left_s)}</span>
               <div class="tbtns">
-                {#if t.state === "run"}<button class="btn small" onclick={() => controlTimer("pause", t)}>Pause</button>{/if}
-                {#if t.state === "pause"}<button class="btn small" onclick={() => controlTimer("resume", t)}>Resume</button>{/if}
-                <button class="btn small" onclick={() => controlTimer("cancel", t)}>{t.state === "ring" ? "Stop" : "Cancel"}</button>
+                {#if t.state === "run"}<button class="btn small" onclick={() => controlTimer("pause", t)}>{tx.timers.pause}</button>{/if}
+                {#if t.state === "pause"}<button class="btn small" onclick={() => controlTimer("resume", t)}>{tx.timers.resume}</button>{/if}
+                <button class="btn small" onclick={() => controlTimer("cancel", t)}>{t.state === "ring" ? tx.timers.stop : tx.timers.cancel}</button>
               </div>
             </div>
           {:else}
-            <p class="empty">No timers running.</p>
+            <p class="empty">{tx.timers.none}</p>
           {/each}
           {#if timerError}<p class="hint error">{timerError}</p>{/if}
         </section>
         <section class="timers">
-          <h3>New timer</h3>
+          <h3>{tx.timers.new}</h3>
           <div class="rots quick">
             {#each [1, 3, 5, 10, 15, 30] as m (m)}
-              <button class="rot" onclick={() => startTimer(m * 60)}>{m} min</button>
+              <button class="rot" onclick={() => startTimer(m * 60)}>{m} {tx.timers.min}</button>
             {/each}
           </div>
           <div class="tform">
-            <input class="tnum" type="number" min="1" max="1440" bind:value={timerMinutes} aria-label="Minutes" />
-            <span class="tunit">min</span>
-            <input class="ttext" type="text" maxlength="40" placeholder="Label (optional)" bind:value={timerLabel} />
+            <input class="tnum" type="number" min="1" max="1440" bind:value={timerMinutes} aria-label={tx.timers.minutes} />
+            <span class="tunit">{tx.timers.min}</span>
+            <input class="ttext" type="text" maxlength="40" placeholder={tx.timers.labelPlaceholder} bind:value={timerLabel} />
             <button class="btn primary" disabled={!(timerMinutes > 0)} onclick={() => startTimer(Math.round(timerMinutes * 60), timerLabel).then(() => (timerLabel = ""))}
-              >Start</button
+              >{tc.start}</button
             >
           </div>
         </section>
         <section class="timers">
-          <h3>Reminder</h3>
+          <h3>{tx.timers.reminder}</h3>
           <div class="tform">
-            <input class="ttext" type="text" maxlength="80" placeholder="What to remind you of" bind:value={remindText} />
-            <input class="ttime" type="time" bind:value={remindAt} aria-label="At" />
-            <button class="btn primary" disabled={!remindText.trim() || !remindAt} onclick={remind}>Set</button>
+            <input class="ttext" type="text" maxlength="80" placeholder={tx.timers.remindPlaceholder} bind:value={remindText} />
+            <input class="ttime" type="time" bind:value={remindAt} aria-label={tx.timers.at} />
+            <button class="btn primary" disabled={!remindText.trim() || !remindAt} onclick={remind}>{tc.set}</button>
           </div>
         </section>
         <section class="timers">
-          <h3>Pomodoro</h3>
+          <h3>{tx.timers.pomodoro}</h3>
           {#if info?.pomodoro}
             {@const p = info.pomodoro}
-            <p class="hint">Round {p.round} of {p.rounds}: {p.work_s / 60} minutes of focus, {p.break_s / 60}-minute breaks.</p>
-            <div class="actions"><button class="btn" onclick={() => timerTool("pomodoro", { action: "stop" })}>Stop the pomodoro</button></div>
+            <p class="hint">{tx.timers.round(p.round, p.rounds, p.work_s / 60, p.break_s / 60)}</p>
+            <div class="actions"><button class="btn" onclick={() => timerTool("pomodoro", { action: "stop" })}>{tx.timers.stopPomodoro}</button></div>
           {:else}
             <div class="tform">
-              <input class="tnum" type="number" min="1" max="120" bind:value={pomo.work} aria-label="Focus minutes" />
-              <span class="tunit">min focus</span>
-              <input class="tnum" type="number" min="1" max="60" bind:value={pomo.rest} aria-label="Break minutes" />
-              <span class="tunit">min break</span>
-              <input class="tnum" type="number" min="1" max="12" bind:value={pomo.rounds} aria-label="Rounds" />
-              <span class="tunit">rounds</span>
+              <input class="tnum" type="number" min="1" max="120" bind:value={pomo.work} aria-label={tx.timers.focusAria} />
+              <span class="tunit">{tx.timers.minFocus}</span>
+              <input class="tnum" type="number" min="1" max="60" bind:value={pomo.rest} aria-label={tx.timers.breakAria} />
+              <span class="tunit">{tx.timers.minBreak}</span>
+              <input class="tnum" type="number" min="1" max="12" bind:value={pomo.rounds} aria-label={tx.timers.roundsAria} />
+              <span class="tunit">{tx.timers.rounds}</span>
               <button
                 class="btn primary"
-                onclick={() => timerTool("pomodoro", { action: "start", work_minutes: pomo.work, break_minutes: pomo.rest, rounds: pomo.rounds })}>Start</button
+                onclick={() => timerTool("pomodoro", { action: "start", work_minutes: pomo.work, break_minutes: pomo.rest, rounds: pomo.rounds })}>{tc.start}</button
               >
             </div>
           {/if}
         </section>
         <section class="timers">
-          <h3>On the board</h3>
+          <h3>{tx.timers.onBoard}</h3>
           <div class="rotation">
-            <span class="rlabel">Takes over</span>
-            <div class="rots three" role="radiogroup" aria-label="Screen a running timer takes over">
-              {#each SHOW_ON as [value, label] (value)}
+            <span class="rlabel">{tx.timers.takesOver} <InfoTip text={tx.timers.takesOverTip} /></span>
+            <div class="rots three" role="radiogroup" aria-label={tx.timers.takesOverAria}>
+              {#each SHOW_ON as value (value)}
                 <button
                   class="rot"
                   class:checked={info?.show_on === value}
                   role="radio"
                   aria-checked={info?.show_on === value}
-                  onclick={() => monitor.setTimerScreen(value)}>{label}</button
+                  onclick={() => monitor.setTimerScreen(value)}>{tx.timers.showOn[value]}</button
                 >
               {/each}
             </div>
           </div>
-          <p class="hint" style:margin-top="10px">
-            While a timer runs, that screen shows it instead of its face, and goes back when it's done. The Timer face (click a screen
-            on the main window) shows it on any screen you put it on.{info && !info.can_speak ? " Turn on spoken replies in the Voice tab to hear what each timer was for." : ""}
-          </p>
+          {#if info && !info.can_speak}<p class="hint need" style:margin-top="10px">{tx.timers.needsSpeak}</p>{/if}
         </section>
       {:else if tab === "device"}
         <section>
-          <h3>Connection</h3>
-          <p class="hint">
-            How the app reaches the board. WiFi needs firmware 1.4.3 or newer, set up once over USB below. The cable still powers the board, and
-            flashing it always takes USB.
-          </p>
+          <h3>{tx.device.connection} <InfoTip text={tx.device.connectionTip} /></h3>
           <div class="ports">
-            {#each TRANSPORTS as [key, name, note] (key)}
+            {#each TRANSPORTS as key (key)}
+              {@const [name, note] = tx.device.transports[key]}
               <label class="port" class:checked={transport === key}>
                 <input type="radio" name="transport" checked={transport === key} disabled={wifiBusy === "transport"} onchange={() => setTransport(key)} />
                 <span class="radio"></span>
@@ -1539,19 +1483,19 @@
             {/each}
           </div>
           {#if monitor.link === "connected" && monitor.port}
-            <p class="hint conn">Connected {onWifi ? `on ${monitor.port}` : `on USB · ${monitor.port}`}</p>
+            <p class="hint conn">{onWifi ? tx.device.connectedWifi(monitor.port) : tx.device.connectedUsb(monitor.port)}</p>
           {/if}
           {#if transport !== "usb" && wifi && !wifi.paired.length}
-            <p class="hint">No board is set up for WiFi on this computer yet.</p>
+            <p class="hint">{tx.device.noPaired}</p>
           {/if}
         </section>
 
         <section class="wifi">
-          <h3>WiFi</h3>
+          <h3>{tx.device.wifi} <InfoTip text={tx.device.setupTip} /></h3>
           {#if !wifi}
-            <p class="empty">Asking the board…</p>
+            <p class="empty">{tx.device.asking}</p>
           {:else if !wifi.board}
-            <p class="empty">{wifi.error ?? "The board doesn't answer."}</p>
+            <p class="empty">{wifi.error ?? tx.device.noAnswer}</p>
           {:else}
             {@const b = wifi.board}
             <div class="wstatus">
@@ -1563,28 +1507,24 @@
               <label class="switch">
                 <input type="checkbox" checked={b.enabled} disabled={!!wifiBusy || onWifi} onchange={(e) => wifiDo("toggle", () => monitor.wifiEnable(e.currentTarget.checked))} />
                 <span class="track"><span class="knob"></span></span>
-                <span class="slabel">WiFi on the board</span>
+                <span class="slabel">{tx.device.wifiSwitch}</span>
               </label>
             {/if}
             {#if b.paired && !pairedHere}
-              <p class="hint">The board's WiFi was set up from another computer: pair this one to reach it too.</p>
+              <p class="hint">{tx.device.otherComputer}</p>
               <div class="actions">
                 <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => wifiDo("pair", () => monitor.wifiPair())}>
-                  {wifiBusy === "pair" ? "Pairing…" : "Pair this computer"}
+                  {wifiBusy === "pair" ? tx.device.pairing : tx.device.pair}
                 </button>
               </div>
             {/if}
             {#if wifiForm || !b.ssid}
-              <p class="hint">
-                The board joins a 2.4 GHz network. This goes over USB and pairs this computer with the board: only paired computers reach it on
-                WiFi, and everything between them is encrypted.
-              </p>
               {#if onWifi}
-                <p class="hint error">Plug the board in with the USB cable and pick Automatic or USB only to change its WiFi.</p>
+                <p class="hint error">{tx.device.plugUsb}</p>
               {:else}
                 <div class="actions">
-                  <button class="btn" disabled={!!wifiBusy} onclick={scanWifi}>{wifiBusy === "scan" ? "Looking…" : networks ? "Look again" : "Find networks"}</button>
-                  {#if b.ssid}<button class="btn" onclick={() => ((wifiForm = false), (networks = null))}>Cancel</button>{/if}
+                  <button class="btn" disabled={!!wifiBusy} onclick={scanWifi}>{wifiBusy === "scan" ? tx.device.looking : networks ? tx.device.lookAgain : tx.device.find}</button>
+                  {#if b.ssid}<button class="btn" onclick={() => ((wifiForm = false), (networks = null))}>{tc.cancel}</button>{/if}
                 </div>
                 {#if networks}
                   <div class="ports nets">
@@ -1596,38 +1536,38 @@
                         <span class="pmeta">{n.secure ? "🔒 " : ""}{bars(n.rssi)}</span>
                       </label>
                     {:else}
-                      <p class="empty">No network found. Is a 2.4 GHz one in range?</p>
+                      <p class="empty">{tx.device.noNetwork}</p>
                     {/each}
                   </div>
                 {/if}
                 <div class="tform">
-                  <input class="ttext" type="text" maxlength="32" spellcheck="false" placeholder="Network name" aria-label="Network name" bind:value={wifiSsid} />
+                  <input class="ttext" type="text" maxlength="32" spellcheck="false" placeholder={tx.device.networkName} aria-label={tx.device.networkName} bind:value={wifiSsid} />
                   <input
                     class="ttext"
                     type="password"
                     maxlength="64"
                     autocomplete="off"
-                    placeholder="Password (empty for an open network)"
-                    aria-label="WiFi password"
+                    placeholder={tx.device.password}
+                    aria-label={tx.device.passwordAria}
                     bind:value={wifiPassword}
                   />
                   <button
                     class="btn small primary"
                     disabled={!!wifiBusy || !wifiSsid.trim() || (wifiPassword.length > 0 && wifiPassword.length < 8)}
-                    onclick={joinWifi}>{wifiBusy === "join" ? "Sending…" : "Connect"}</button
+                    onclick={joinWifi}>{wifiBusy === "join" ? tx.device.sending : tx.device.connect}</button
                   >
                 </div>
               {/if}
             {:else if forgetting}
-              <p class="hint">The board forgets “{b.ssid}” and its key: no computer reaches it on WiFi until it's set up again.</p>
+              <p class="hint">{tx.device.forgetConfirm(b.ssid)}</p>
               <div class="actions">
-                <button class="btn primary" onclick={() => ((forgetting = false), wifiDo("forget", () => monitor.wifiForget()))}>Forget</button>
-                <button class="btn" onclick={() => (forgetting = false)}>Cancel</button>
+                <button class="btn primary" onclick={() => ((forgetting = false), wifiDo("forget", () => monitor.wifiForget()))}>{tx.device.forget}</button>
+                <button class="btn" onclick={() => (forgetting = false)}>{tc.cancel}</button>
               </div>
             {:else}
               <div class="actions">
-                <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => (wifiForm = true)}>Change network</button>
-                <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => (forgetting = true)}>Forget network</button>
+                <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => (wifiForm = true)}>{tx.device.change}</button>
+                <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => (forgetting = true)}>{tx.device.forgetNetwork}</button>
               </div>
             {/if}
           {/if}
@@ -1636,13 +1576,12 @@
 
         {#if transport !== "wifi"}
         <section>
-          <h3>Serial port</h3>
-          <p class="hint">The board is found automatically by its Espressif USB ID. Pin a port only if you have more than one.</p>
+          <h3>{tx.device.serial} <InfoTip text={tx.device.serialTip} /></h3>
           <div class="ports">
             <label class="port" class:checked={monitor.portSetting === null}>
               <input type="radio" name="port" checked={monitor.portSetting === null} onchange={() => monitor.setPort(null)} />
               <span class="radio"></span>
-              <span class="pname">Automatic</span>
+              <span class="pname">{tx.device.automatic}</span>
               <span class="pmeta">{monitor.portSetting === null && monitor.port ? monitor.port : "303a:*"}</span>
             </label>
             {#each ports as p (p.name)}
@@ -1653,7 +1592,7 @@
                 <span class="pmeta">{hex(p.vid)}:{hex(p.pid)}{p.is_board ? " · DualEye" : ""}</span>
               </label>
             {:else}
-              <p class="empty">No USB serial ports found.</p>
+              <p class="empty">{tx.device.noPorts}</p>
             {/each}
           </div>
         </section>
@@ -1661,73 +1600,69 @@
 
         {#if monitor.message && monitor.link !== "connected"}
           <section class="alert" class:error={monitor.link === "offline"}>
-            <h3>{monitor.link === "offline" ? "Connection lost" : "Waiting"}</h3>
+            <h3>{monitor.link === "offline" ? tx.device.lost : tx.device.waiting}</h3>
             <p class="mono">{monitor.message}</p>
             {#if monitor.permissionDenied}
-              <p class="hint">Linux: add yourself to the <code>dialout</code> group, then log out and back in.</p>
+              <p class="hint">{tx.device.linux[0]}<code>dialout</code>{tx.device.linux[1]}</p>
               <pre>sudo usermod -aG dialout "$USER"</pre>
             {/if}
           </section>
         {/if}
 
         <section>
-          <h3>Board</h3>
+          <h3>{tx.device.board} <InfoTip text={tx.device.boardTip} /></h3>
           {#if target}
-            <p class="hint">
-              esptool talks to the ROM bootloader, so this works even on a blank board. Streaming pauses while it runs and the board
-              reboots afterwards.
-            </p>
             <div class="target">
               <span class="chipdot" class:found={monitor.chip?.port === target}></span>
               <span class="pname">{target}</span>
               <button class="btn" disabled={busy || !firmware} onclick={() => identify()}>
-                {monitor.job === "identify" ? "Reading…" : "Identify"}
+                {monitor.job === "identify" ? tx.device.reading : tx.device.identify}
               </button>
             </div>
           {:else if boards.length > 1}
-            <p class="hint">More than one Espressif device is plugged in. Pin the DualEye's port above first.</p>
+            <p class="hint">{tx.device.several}</p>
           {:else}
-            <p class="empty">No ESP32-S3 found on USB. Plug the DualEye in with a data cable.</p>
+            <p class="empty">{tx.device.noBoard}</p>
           {/if}
           {#if monitor.chip && monitor.chip.port === target}
             <dl class="facts chipinfo">
-              <div class="wide"><dt>Chip</dt><dd>{monitor.chip.chip ?? "—"}</dd></div>
-              <div><dt>Flash</dt><dd>{monitor.chip.flash_size ?? "—"}</dd></div>
-              <div><dt>Crystal</dt><dd>{monitor.chip.crystal ?? "—"}</dd></div>
+              <div class="wide"><dt>{tx.device.chip}</dt><dd>{monitor.chip.chip ?? "—"}</dd></div>
+              <div><dt>{tx.device.flash}</dt><dd>{monitor.chip.flash_size ?? "—"}</dd></div>
+              <div><dt>{tx.device.crystal}</dt><dd>{monitor.chip.crystal ?? "—"}</dd></div>
               <div class="wide"><dt>MAC</dt><dd>{monitor.chip.mac ?? "—"}</dd></div>
-              {#if monitor.chip.features}<div class="wide"><dt>Features</dt><dd class="small">{monitor.chip.features}</dd></div>{/if}
+              {#if monitor.chip.features}<div class="wide"><dt>{tx.device.features}</dt><dd class="small">{monitor.chip.features}</dd></div>{/if}
             </dl>
           {/if}
         </section>
 
         <section>
-          <h3>Firmware</h3>
+          <h3>{tx.device.firmware}</h3>
           {#if !firmware}
-            <p class="empty">Checking esptool…</p>
+            <p class="empty">{tx.device.checking}</p>
           {:else}
             <dl class="facts">
-              <div><dt>On the board</dt><dd>{onBoard.text} {#if onBoard.note}<span class="muted sub">{onBoard.note}</span>{/if}</dd></div>
+              <div><dt>{tx.device.onBoard}</dt><dd>{onBoard.text} {#if onBoard.note}<span class="muted sub">{onBoard.note}</span>{/if}</dd></div>
               <div>
-                <dt>In the app</dt>
+                <dt>{tx.device.inApp}</dt>
                 <dd>
                   {firmware.bundled ? `v${firmware.bundled.version}` : "—"}
-                  {#if monitor.update}<span class="muted sub new">newer</span>{:else if firmware.bundled}<span class="muted sub">IDF {firmware.bundled.idf}</span>{/if}
+                  {#if monitor.update}<span class="muted sub new">{tx.device.newer}</span>{:else if firmware.bundled}<span class="muted sub">IDF {firmware.bundled.idf}</span>{/if}
                 </dd>
               </div>
-              <div><dt>Image</dt><dd>merged-binary.bin</dd></div>
-              <div><dt>Size</dt><dd>{kb(firmware.size)} · at 0x0</dd></div>
+              <div><dt>{tx.device.image}</dt><dd>merged-binary.bin</dd></div>
+              <div><dt>{tx.device.size}</dt><dd>{kb(firmware.size)} · {tx.device.at0}</dd></div>
               <div class="wide">
                 <dt>esptool</dt>
                 {#if firmware.esptool}
-                  <dd>v{firmware.esptool.version} <span class="muted">ready</span></dd>
+                  <dd>v{firmware.esptool.version} <span class="muted">{tx.device.esptoolReady}</span></dd>
                 {:else}
-                  <dd class="small">Set up automatically on first use: about 50 MB download, needs internet once.</dd>
+                  <dd class="small">{tx.device.esptoolSetup}</dd>
                 {/if}
               </div>
             </dl>
             {#if monitor.update && monitor.update.changes.length && monitor.job !== "flash"}
               <div class="changes">
-                <p class="hint">Updating to v{monitor.update.to} brings:</p>
+                <p class="hint">{tx.device.brings(monitor.update.to)}</p>
                 {#each monitor.update.changes as release (release.version)}
                   <div class="release">
                     <span class="ver">v{release.version}</span>
@@ -1742,40 +1677,40 @@
               <div class="progress" class:indeterminate={monitor.setup.percent === null}>
                 <span style:width="{monitor.setup.percent ?? 30}%"></span>
               </div>
-              <p class="hint setup">Preparing esptool · {monitor.setup.message}{monitor.setup.percent !== null ? ` ${Math.round(monitor.setup.percent)}%` : ""}</p>
+              <p class="hint setup">{tx.device.preparing(monitor.setup.message)}{monitor.setup.percent !== null ? ` ${Math.round(monitor.setup.percent)}%` : ""}</p>
             {:else if monitor.job === "flash"}
               <div class="progress" role="progressbar" aria-valuenow={Math.round(monitor.flashPercent)} aria-valuemin={0} aria-valuemax={100}>
                 <span style:width="{monitor.flashPercent}%"></span>
               </div>
-              <p class="hint">Writing {Math.round(monitor.flashPercent)}% · don't unplug the board.</p>
+              <p class="hint">{tx.device.writing(Math.round(monitor.flashPercent))}</p>
             {:else if confirming}
-              <p class="hint">This replaces the firmware on {target}. Continue?</p>
+              <p class="hint">{tx.device.confirm(target ?? "")}</p>
               <div class="actions">
-                <button class="btn primary" onclick={flash}>Flash now</button>
-                <button class="btn" onclick={() => (confirming = false)}>Cancel</button>
+                <button class="btn primary" onclick={flash}>{tx.device.flashNow}</button>
+                <button class="btn" onclick={() => (confirming = false)}>{tc.cancel}</button>
               </div>
             {:else}
               <div class="actions">
                 <button class="btn primary" disabled={busy || !target} onclick={() => (confirming = true)}>
-                  {monitor.update ? `Update to v${monitor.update.to}` : "Flash firmware"}
+                  {monitor.update ? tx.device.updateTo(monitor.update.to) : tx.device.flashFirmware}
                 </button>
               </div>
             {/if}
           {/if}
           {#if monitor.jobError}
             <section class="alert error">
-              <h3>esptool failed</h3>
+              <h3>{tx.device.failed}</h3>
               <p class="mono">{monitor.jobError}</p>
               {#if /busy|Errno 16/i.test(monitor.jobError)}
-                <p class="hint">Another program has the port open: a second DualEye window, <code>idf.py monitor</code> or the <code>dualeye</code> CLI. Close it and try again.</p>
+                <p class="hint">{tx.device.busyPort[0]}<code>idf.py monitor</code>{tx.device.busyPort[1]}<code>dualeye</code>{tx.device.busyPort[2]}</p>
               {/if}
             </section>
           {:else if monitor.flashedAt && monitor.job === "idle"}
-            <p class="ok">Flashed and verified. The board is rebooting into the new firmware.</p>
+            <p class="ok">{tx.device.flashed}</p>
           {/if}
           {#if monitor.jobLog.length}
             <details open={busy || !!monitor.jobError}>
-              <summary>esptool output</summary>
+              <summary>{tx.device.output}</summary>
               <div class="console joblog">
                 {#each monitor.jobLog as line, i (i)}<div class="log">{line}</div>{/each}
               </div>
@@ -1783,17 +1718,17 @@
           {/if}
         </section>
       {:else if tab === "diagnostics"}
-        <div class="rots sub" role="tablist" aria-label="Diagnostics">
-          <button class="rot" class:checked={diag === "sensors"} role="tab" aria-selected={diag === "sensors"} onclick={() => (diag = "sensors")}>Sensors</button>
-          <button class="rot" class:checked={diag === "console"} role="tab" aria-selected={diag === "console"} onclick={() => (diag = "console")}>Board console</button>
+        <div class="rots sub" role="tablist" aria-label={tx.diag.aria}>
+          <button class="rot" class:checked={diag === "sensors"} role="tab" aria-selected={diag === "sensors"} onclick={() => (diag = "sensors")}>{tx.diag.sensors}</button>
+          <button class="rot" class:checked={diag === "console"} role="tab" aria-selected={diag === "console"} onclick={() => (diag = "console")}>{tx.diag.console}</button>
         </div>
         {#if diag === "sensors"}
-        <p class="hint">Every raw value the host can read. The board gets the CPU average, the first GPU, the fastest fan of each kind, RAM and VRAM.</p>
+        <h3 class="flat">{tx.diag.allReadings} <InfoTip text={tx.diag.sensorsTip} /></h3>
         {#if isMac && powerHelper}
           <section>
-            <h3>Exact CPU power</h3>
+            <h3>{tx.diag.power}</h3>
             {#if powerHelper.state === "unavailable"}
-              <p class="hint">Only in the installed app (from the .dmg), on macOS 13 or newer.</p>
+              <p class="hint">{tx.diag.powerUnavailable}</p>
             {:else}
               <label class="switch">
                 <input
@@ -1803,19 +1738,12 @@
                   onchange={(e) => togglePowerHelper(e.currentTarget.checked)}
                 />
                 <span class="track"><span class="knob"></span></span>
-                <span class="slabel">Read it with powermetrics, through a system helper</span>
+                <span class="slabel">{tx.diag.powerSwitch} <InfoTip text={tx.diag.powerTip} /></span>
               </label>
-              <p class="hint">
-                macOS 27 hides the CPU's energy counters from apps, so without the helper the CPU power is estimated from the SoC's
-                power minus the GPU's. The helper runs Apple's <code>powermetrics</code> as root while DualEye is open, and only
-                answers apps signed like DualEye.
-              </p>
               {#if powerHelper.state === "needs_approval"}
-                <p class="hint">
-                  Allow <b>DualEye</b> in System Settings → General → Login Items &amp; Extensions, under "Allow in the Background".
-                </p>
+                <p class="hint">{tx.diag.approve}</p>
                 <div class="actions">
-                  <button class="btn" onclick={() => monitor.openPowerHelperSettings()}>Open System Settings</button>
+                  <button class="btn" onclick={() => monitor.openPowerHelperSettings()}>{tx.diag.openSettings}</button>
                 </div>
               {/if}
             {/if}
@@ -1834,15 +1762,15 @@
             </ul>
           </section>
         {:else}
-          <p class="empty">Reading sensors…</p>
+          <p class="empty">{tx.diag.readingSensors}</p>
         {/each}
         <section>
-          <h3>Stream</h3>
+          <h3>{tx.diag.stream}</h3>
           <dl class="facts">
-            <div><dt>Rate</dt><dd>1 Hz</dd></div>
-            <div><dt>Baud</dt><dd>115200</dd></div>
-            <div><dt>Format</dt><dd>JSON line · v1</dd></div>
-            <div><dt>Stale after</dt><dd>3 s</dd></div>
+            <div><dt>{tx.diag.rate}</dt><dd>1 Hz</dd></div>
+            <div><dt>{tx.diag.baud}</dt><dd>115200</dd></div>
+            <div><dt>{tx.diag.format}</dt><dd>{tx.diag.jsonLine}</dd></div>
+            <div><dt>{tx.diag.staleAfter}</dt><dd>3 s</dd></div>
           </dl>
         </section>
         {:else}
@@ -1850,7 +1778,7 @@
           {#each monitor.logs as line, i (i)}
             <div class="log" class:warn={line.startsWith("W ")} class:err={line.startsWith("E ")}>{line}</div>
           {:else}
-            <p class="empty">Nothing logged by the board yet.</p>
+            <p class="empty">{tx.diag.consoleEmpty}</p>
           {/each}
         </div>
         {/if}
@@ -1920,6 +1848,85 @@
     opacity: 1;
   }
 
+  .dhead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 14px 0 18px;
+  }
+  .dhead h2 {
+    flex: 1;
+    margin: 0;
+    font: 650 15px/1 var(--sans);
+    letter-spacing: -0.01em;
+  }
+  .lang {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .lang svg {
+    position: absolute;
+    left: 9px;
+    width: 14px;
+    height: 14px;
+    fill: none;
+    stroke: var(--dim);
+    stroke-width: 1.2;
+    pointer-events: none;
+  }
+  .lang select {
+    height: 28px;
+    max-width: 170px;
+    padding: 0 10px 0 29px;
+    appearance: none;
+    -webkit-appearance: none;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--text);
+    font: 500 12px/1 var(--sans);
+    cursor: pointer;
+    text-overflow: ellipsis;
+  }
+  .lang select:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .dclose {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: none;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .dclose:hover {
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--text);
+  }
+  .dclose svg {
+    width: 14px;
+    height: 14px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+  }
+  /* What a setting still needs before it works. */
+  .hint.need {
+    padding: 8px 10px;
+    border-radius: 9px;
+    border: 1px solid color-mix(in srgb, var(--warm) 35%, transparent);
+    background: color-mix(in srgb, var(--warm) 8%, transparent);
+    color: color-mix(in srgb, var(--warm) 55%, var(--text));
+  }
+  h3.flat {
+    margin: 0;
+  }
   nav {
     position: relative;
     display: grid;
@@ -2912,6 +2919,7 @@
   }
   .actions {
     display: flex;
+    align-items: center;
     gap: 8px;
     margin-top: 12px;
   }

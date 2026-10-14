@@ -9,7 +9,8 @@
   --warm: #f8a639;
   --hot: #f05354;
   --stale: #ffd60a;
-  --sans: "Inter Variable", "Inter", system-ui, sans-serif;
+  /* Inter has no Chinese or Japanese: the system's CJK fonts take over for those. */
+  --sans: "Inter Variable", "Inter", system-ui, "PingFang SC", "Hiragino Sans", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
   --mono: "JetBrains Mono Variable", ui-monospace, monospace;
   color-scheme: dark;
 }

@@ -7,6 +7,7 @@
   import VoiceEyes from "./VoiceEyes.svelte";
   import type { Rotations, Screen } from "./firmware";
   import type { BoardState, VoiceState } from "./monitor.svelte";
+  import { i18n } from "./i18n/index.svelte";
 
   let { cpu, gpu, board, size, cpuGlow, gpuGlow, pixels = false, rotation = { cpu: 0, gpu: 0 }, voice = "idle", eyes = true, onpick, picking = null }: {
     cpu: Screen;
@@ -74,7 +75,7 @@
 
 {#snippet turned(deg: number)}
   {#if deg}
-    <span class="turned" title="The board draws this screen turned {deg}° clockwise">
+    <span class="turned" title={i18n.t.main.board.turned(deg)}>
       <svg viewBox="0 0 16 16" aria-hidden="true">
         <path d="M13 8a5 5 0 1 1-1.6-3.7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
         <path d="M13.6 2.2v3.6H10z" fill="currentColor" />
@@ -108,8 +109,8 @@
           class:picking={picking === "cpu"}
           role={pickable ? "button" : "presentation"}
           tabindex={pickable ? 0 : undefined}
-          aria-label={pickable ? "Left screen: change its face" : undefined}
-          title={pickable ? "Change this screen's face" : undefined}
+          aria-label={pickable ? i18n.t.main.board.leftPick : undefined}
+          title={pickable ? i18n.t.main.board.pickTitle : undefined}
           onclick={(e) => pick("cpu", e)}
           onkeydown={(e) => pickKey("cpu", e)}
           onpointermove={(e) => inspect("cpu", e)}
@@ -118,7 +119,7 @@
           <Eye id="cpu" screen={cpu} {board} size={lcd} />
           {#if lit && eyes}<VoiceEyes eye={0} size={lcd} {voice} />{:else if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
           <div class="glass"></div>
-          {#if pickable}<div class="ring" aria-hidden="true"><span>Change face</span></div>{/if}
+          {#if pickable}<div class="ring" aria-hidden="true"><span>{i18n.t.main.board.pick}</span></div>{/if}
           {#if pixels && loupe?.id === "cpu"}
             <div class="loupe" style:left="{loupe.x}px" style:top="{loupe.y}px" style:--l="{LOUPE}px">
               <div class="lens" style:transform="translate({LOUPE / 2 - loupe.x * ZOOM}px, {LOUPE / 2 - loupe.y * ZOOM}px)">
@@ -183,8 +184,8 @@
           class:picking={picking === "gpu"}
           role={pickable ? "button" : "presentation"}
           tabindex={pickable ? 0 : undefined}
-          aria-label={pickable ? "Right screen: change its face" : undefined}
-          title={pickable ? "Change this screen's face" : undefined}
+          aria-label={pickable ? i18n.t.main.board.rightPick : undefined}
+          title={pickable ? i18n.t.main.board.pickTitle : undefined}
           onclick={(e) => pick("gpu", e)}
           onkeydown={(e) => pickKey("gpu", e)}
           onpointermove={(e) => inspect("gpu", e)}
@@ -193,7 +194,7 @@
           <Eye id="gpu" screen={gpu} {board} size={lcd} />
           {#if lit && eyes}<VoiceEyes eye={1} size={lcd} {voice} />{:else if lit && voice !== "idle"}<div class="voice {voice}" aria-hidden="true"></div>{/if}
           <div class="glass"></div>
-          {#if pickable}<div class="ring" aria-hidden="true"><span>Change face</span></div>{/if}
+          {#if pickable}<div class="ring" aria-hidden="true"><span>{i18n.t.main.board.pick}</span></div>{/if}
           {#if pixels && loupe?.id === "gpu"}
             <div class="loupe" style:left="{loupe.x}px" style:top="{loupe.y}px" style:--l="{LOUPE}px">
               <div class="lens" style:transform="translate({LOUPE / 2 - loupe.x * ZOOM}px, {LOUPE / 2 - loupe.y * ZOOM}px)">
