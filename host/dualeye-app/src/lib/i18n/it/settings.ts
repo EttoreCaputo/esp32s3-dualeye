@@ -461,5 +461,12 @@ const it: typeof en = {
     staleAfter: "Fermo dopo",
     consoleEmpty: "La scheda non ha ancora scritto nulla.",
   },
+  general: {
+    title: "Generale",
+    redo: "Rifai la configurazione",
+    redoTip: "La configurazione guidata: scheda, firmware, voce e Claude Code.",
+    tour: "Rivedi il tour",
+    tourTip: "Un breve giro della finestra principale.",
+  },
 };
 export default it;

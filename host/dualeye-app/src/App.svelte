@@ -10,10 +10,15 @@
   import { i18n } from "./lib/i18n/index.svelte";
   import { settingsData } from "./lib/settings/data.svelte";
   import { settingsNav } from "./lib/settings/nav.svelte";
+  import { onboarding } from "./lib/onboarding/state.svelte";
+  import Tour from "./lib/onboarding/Tour.svelte";
+  import TourInvite from "./lib/onboarding/TourInvite.svelte";
+  import Wizard from "./lib/onboarding/Wizard.svelte";
 
   monitor.start();
   i18n.start();
   settingsData.start();
+  onboarding.start();
   const t = $derived(i18n.t.main);
 
   /** The screen whose faces are open, and where it is. */
@@ -105,7 +110,7 @@
   />
 
   <section class="hero" bind:clientWidth={heroW}>
-    <div class="board" class:off={board === "off"}>
+    <div class="board" class:off={board === "off"} data-tour="board">
       <Board cpu={screen("cpu")} gpu={screen("gpu")} {board} {size} cpuGlow={glow("cpu")} gpuGlow={glow("gpu")} {pixels} {rotation} voice={monitor.voice} eyes={monitor.eyes} onpick={openPicker} picking={picking?.id ?? null} />
     </div>
 
@@ -131,7 +136,7 @@
     </div>
   </section>
 
-  <section class="cards">
+  <section class="cards" data-tour="telemetry">
     <Telemetry id="cpu" lcd={1} metrics={monitor.last?.cpu} fan={fanRpm(monitor.last, "cpu")} samples={monitor.history} />
     <Telemetry id="gpu" lcd={2} metrics={monitor.last?.gpu} fan={fanRpm(monitor.last, "gpu")} samples={monitor.history} />
   </section>
@@ -140,6 +145,9 @@
     <FacePicker id={picking.id} anchor={picking.anchor} onclose={() => (picking = null)} />
   {/if}
   <Drawer />
+  <TourInvite />
+  {#if onboarding.wizardOpen}<Wizard />{/if}
+  {#if onboarding.tour}<Tour steps={onboarding.tour} />{/if}
 </div>
 
 <style>

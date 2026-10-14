@@ -1,12 +1,17 @@
 <script lang="ts">
   import { i18n } from "../i18n/index.svelte";
-  import { monitor, type FirmwareInfo, type PortInfo, type Transport, type WifiInfo, type WifiNetwork, type WifiStatus } from "../monitor.svelte";
+  import { monitor, type FirmwareInfo, type PortInfo, type Transport, type WifiInfo } from "../monitor.svelte";
   import { boldParts } from "../updates";
   import Advanced from "./Advanced.svelte";
+  import InfoTip from "../InfoTip.svelte";
+  import { onboarding } from "../onboarding/state.svelte";
+  import { settingsNav } from "./nav.svelte";
   import Section from "./Section.svelte";
+  import WifiSetup from "./WifiSetup.svelte";
 
   const td = $derived(i18n.t.settings.device);
   const tc = $derived(i18n.t.settings.common);
+  const tg = $derived(i18n.t.settings.general);
 
   let ports = $state<PortInfo[]>([]);
   $effect(() => {
@@ -16,78 +21,26 @@
     return () => clearInterval(id);
   });
 
-  // The connection: USB, WiFi or both, and the board's WiFi.
+  // The connection: USB, WiFi or both. The board's WiFi reads itself, in WifiSetup.
   const TRANSPORTS: Transport[] = ["auto", "usb", "wifi"];
   let wifi = $state<WifiInfo | null>(null);
-  let wifiBusy = $state<"" | "scan" | "join" | "toggle" | "forget" | "pair" | "transport">("");
-  let wifiError = $state("");
-  let wifiForm = $state(false);
-  let networks = $state<WifiNetwork[] | null>(null);
-  let wifiSsid = $state("");
-  let wifiPassword = $state("");
-  let forgetting = $state(false);
-
-  const loadWifi = () =>
-    monitor
-      .wifiInfo()
-      .then((w) => (wifi = w))
-      .catch(() => {});
-  $effect(() => {
-    loadWifi();
-    const id = setInterval(loadWifi, 3000);
-    return () => clearInterval(id);
-  });
-
+  let transportBusy = $state(false);
+  let transportError = $state("");
   const transport = $derived(wifi?.transport ?? "auto");
   const onWifi = $derived(monitor.link === "connected" && !!monitor.port?.startsWith("WiFi"));
-  const pairedHere = $derived(!!wifi?.board && wifi.paired.some((p) => p.id === wifi?.board?.id));
 
-  function wifiLabel(b: WifiStatus): string {
-    const net = b.ssid ? `“${b.ssid}”` : "";
-    const say = td.state;
-    switch (b.state) {
-      case "off":
-        return b.ssid ? say.off(net) : say.notSetUp;
-      case "connecting":
-        return say.joining(net);
-      case "connected":
-        return say.on(net);
-      case "no_network":
-        return say.notFound(net);
-      case "wrong_password":
-        return say.wrongPassword(net);
-      default:
-        return say.reconnecting(net);
-    }
-  }
-
-  /** 0 to 3 bars from the board's signal strength. */
-  const bars = (rssi?: number) => (rssi === undefined ? "" : rssi > -60 ? "▂▄▆" : rssi > -70 ? "▂▄" : "▂");
-
-  async function wifiDo(what: typeof wifiBusy, job: () => Promise<unknown>) {
-    wifiBusy = what;
-    wifiError = "";
+  async function setTransport(key: Transport) {
+    transportBusy = true;
+    transportError = "";
     try {
-      await job();
-      await loadWifi();
+      await monitor.setTransport(key);
+      wifi = await monitor.wifiInfo();
     } catch (e) {
-      wifiError = String(e);
+      transportError = String(e);
     } finally {
-      wifiBusy = "";
+      transportBusy = false;
     }
   }
-  const scanWifi = () =>
-    wifiDo("scan", async () => {
-      networks = await monitor.wifiScan();
-      if (!wifiSsid && networks.length) wifiSsid = networks[0].ssid;
-    });
-  const joinWifi = () =>
-    wifiDo("join", async () => {
-      await monitor.wifiSetup(wifiSsid.trim(), wifiPassword);
-      wifiPassword = "";
-      wifiForm = false;
-      networks = null;
-    });
 
   // The firmware: esptool flashes the one bundled with the app.
   let firmware = $state<FirmwareInfo | null>(null);
@@ -125,12 +78,21 @@
   const kb = (n: number) => `${i18n.number(Math.round(n / 1024))} KB`;
 </script>
 
+<Section anchor="general" title={tg.title}>
+  <div class="actions">
+    <button class="btn" onclick={() => ((settingsNav.open = false), onboarding.redo())}>{tg.redo}</button>
+    <InfoTip text={tg.redoTip} />
+    <button class="btn" onclick={() => ((settingsNav.open = false), onboarding.startTour())}>{tg.tour}</button>
+    <InfoTip text={tg.tourTip} />
+  </div>
+</Section>
+
 <Section anchor="connection" title={td.connection} tip={td.connectionTip}>
   <div class="ports">
     {#each TRANSPORTS as key (key)}
       {@const [name, note] = td.transports[key]}
       <label class="port" class:checked={transport === key}>
-        <input type="radio" name="transport" checked={transport === key} disabled={wifiBusy === "transport"} onchange={() => wifiDo("transport", () => monitor.setTransport(key))} />
+        <input type="radio" name="transport" checked={transport === key} disabled={transportBusy} onchange={() => setTransport(key)} />
         <span class="radio"></span>
         <span class="pname">{name}</span>
         <span class="pmeta">{note}</span>
@@ -143,6 +105,7 @@
   {#if transport !== "usb" && wifi && !wifi.paired.length}
     <p class="hint">{td.noPaired}</p>
   {/if}
+  {#if transportError}<p class="hint error">{transportError}</p>{/if}
 </Section>
 
 {#if monitor.message && monitor.link !== "connected"}
@@ -157,74 +120,7 @@
 {/if}
 
 <Section class="wifi" anchor="wifi" title={td.wifi} tip={td.setupTip}>
-  {#if !wifi}
-    <p class="empty">{td.asking}</p>
-  {:else if !wifi.board}
-    <p class="empty">{wifi.error ?? td.noAnswer}</p>
-  {:else}
-    {@const b = wifi.board}
-    <div class="wstatus">
-      <span class="wdot {b.state}"></span>
-      <span class="pname">{wifiLabel(b)}</span>
-      <span class="pmeta">{b.ip ? `${b.ip} ${bars(b.rssi)}` : b.host}</span>
-    </div>
-    {#if b.ssid}
-      <label class="switch">
-        <input type="checkbox" checked={b.enabled} disabled={!!wifiBusy || onWifi} onchange={(e) => wifiDo("toggle", () => monitor.wifiEnable(e.currentTarget.checked))} />
-        <span class="track"><span class="knob"></span></span>
-        <span class="slabel">{td.wifiSwitch}</span>
-      </label>
-    {/if}
-    {#if b.paired && !pairedHere}
-      <p class="hint">{td.otherComputer}</p>
-      <div class="actions">
-        <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => wifiDo("pair", () => monitor.wifiPair())}>{wifiBusy === "pair" ? td.pairing : td.pair}</button>
-      </div>
-    {/if}
-    {#if wifiForm || !b.ssid}
-      {#if onWifi}
-        <p class="hint error">{td.plugUsb}</p>
-      {:else}
-        <div class="actions">
-          <button class="btn" disabled={!!wifiBusy} onclick={scanWifi}>{wifiBusy === "scan" ? td.looking : networks ? td.lookAgain : td.find}</button>
-          {#if b.ssid}<button class="btn" onclick={() => ((wifiForm = false), (networks = null))}>{tc.cancel}</button>{/if}
-        </div>
-        {#if networks}
-          <div class="ports nets">
-            {#each networks as n (n.ssid)}
-              <label class="port" class:checked={wifiSsid === n.ssid}>
-                <input type="radio" name="ssid" checked={wifiSsid === n.ssid} onchange={() => (wifiSsid = n.ssid)} />
-                <span class="radio"></span>
-                <span class="pname">{n.ssid}</span>
-                <span class="pmeta">{n.secure ? "🔒 " : ""}{bars(n.rssi)}</span>
-              </label>
-            {:else}
-              <p class="empty">{td.noNetwork}</p>
-            {/each}
-          </div>
-        {/if}
-        <div class="tform">
-          <input class="ttext" type="text" maxlength="32" spellcheck="false" placeholder={td.networkName} aria-label={td.networkName} bind:value={wifiSsid} />
-          <input class="ttext" type="password" maxlength="64" autocomplete="off" placeholder={td.password} aria-label={td.passwordAria} bind:value={wifiPassword} />
-          <button class="btn small primary" disabled={!!wifiBusy || !wifiSsid.trim() || (wifiPassword.length > 0 && wifiPassword.length < 8)} onclick={joinWifi}
-            >{wifiBusy === "join" ? td.sending : td.connect}</button
-          >
-        </div>
-      {/if}
-    {:else if forgetting}
-      <p class="hint">{td.forgetConfirm(b.ssid)}</p>
-      <div class="actions">
-        <button class="btn primary" onclick={() => ((forgetting = false), wifiDo("forget", () => monitor.wifiForget()))}>{td.forget}</button>
-        <button class="btn" onclick={() => (forgetting = false)}>{tc.cancel}</button>
-      </div>
-    {:else}
-      <div class="actions">
-        <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => (wifiForm = true)}>{td.change}</button>
-        <button class="btn" disabled={!!wifiBusy || onWifi} onclick={() => (forgetting = true)}>{td.forgetNetwork}</button>
-      </div>
-    {/if}
-  {/if}
-  {#if wifiError}<p class="hint error">{wifiError}</p>{/if}
+  <WifiSetup bind:wifi />
 </Section>
 
 <Section anchor="firmware" title={td.firmware}>

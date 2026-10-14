@@ -37,7 +37,7 @@ Download the app for your system from the [latest release](https://github.com/Et
 | Mac with Intel | `DualEye_<version>_macos-intel.dmg` |
 | Linux | `DualEye_<version>_linux-x64.AppImage`, `.deb` or `.rpm` |
 
-Then plug the board in by USB and open the app. It finds the board on its own, and if the board runs an older firmware it offers to update it. A new board, or one running something else, can be flashed from Settings → **Device**.
+Then plug the board in by USB and open the app. The first time, a guided setup (app 2.0.4 or newer) takes you through it: language, connecting the board, its firmware, the voice assistant and Claude Code, each step skippable; then a short tour of the window. It finds the board on its own, and if the board runs an older firmware it offers to update it. A new board, or one running something else, can be flashed from the setup or from Settings → **Device**. Settings → **Device** → **General** runs the setup or the tour again.
 
 **First launch.** The app isn't code-signed yet, so the system warns the first time:
 

@@ -4,8 +4,8 @@
   import InfoTip from "../InfoTip.svelte";
   import { monitor } from "../monitor.svelte";
   import Advanced from "./Advanced.svelte";
+  import ClaudeConnect from "./ClaudeConnect.svelte";
   import { settingsData } from "./data.svelte";
-  import Glyph from "./Glyph.svelte";
   import NeedRow from "./NeedRow.svelte";
   import { need } from "./requirements";
   import Section from "./Section.svelte";
@@ -29,68 +29,15 @@
   const usage = $derived(monitor.last?.claude);
   const usesClaude = $derived(isClaudeFace(monitor.faces.cpu) || isClaudeFace(monitor.faces.gpu));
 
-  /** The three things "Connect" sets up in Claude Code, and what each has seen since. */
-  const pieces = $derived(
-    link && alerts && mcp
-      ? [
-          {
-            id: "statusline",
-            name: tcl.pieces.statusline,
-            tip: tcl.pieces.statuslineTip,
-            on: link.connected,
-            live: link.last_update_s === null ? tcl.waitingReply : tcl.updated(ago(link.last_update_s)),
-          },
-          {
-            id: "hooks",
-            name: tcl.pieces.hooks,
-            tip: tcl.pieces.hooksTip,
-            on: alerts.hooks.connected,
-            live: alerts.hooks.last_event_s === null ? tcl.waitingReply : tcl.updated(ago(alerts.hooks.last_event_s)),
-          },
-          {
-            id: "mcp",
-            name: tcl.pieces.mcp,
-            tip: tcl.pieces.mcpTip,
-            on: mcp.registered,
-            live: mcp.hub?.clients ? tcl.clientsN(mcp.hub.clients) : tcl.restart,
-          },
-        ]
-      : null,
-  );
-  const allOn = $derived(!!pieces?.every((p) => p.on));
-  const anyOn = $derived(!!pieces?.some((p) => p.on));
+  const anyOn = $derived(!!link?.connected || !!alerts?.hooks.connected || !!mcp?.registered);
 
-  let busy = $state(false);
-  let error = $state("");
-
-  /** Set up (or take out) the status line, the hooks and the MCP server, then read them back. */
-  async function connect(on: boolean) {
-    busy = true;
-    error = "";
-    const errors: string[] = [];
-    const steps: [boolean | undefined, () => Promise<unknown>][] = [
-      [link?.connected, () => monitor.claudeConnect(on)],
-      [alerts?.hooks.connected, () => monitor.claudeHooks(on)],
-      [mcp?.registered, () => monitor.claudeMcp(on)],
-    ];
-    for (const [now, step] of steps) {
-      if (now === on) continue;
-      await step().catch((e) => errors.push(String(e)));
-    }
-    error = errors.join("\n");
-    await settingsData.loadClaude().catch(() => {});
-    busy = false;
-  }
-
-  // The manual way, for those who'd rather paste a command.
-  const shellQuote = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : s.includes("\\") ? `"${s}"` : `'${s.replaceAll("'", `'\\''`)}'`);
-  const mcpCommand = $derived(mcp?.command ? `claude mcp add --scope user dualeye -- ${shellQuote(mcp.command)} ${mcp.args.join(" ")}` : "");
+  // The manual way for Claude Desktop, which "Connect" doesn't set up.
   const mcpDesktop = $derived(mcp?.command ? JSON.stringify({ mcpServers: { dualeye: { command: mcp.command, args: mcp.args } } }, null, 2) : "");
-  let copied = $state<"code" | "desktop" | null>(null);
-  async function copy(which: "code" | "desktop") {
-    await navigator.clipboard.writeText(which === "code" ? mcpCommand : mcpDesktop);
-    copied = which;
-    setTimeout(() => copied === which && (copied = null), 1500);
+  let copied = $state(false);
+  async function copyDesktop() {
+    await navigator.clipboard.writeText(mcpDesktop);
+    copied = true;
+    setTimeout(() => (copied = false), 1500);
   }
 
   let alertsError = $state("");
@@ -117,39 +64,7 @@
 
 <Section class="claude" anchor="connect" title={tcl.code} tip={tcl.codeTip}>
   <p class="hint">{usage ? tcl.usage(formatTokens(usage.tok), formatTokens(usage.today)) : usesClaude ? tcl.noUsage : tcl.why}</p>
-  {#if pieces}
-    {#if anyOn}
-      <div class="statuscard">
-        {#each pieces as p (p.id)}
-          <div class="srow">
-            <Glyph state={p.on ? "ok" : "off"} />
-            <span class="sname">{p.name}&nbsp;<InfoTip text={p.tip} /></span>
-            <span class="sstate">{p.on ? p.live : tcl.notConnected}</span>
-          </div>
-        {/each}
-      </div>
-    {/if}
-    <div class="actions">
-      {#if !allOn}
-        <button class="btn primary" disabled={busy} onclick={() => connect(true)}>{busy ? tcl.connecting : anyOn ? tcl.repair : tcl.connect}</button>
-      {/if}
-      {#if anyOn}
-        <button class="btn" disabled={busy} onclick={() => connect(false)}>{tc.disconnect}</button>
-      {/if}
-      <InfoTip label={tcl.manualLabel}>
-        {tcl.connectTip(link?.settings_path ?? "~/.claude/settings.json", mcp?.config_path ?? "~/.claude.json")}
-        {#if mcpCommand}<br /><br />{tcl.manual}<br /><code>{mcpCommand}</code>{/if}
-      </InfoTip>
-      {#if mcpCommand}
-        <button class="btn small" onclick={() => copy("code")}>{copied === "code" ? tc.copied : tcl.copyCommand}</button>
-      {/if}
-    </div>
-  {:else}
-    <p class="empty">{tc.loading}</p>
-  {/if}
-  {#if error}<p class="hint error">{error}</p>{/if}
-  {#if mcp?.hub_error}<p class="hint error">{tcl.hubError(mcp.hub_error)}</p>{/if}
-  {#if link?.connected && link.last_update_s === null}<p class="hint">{tcl.limitsLater}</p>{/if}
+  <ClaudeConnect />
 </Section>
 
 {#if alerts}
@@ -216,7 +131,7 @@
       <p class="hint">{tcl.forDesktop[0]}<code>claude_desktop_config.json</code>{tcl.forDesktop[1]}</p>
       <div class="snippet">
         <pre>{mcpDesktop}</pre>
-        <button class="btn" onclick={() => copy("desktop")}>{copied === "desktop" ? tc.copied : tc.copy}</button>
+        <button class="btn" onclick={copyDesktop}>{copied ? tc.copied : tc.copy}</button>
       </div>
     {/if}
   </div>

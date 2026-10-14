@@ -55,6 +55,7 @@ export const ENTRIES: Entry[] = [
   { tab: "claude", id: "alert-language", label: (t) => t.claude.languageAria },
   { tab: "claude", id: "mcp", advanced: true, label: (t) => t.claude.mcp, tip: (t) => `${t.claude.mcpTip} Claude Desktop` },
 
+  { tab: "device", id: "general", label: (t) => `${t.general.redo} · ${t.general.tour}`, tip: (t) => `${t.general.title} ${t.general.redoTip} ${t.general.tourTip}` },
   { tab: "device", id: "connection", label: (t) => t.device.connection, tip: (t) => `${t.device.connectionTip} USB WiFi` },
   { tab: "device", id: "wifi", label: (t) => t.device.wifi, tip: (t) => t.device.setupTip },
   { tab: "device", id: "firmware", label: (t) => t.device.firmware, tip: (t) => `${t.device.flashFirmware} ${t.device.flashNow}` },

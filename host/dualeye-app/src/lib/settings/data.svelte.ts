@@ -8,7 +8,9 @@ import {
   type ClaudeAlertsInfo,
   type ClaudeLink,
   type McpInfo,
+  type ModelInfo,
   type QuipsInfo,
+  type TtsEngine,
   type VoiceInfo,
   type VoiceSettings,
 } from "../monitor.svelte";
@@ -66,6 +68,70 @@ class SettingsData {
   async setAlerts(change: Partial<ClaudeAlertSettings>) {
     if (!this.alerts) return;
     this.alerts = await monitor.setClaudeAlerts({ ...this.alerts.settings, ...change });
+  }
+
+  /** Download a model; a cancel isn't an error. */
+  async download(id: string) {
+    try {
+      await monitor.downloadModel(id);
+    } catch (e) {
+      if (!/cancel/i.test(String(e))) throw e;
+    } finally {
+      await this.loadVoice().catch(() => {});
+    }
+  }
+
+  async installEngine(engine: TtsEngine) {
+    try {
+      await monitor.installEngine(engine);
+    } finally {
+      await this.loadVoice().catch(() => {});
+    }
+  }
+
+  /** The downloads "use the recommended models" needs, with their size: the models, a voice for `lang`, and its engine. */
+  localPlan(lang: string): { models: ModelInfo[]; engine: TtsEngine | null } {
+    const v = this.voice;
+    if (!v) return { models: [], engine: null };
+    const r = v.recommendation;
+    const voiceId = v.settings.voices[lang];
+    const voice = v.models.find((m) => m.id === voiceId && !m.provider) ?? v.models.find((m) => m.kind === "voice" && !m.provider && m.language === lang);
+    const ids = [r.whisper, r.llm, voice?.id];
+    const models = v.models.filter((m) => ids.includes(m.id) && !m.installed);
+    const engine = voice?.engine && !v[voice.engine] ? voice.engine : null;
+    return { models, engine };
+  }
+
+  /** The assistant on this computer: the recommended models, downloaded where missing, and a voice for `lang`. */
+  async useLocal(lang: string) {
+    const v = this.voice;
+    if (!v) return;
+    const r = v.recommendation;
+    const voiceId = v.settings.voices[lang];
+    const voice = v.models.find((m) => m.id === voiceId && !m.provider) ?? v.models.find((m) => m.kind === "voice" && !m.provider && m.language === lang);
+    const { models, engine } = this.localPlan(lang);
+    await this.setVoice({
+      enabled: true,
+      speak: true,
+      model: r.whisper,
+      llm: !!r.llm,
+      ...(r.llm ? { llm_model: r.llm } : {}),
+      ...(voice ? { voices: { ...v.settings.voices, [lang]: voice.id } } : {}),
+    });
+    for (const m of models) await this.download(m.id);
+    if (engine) await this.installEngine(engine);
+  }
+
+  /** The assistant on `provider`'s models, where it has them: hearing, understanding, a voice per language. */
+  async useOnline(provider: string) {
+    const v = this.voice;
+    if (!v) return;
+    const of = (kind: ModelInfo["kind"], lang?: string) => v.models.find((m) => m.provider === provider && m.kind === kind && (!lang || m.language === lang || m.language === null))?.id;
+    const voices = { ...v.settings.voices };
+    for (const lang of Object.keys(voices)) voices[lang] = of("voice", lang) ?? voices[lang];
+    const hearing = of("whisper");
+    const llm = of("llm");
+    await this.setVoice({ enabled: true, speak: true, voices, ...(hearing ? { model: hearing } : {}), ...(llm ? { llm: true, llm_model: llm } : {}) });
   }
 
   /** Save a key (null forgets it): the backend checks it right away. */

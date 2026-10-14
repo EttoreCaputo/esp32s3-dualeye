@@ -442,4 +442,11 @@ export default {
     staleAfter: "Stale after",
     consoleEmpty: "Nothing logged by the board yet.",
   },
+  general: {
+    title: "General",
+    redo: "Run setup again",
+    redoTip: "The guided setup: board, firmware, voice and Claude Code.",
+    tour: "Take the tour",
+    tourTip: "A short walk around the main window.",
+  },
 };

@@ -106,6 +106,17 @@ struct Settings {
     /// The app's language (`en`, `it`); `None` follows the system's.
     #[serde(default)]
     ui_language: Option<String>,
+    /// The first-run setup is behind us: done, skipped, or not needed. A
+    /// settings file from before it existed is someone upgrading, who skips it.
+    #[serde(default = "yes")]
+    onboarding_done: bool,
+    /// The last version of the tour seen (or declined): a newer one offers its new steps.
+    #[serde(default)]
+    tour_version: u32,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -1184,6 +1195,34 @@ fn set_ui_language(app: AppHandle, state: State<AppState>, language: Option<Stri
     Ok(())
 }
 
+/// Where the first-run setup and the tour stand.
+#[derive(Serialize)]
+struct Onboarding {
+    done: bool,
+    tour_version: u32,
+}
+
+#[tauri::command]
+fn onboarding(state: State<AppState>) -> Onboarding {
+    let settings = state.settings.lock().unwrap();
+    Onboarding { done: settings.onboarding_done, tour_version: settings.tour_version }
+}
+
+/// Mark the setup done (or to do again), and the tour's version seen.
+#[tauri::command]
+fn set_onboarding(state: State<AppState>, done: Option<bool>, tour_version: Option<u32>) {
+    {
+        let mut settings = state.settings.lock().unwrap();
+        if let Some(done) = done {
+            settings.onboarding_done = done;
+        }
+        if let Some(v) = tour_version {
+            settings.tour_version = v;
+        }
+    }
+    state.save_settings();
+}
+
 /// Where the pointer is, as the board gets it: the mirror's eyes look there too.
 #[tauri::command]
 fn pointer_gaze() -> Option<(f32, f32)> {
@@ -1653,7 +1692,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_transport, wifi_info, wifi_scan, wifi_setup, wifi_enable, wifi_forget, wifi_pair, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, claude_mcp, voice_info, set_voice, set_api_key, check_api_key, open_key_page, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, quips_info, set_quips, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, ui_language, set_ui_language, pointer_gaze, music_cover, music_control])
+        .invoke_handler(tauri::generate_handler![status, list_ports, set_port, set_transport, wifi_info, wifi_scan, wifi_setup, wifi_enable, wifi_forget, wifi_pair, set_faces, set_rotation, readings, firmware_info, identify_board, flash_board, claude_link, claude_connect, claude_disconnect, claude_alerts_info, set_claude_alerts, claude_hooks, test_claude_alert, mcp_info, claude_mcp, voice_info, set_voice, set_api_key, check_api_key, open_key_page, elevenlabs_voices, download_model, cancel_download, delete_model, install_engine, board_voice, set_board_volume, set_board_eyes, set_board_idle_eyes, set_board_wake_sound, set_board_pet, board_pet, quips_info, set_quips, play_board_scene, play_board_sound, test_voice, send_image, clear_image, image_preview, power_helper_status, set_power_helper, open_power_helper_settings, timers_info, timer_tool, set_timer_screen, dismiss_timers, set_follow_pointer, ui_language, set_ui_language, onboarding, set_onboarding, pointer_gaze, music_cover, music_control])
         .build(tauri::generate_context!())
         .expect("failed to build the DualEye app")
         .run(|app, event| match event {
@@ -1695,5 +1734,14 @@ mod tests {
         let info = firmware::image_info(FIRMWARE).expect("app descriptor in build/merged-binary.bin");
         let want = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../version.txt")).trim();
         assert_eq!(info.version, want, "rebuild the firmware: idf.py build merge-bin");
+    }
+
+    /// A new install gets the setup; someone upgrading (a settings file without the field) doesn't.
+    #[test]
+    fn only_new_installs_get_the_setup() {
+        assert!(!Settings::default().onboarding_done);
+        let old: Settings = serde_json::from_str(r#"{"port":null}"#).unwrap();
+        assert!(old.onboarding_done);
+        assert_eq!(old.tour_version, 0);
     }
 }

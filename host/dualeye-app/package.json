@@ -1,6 +1,6 @@
 {
   "name": "dualeye-app",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "Desktop app for the ESP32-S3 DualEye",
   "author": "Ettore Caputo <ettore.caputo27@gmail.com>",
   "license": "MIT",

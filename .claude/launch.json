@@ -4,8 +4,27 @@
     {
       "name": "dualeye-ui",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "host/dualeye-app", "run", "dev"],
+      "runtimeArgs": [
+        "--prefix",
+        "host/dualeye-app",
+        "run",
+        "dev"
+      ],
       "port": 1420
+    },
+    {
+      "name": "dualeye-ui-2",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "host/dualeye-app",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "1431"
+      ],
+      "port": 1431
     }
   ]
 }

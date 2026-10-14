@@ -67,12 +67,12 @@
 
   <div class="actions">
     {#if pet}
-      <button class="mood" style:--c={pet.color} onclick={onPet} title={t.bar.mood}>
+      <button class="mood" style:--c={pet.color} onclick={onPet} title={t.bar.mood} data-tour="pet">
         <span class="face" aria-hidden="true"><i></i><i></i></span>
         <span>{pet.away ? t.bar.resting : pet.label}</span>
       </button>
     {/if}
-    <button class="icon settings" onclick={onSettings} aria-label={settingsTitle} title={settingsTitle}>
+    <button class="icon settings" data-tour="settings" onclick={onSettings} aria-label={settingsTitle} title={settingsTitle}>
       <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
       {#if needsLevel}<span class="ndot {needsLevel}"></span>{/if}
     </button>

@@ -4,6 +4,7 @@
   import { tick } from "svelte";
   import { i18n, LANGUAGES, type Lang } from "./i18n/index.svelte";
   import "./settings/settings.css";
+  import { onboarding } from "./onboarding/state.svelte";
   import ClaudeTab from "./settings/ClaudeTab.svelte";
   import DeviceTab from "./settings/DeviceTab.svelte";
   import DiagnosticsTab from "./settings/DiagnosticsTab.svelte";
@@ -25,6 +26,8 @@
   const tabIssues = $derived(Object.fromEntries(TABS.map((t) => [t, issues(t)])));
 
   function onKey(e: KeyboardEvent) {
+    // The setup and the tour are on top: the keys are theirs.
+    if (onboarding.wizardOpen || onboarding.tour) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
       e.preventDefault();
       nav.search();
